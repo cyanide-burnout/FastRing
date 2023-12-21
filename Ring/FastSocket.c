@@ -227,6 +227,8 @@ static void HandleOutboundFlush(struct FastRing* ring, void* closure)
     SubmitFastRingDescriptorRange(batch->tail, batch->head);
     ReleaseOutboundBatch(&socket->outbound, batch);
   }
+
+  ReleaseSocketInstance(socket);
 }
 
 struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBufferProvider* provider, struct FastBufferPool* inbound, struct FastBufferPool* outbound, int handle, struct msghdr* message, int flags, int mode, uint32_t limit, HandleFastSocketEvent function, void* closure)
@@ -386,6 +388,7 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
 
   if (~socket->outbound.condition & POLLIN)
   {
+    socket->count ++;
     socket->outbound.condition |= POLLIN;
     SetFastRingFlushHandler(socket->ring, HandleOutboundFlush, socket);
   }
