@@ -41,7 +41,7 @@ Make a call to a handler running FastRing from any other thread
 
 ## FastSocket
 
-Generiv socket I/O through FastRing
+Generic socket I/O through FastRing
 
 ## FastBIO / SSLSocket
 
