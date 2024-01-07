@@ -135,8 +135,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     if (socket->inbound.descriptor == NULL)
     {
-      // Socket is in closing state,
-      // Receiving descriptor is released
+      // Socket could be closed by CallHandlerFunction()
+      // at the same time with receive last packet
       return 0;
     }
 
