@@ -133,6 +133,13 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (~completion->flags & IORING_CQE_F_MORE)
   {
+    if (socket->inbound.descriptor == NULL)
+    {
+      // Socket is closing state,
+      // Receiving descriptor is released
+      return 0;
+    }
+
     // Eventually URing may release submission
     // Also this handles -ENOBUFS and -ECANCELED
     SubmitFastRingDescriptor(socket->inbound.descriptor, 0);
