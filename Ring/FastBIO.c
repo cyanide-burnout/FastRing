@@ -96,7 +96,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (~completion->flags & IORING_CQE_F_MORE)
   {
-    if (socket->inbound.descriptor == NULL)
+    if (engine->inbound.descriptor == NULL)
     {
       // Socket could be closed by CallHandlerFunction()
       // at the same time with receive last packet
