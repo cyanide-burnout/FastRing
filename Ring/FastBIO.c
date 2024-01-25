@@ -122,6 +122,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   {
     // Error may occure during sending
     CallHandlerFunction(engine, POLLERR, -completion->res);
+    goto Continue;
   }
 
   if (( descriptor->data.number == 0) &&
@@ -134,6 +135,8 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     engine->outbound.condition &= ~POLLOUT;
     CallHandlerFunction(engine, POLLOUT, 0);
   }
+
+  Continue:
 
   if ((completion == NULL) ||
       (~completion->flags & IORING_CQE_F_MORE))

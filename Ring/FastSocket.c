@@ -92,7 +92,6 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
       (completion->res == -ECANCELED) &&     // Probably ui_uring has a bug:
       (socket->inbound.descriptor == NULL))  // When at least one of descriptors associated to the ring buffer group canceled, whole group will be canceled
   {
-    socket->inbound.descriptor = NULL;
     CallHandlerFunction(socket, POLLHUP, 0);
     ReleaseSocketInstance(socket);
     return 0;
@@ -160,6 +159,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   {
     // Error may occure during sending or connecting
     CallHandlerFunction(socket, POLLERR, -completion->res);
+    goto Continue;
   }
 
   if ((descriptor->submission.opcode == IORING_OP_POLL_ADD) &&
@@ -168,6 +168,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   {
     // Error may occure during connecting (POLLERR, POLLHUP)
     CallHandlerFunction(socket, POLLERR, EPIPE);
+    goto Continue;
   }
 
   if (( descriptor->data.number == 0) &&
@@ -192,6 +193,8 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
       CallHandlerFunction(socket, POLLOUT, 0);
     }
   }
+
+  Continue:
 
   if ((completion == NULL) ||
       (~completion->flags & IORING_CQE_F_MORE))
