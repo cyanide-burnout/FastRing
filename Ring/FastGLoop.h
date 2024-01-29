@@ -21,7 +21,7 @@ struct FastGLoopPoolData
   int result;                             // Result value
   uint32_t cycle;                         // Current cycle number
   uint32_t current;                       // Actual requested flags
-  uint32_t previous;                      // Last requestd flags
+  uint32_t previous;                      // Last requested flags
   struct FastRingDescriptor* descriptor;  // Pending descriptor
 
 };

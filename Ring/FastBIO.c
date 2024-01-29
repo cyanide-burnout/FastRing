@@ -52,8 +52,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   engine = (struct FastBIO*)descriptor->closure;
 
   if ((completion == NULL) ||
-      (completion->res == -ECANCELED) &&     // Probably ui_uring has a bug:
-      (engine->inbound.descriptor == NULL))  // When at least one of descriptors associated to the ring buffer group canceled, whole group will be canceled
+      (completion->res == -ECANCELED) &&
+      (engine->inbound.descriptor == NULL))
   {
     engine->inbound.descriptor = NULL;
     CallHandlerFunction(engine, POLLHUP, 0);

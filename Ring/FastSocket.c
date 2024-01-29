@@ -89,9 +89,10 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   socket = (struct FastSocket*)descriptor->closure;
 
   if ((completion == NULL) ||
-      (completion->res == -ECANCELED) &&     // Probably ui_uring has a bug:
-      (socket->inbound.descriptor == NULL))  // When at least one of descriptors associated to the ring buffer group canceled, whole group will be canceled
+      (completion->res == -ECANCELED) &&
+      (socket->inbound.descriptor == NULL))
   {
+    socket->inbound.descriptor = NULL;
     CallHandlerFunction(socket, POLLHUP, 0);
     ReleaseSocketInstance(socket);
     return 0;
