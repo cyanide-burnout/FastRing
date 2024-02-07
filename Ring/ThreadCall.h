@@ -10,6 +10,10 @@ extern "C"
 {
 #endif
 
+#if (IO_URING_VERSION_MAJOR > 2) || (IO_URING_VERSION_MAJOR == 2) && (IO_URING_VERSION_MINOR >= 6)
+#define TC_FEATURE_RING_FUTEX  1
+#endif
+
 #define TC_ROLE_CALLER      (1 << 0)
 #define TC_ROLE_HANDLER     (1 << 30)
 
@@ -28,17 +32,18 @@ struct ThreadCallState
 
 struct ThreadCall
 {
+  struct FastRing* ring;
+  struct FastRingDescriptor* descriptor;
+
   HandleThreadCallFunction function;
   void* closure;
 
+  int index;
+  int handle;
+  int feature;
   ATOMIC(int) weight;
   ATOMIC(uint32_t) tag;
   ATOMIC(struct ThreadCallState*) stack;
-
-  int index;
-  int handle;
-  struct FastRing* ring;
-  struct FastRingDescriptor* descriptor;
 };
 
 struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunction function, void* closure);

@@ -373,12 +373,19 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
     return -ENOMEM;
   }
 
-  descriptor->function              = HandleOutboundCompletion;
-  descriptor->closure               = socket;
-  descriptor->state                 = RING_DESC_STATE_PENDING;     // It' required to set these values manually
-  descriptor->submission.user_data  = (uintptr_t)descriptor;       // due to use SubmitFastRingDescriptorRange()
-  descriptor->submission.ioprio    |= IORING_RECVSEND_POLL_FIRST * (descriptor->submission.opcode != IORING_OP_POLL_ADD);
-  descriptor->data.number           = 0;
+  if (descriptor->submission.opcode != IORING_OP_URING_CMD)
+  {
+    descriptor->function = HandleOutboundCompletion;
+    descriptor->closure  = socket;
+  }
+
+  descriptor->data.number          = 0;
+  descriptor->state                = RING_DESC_STATE_PENDING;  // It' required to set these values manually
+  descriptor->submission.user_data = (uintptr_t)descriptor;    // due to use SubmitFastRingDescriptorRange()
+
+  descriptor->submission.ioprio |= IORING_RECVSEND_POLL_FIRST *
+    ((descriptor->submission.opcode != IORING_OP_POLL_ADD) &&
+     (descriptor->submission.opcode != IORING_OP_URING_CMD));
 
   batch->count  ++;
   socket->count ++;
