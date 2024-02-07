@@ -226,7 +226,11 @@ int IsFastRingThread(struct FastRing* ring);
 
 // Timeout
 
+#ifndef IORING_TIMEOUT_MULTISHOT
 #define TIMEOUT_FLAG_REPEAT  (1ULL << 32)
+#else
+#define TIMEOUT_FLAG_REPEAT  IORING_TIMEOUT_MULTISHOT
+#endif
 
 struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleTimeoutFunction function, void* closure);
 struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleTimeoutFunction function, void* closure);

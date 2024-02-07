@@ -600,6 +600,15 @@ static int HandleTimeoutEvent(struct FastRingDescriptor* descriptor, struct io_u
   {
     descriptor->data.timeout.function(descriptor);
 
+#ifdef IORING_TIMEOUT_MULTISHOT
+    if (likely((completion->flags & IORING_CQE_F_MORE) &&
+               ((descriptor->data.timeout.flags & TIMEOUT_FLAG_REPEAT) != 0ULL)))
+    {
+      // Since liburing 2.5 there are embedded capabilities for multi-shot timeouts
+      return 1;
+    }
+#endif
+
     if (likely((descriptor->data.timeout.flags & TIMEOUT_FLAG_REPEAT) != 0ULL))
     {
       io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);

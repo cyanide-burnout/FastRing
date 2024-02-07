@@ -1,46 +1,90 @@
 #define _GNU_SOURCE
 #include <malloc.h>
+#include <alloca.h>
 #include <unistd.h>
+#include <string.h>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
 
 #include "ThreadCall.h"
 
-struct ThreadCallState
+#define ALIGNMENT  64
+
+#define AllocateThreadCallState()  GetThreadCallState(alloca(sizeof(struct ThreadCallState) + 2 * ALIGNMENT))
+
+static inline int __attribute__((always_inline)) futex(_Atomic uint32_t* address1, int operation, uint32_t value1, const struct timespec* timeout, uint32_t* address2, uint32_t value2)
 {
-  va_list arguments;
-  atomic_int result;
-};
+  return syscall(SYS_futex, address1, operation, value1, timeout, address2, value2);
+}
+
+static inline struct ThreadCallState* __attribute__((always_inline)) GetThreadCallState(void* pointer)
+{
+  memset(pointer, 0, sizeof(struct ThreadCallState) + 2 * ALIGNMENT);
+  return (struct ThreadCallState*)(((uintptr_t)pointer + ALIGNMENT) & (~(ALIGNMENT - 1)));
+}
+
+static inline struct ThreadCallState* __attribute__((always_inline)) PeekThreadCallState(struct ThreadCall* call)
+{
+  void* _Atomic pointer;
+  struct ThreadCallState* state;
+
+  do pointer = atomic_load_explicit(&call->stack, memory_order_acquire);
+  while ((state = REMOVE_ABA_TAG(struct ThreadCallState, pointer, ALIGNMENT)) &&
+         (!atomic_compare_exchange_weak_explicit(&call->stack, &pointer, state->next, memory_order_relaxed, memory_order_relaxed)));
+
+  return state;
+}
+
+static inline void __attribute__((always_inline)) SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallState* state)
+{
+  uint32_t tag;
+  uint64_t value;
+
+  tag = atomic_fetch_add_explicit(&call->tag, 1, memory_order_relaxed);
+
+  do state->next = atomic_load_explicit(&call->stack, memory_order_relaxed);
+  while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, tag, 0, ALIGNMENT), memory_order_release, memory_order_relaxed));
+
+  if (state->next == NULL)
+  {
+    value = 1;
+    write(call->handle, &value, sizeof(uint64_t));
+  }
+}
+
+static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallState* state)
+{
+  if (atomic_load_explicit(&call->weight, memory_order_relaxed) > TC_ROLE_HANDLER)
+  {
+    if (IsFastRingThread(call->ring) > 0)
+    {
+      call->function(call->closure, state->arguments);
+      atomic_store_explicit(&state->result, TC_RESULT_CALLED, memory_order_release);
+      return;
+    }
+
+    SubmitThreadCallState(call, state);
+    futex(&state->result, FUTEX_WAIT_PRIVATE, TC_RESULT_PREPARED, NULL, NULL, 0);
+  }
+}
 
 static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct ThreadCall* call;
   struct ThreadCallState* state;
 
-  call  = (struct ThreadCall*)descriptor->closure;
-  state = (struct ThreadCallState*)descriptor->data.number;
+  call = (struct ThreadCall*)descriptor->closure;
 
-  call->function(call->closure, state->arguments);
-  atomic_store_explicit(&state->result, TC_RESULT_CALLED, memory_order_release);
-
-  sem_post(&call->semaphore);
-  SubmitFastRingDescriptor(descriptor, 0);
-  return 1;
-}
-
-static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallState* state)
-{
-  uint64_t value;
-
-  pthread_mutex_lock(&call->lock);
-
-  if (atomic_load_explicit(&call->weight, memory_order_relaxed) > TC_ROLE_HANDLER)
+  while (state = PeekThreadCallState(call))
   {
-    value = (uint64_t)state;
-    write(call->handle, &value, sizeof(uint64_t));
-    sem_wait(&call->semaphore);
+    call->function(call->closure, state->arguments);
+    atomic_store_explicit(&state->result, TC_RESULT_CALLED, memory_order_release);
+    futex(&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
   }
 
-  pthread_mutex_unlock(&call->lock);
+  SubmitFastRingDescriptor(descriptor, 0);
+  return 1;
 }
 
 struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunction function, void* closure)
@@ -57,8 +101,6 @@ struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunct
   call->index      = AddFastRingRegisteredFile(ring, call->handle);
   call->ring       = ring;
 
-  sem_init(&call->semaphore, 0, 0);
-  pthread_mutex_init(&call->lock, NULL);
   atomic_init(&call->weight, TC_ROLE_HANDLER);
 
   if ((call->index >= 0) &&
@@ -88,12 +130,17 @@ struct ThreadCall* HoldThreadCall(struct ThreadCall* call)
 void ReleaseThreadCall(struct ThreadCall* call, int role)
 {
   int weight;
+  struct ThreadCallState* state;
 
   weight = atomic_fetch_sub_explicit(&call->weight, role, memory_order_relaxed) - role;
 
   if (role == TC_ROLE_HANDLER)
   {
-    sem_post(&call->semaphore);
+    while (state = PeekThreadCallState(call))
+    {
+      atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_release);
+      futex(&state->result, FUTEX_WAKE, 1, NULL, NULL, 0);
+    }
 
     if (call->descriptor != NULL)
     {
@@ -106,8 +153,6 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
 
   if (weight == 0)
   {
-    pthread_mutex_destroy(&call->lock);
-    sem_destroy(&call->semaphore);
     close(call->handle);
     free(call);
   }
@@ -120,25 +165,29 @@ void FreeThreadCall(void* closure)
 
 int MakeVariadicThreadCall(struct ThreadCall* call, va_list arguments)
 {
-  struct ThreadCallState state;
+  struct ThreadCallState* state;
 
-  va_copy(state.arguments, arguments);
-  atomic_store_explicit(&state.result, TC_RESULT_CANCELED, memory_order_release);
-  MakeInternalThreadCall(call, &state);
+  state = AllocateThreadCallState();
 
-  return atomic_load_explicit(&state.result, memory_order_acquire);
+  va_copy(state->arguments, arguments);
+  atomic_thread_fence(memory_order_release);
+  MakeInternalThreadCall(call, state);
+
+  return atomic_load_explicit(&state->result, memory_order_acquire);
 }
 
 int MakeThreadCall(struct ThreadCall* call, ...)
 {
-  struct ThreadCallState state;
+  struct ThreadCallState* state;
 
-  va_start(state.arguments, call);
-  atomic_store_explicit(&state.result, TC_RESULT_CANCELED, memory_order_release);
-  MakeInternalThreadCall(call, &state);
-  va_end(state.arguments);
+  state = AllocateThreadCallState();
 
-  return atomic_load_explicit(&state.result, memory_order_acquire);
+  va_start(state->arguments, call);
+  atomic_thread_fence(memory_order_release);
+  MakeInternalThreadCall(call, state);
+  va_end(state->arguments);
+
+  return atomic_load_explicit(&state->result, memory_order_acquire);
 }
 
 int GetThreadCallWeight(struct ThreadCall* call)
