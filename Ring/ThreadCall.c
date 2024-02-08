@@ -192,7 +192,7 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
     while (state = PeekThreadCallState(call))
     {
       atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_relaxed);
-      futex((uint32_t*)&state->result, FUTEX_WAKE, 1, NULL, NULL, 0);
+      futex((uint32_t*)&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
     }
 
     if (call->descriptor != NULL)
