@@ -94,6 +94,8 @@ static int HandleThreadWakeup(struct FastRingDescriptor* descriptor, struct io_u
     // IORING_OP_FUTEX_WAKE is not completed, call futex() synchronously instead
     futex((uint32_t*)descriptor->submission.addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
   }
+
+  return 0;
 }
 
 static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
