@@ -86,6 +86,16 @@ static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct 
   }
 }
 
+static int HandleThreadWakeup(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+{
+  if ((reason == RING_REASON_RELEASED) ||
+      (reason == RING_REASON_INCOMPLETE))
+  {
+    // IORING_OP_FUTEX_WAKE is not completed, call futex() synchronously instead
+    futex((uint32_t*)descriptor->submission.addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+  }
+}
+
 static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct ThreadCall* call;
@@ -100,7 +110,7 @@ static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uri
 
 #ifdef TC_FEATURE_RING_FUTEX
     if ((call->feature == TC_FEATURE_RING_FUTEX) &&
-        (descriptor = AllocateFastRingDescriptor(call->ring, NULL, NULL)))
+        (descriptor = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, NULL)))
     {
       io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
       SubmitFastRingDescriptor(descriptor, 0);
