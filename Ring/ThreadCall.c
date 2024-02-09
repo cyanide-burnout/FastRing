@@ -88,8 +88,7 @@ static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct 
 
 static int HandleThreadWakeup(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  if ((reason == RING_REASON_RELEASED) ||
-      (reason == RING_REASON_INCOMPLETE))
+  if (reason != RING_REASON_COMPLETE)
   {
     // IORING_OP_FUTEX_WAKE is not completed, call futex() synchronously instead
     futex((uint32_t*)descriptor->submission.addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
