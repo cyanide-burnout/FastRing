@@ -13,9 +13,10 @@
 
 // Supplementary
 
-static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* engine)
+static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* engine, int reason)
 {
   struct FastBuffer* buffer;
+  struct FastRingDescriptor* descriptor;
 
   engine->count --;
 
@@ -27,7 +28,19 @@ static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* 
       ReleaseFastBuffer(buffer);
     }
 
-    close(engine->handle);
+    if (((reason == RING_REASON_COMPLETE) ||
+         (reason == RING_REASON_INCOMPLETE)) &&
+        (descriptor = AllocateFastRingDescriptor(engine->ring, NULL, NULL)))
+    {
+      io_uring_prep_close(&descriptor->submission, engine->handle);
+      SubmitFastRingDescriptor(descriptor, 0);
+    }
+    else
+    {
+      // FastRing might be under destruction, close socket synchronously
+      close(engine->handle);
+    }
+
     free(engine);
   }
 }
@@ -57,7 +70,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     engine->inbound.descriptor = NULL;
     CallHandlerFunction(engine, POLLHUP, 0);
-    ReleaseEngine(engine);
+    ReleaseEngine(engine, reason);
     return 0;
   }
 
@@ -65,9 +78,15 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
       (completion->res != -ENOBUFS) &&
       (completion->res != -ECANCELED))
   {
+    if (completion->flags & IORING_CQE_F_MORE)
+    {
+      CallHandlerFunction(engine, POLLERR, -completion->res);
+      return 1;
+    }
+
     engine->inbound.descriptor = NULL;
     CallHandlerFunction(engine, POLLHUP, -completion->res);
-    ReleaseEngine(engine);
+    ReleaseEngine(engine, reason);
     return 0;
   }
 
@@ -142,7 +161,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
       (~completion->flags & IORING_CQE_F_MORE))
   {
     ReleaseFastBuffer(FAST_BUFFER(descriptor->submission.addr));
-    ReleaseEngine(engine);
+    ReleaseEngine(engine, reason);
     return 0;
   }
 
@@ -156,7 +175,7 @@ static int HandleTouchCompletion(struct FastRingDescriptor* descriptor, struct i
   engine = (struct FastBIO*)descriptor->closure;
 
   CallHandlerFunction(engine, 0, 0);
-  ReleaseEngine(engine);
+  ReleaseEngine(engine, reason);
 
   return 0;
 }
@@ -361,7 +380,7 @@ static int HandleBIODestroy(BIO* handle)
   engine->function           = NULL;
   engine->inbound.descriptor = NULL;
 
-  ReleaseEngine(engine);
+  ReleaseEngine(engine, -1);
 
   BIO_set_shutdown(handle, BIO_CLOSE);
   return 1;

@@ -5,10 +5,11 @@
 #include <unistd.h>
 #include <errno.h>
 
-static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct FastSocket* socket)
+static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct FastSocket* socket, int reason)
 {
-  struct FastSocketOutboundBatch* batch;
   struct FastBuffer* buffer;
+  struct FastRingDescriptor* descriptor;
+  struct FastSocketOutboundBatch* batch;
 
   socket->count --;
 
@@ -26,7 +27,19 @@ static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct F
       free(batch);
     }
 
-    close(socket->handle);
+    if (((reason == RING_REASON_COMPLETE) ||
+         (reason == RING_REASON_INCOMPLETE)) &&
+        (descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL)))
+    {
+      io_uring_prep_close(&descriptor->submission, socket->handle);
+      SubmitFastRingDescriptor(descriptor, 0);
+    }
+    else
+    {
+      // FastRing might be under destruction, close socket synchronously
+      close(socket->handle);
+    }
+
     free(socket);
   }
 }
@@ -94,7 +107,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     socket->inbound.descriptor = NULL;
     CallHandlerFunction(socket, POLLHUP, 0);
-    ReleaseSocketInstance(socket);
+    ReleaseSocketInstance(socket, reason);
     return 0;
   }
 
@@ -102,9 +115,15 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
       (completion->res != -ENOBUFS) &&
       (completion->res != -ECANCELED))
   {
+    if (completion->flags & IORING_CQE_F_MORE)
+    {
+      CallHandlerFunction(socket, POLLERR, -completion->res);
+      return 1;
+    }
+
     socket->inbound.descriptor = NULL;
     CallHandlerFunction(socket, POLLHUP, -completion->res);
-    ReleaseSocketInstance(socket);
+    ReleaseSocketInstance(socket, reason);
     return 0;
   }
 
@@ -213,7 +232,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
         break;
     }
 
-    ReleaseSocketInstance(socket);
+    ReleaseSocketInstance(socket, reason);
     return 0;
   }
 
@@ -239,7 +258,7 @@ static void HandleOutboundFlush(struct FastRing* ring, void* closure)
     ReleaseOutboundBatch(&socket->outbound, batch);
   }
 
-  ReleaseSocketInstance(socket);
+  ReleaseSocketInstance(socket, 0);
 }
 
 struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBufferProvider* provider, struct FastBufferPool* inbound, struct FastBufferPool* outbound, int handle, struct msghdr* message, int flags, int mode, uint32_t limit, HandleFastSocketEvent function, void* closure)
@@ -562,6 +581,6 @@ void ReleaseFastSocket(struct FastSocket* socket)
     socket->function           = NULL;
     socket->inbound.descriptor = NULL;
 
-    ReleaseSocketInstance(socket);
+    ReleaseSocketInstance(socket, -1);
   }
 }
