@@ -5,42 +5,48 @@
 #include <unistd.h>
 #include <errno.h>
 
-static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct FastSocket* socket, int reason)
+static void FreeSocketInstance(struct FastSocket* socket, int reason)
 {
   struct FastBuffer* buffer;
   struct FastRingDescriptor* descriptor;
   struct FastSocketOutboundBatch* batch;
 
+  while (buffer = socket->inbound.tail)
+  {
+    socket->inbound.tail = buffer->next;
+    ReleaseFastBuffer(buffer);
+  }
+
+  while (batch = socket->outbound.stack)
+  {
+    socket->outbound.stack = batch->next;
+    free(batch);
+  }
+
+  if (((reason == RING_REASON_COMPLETE) ||
+       (reason == RING_REASON_INCOMPLETE)) &&
+      (descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL)))
+  {
+    io_uring_prep_close(&descriptor->submission, socket->handle);
+    SubmitFastRingDescriptor(descriptor, 0);
+  }
+  else
+  {
+    // FastRing might be under destruction, close socket synchronously
+    close(socket->handle);
+  }
+
+  free(socket);
+}
+
+static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct FastSocket* socket, int reason)
+{
   socket->count --;
 
   if (socket->count == 0)
   {
-    while (buffer = socket->inbound.tail)
-    {
-      socket->inbound.tail = buffer->next;
-      ReleaseFastBuffer(buffer);
-    }
-
-    while (batch = socket->outbound.stack)
-    {
-      socket->outbound.stack = batch->next;
-      free(batch);
-    }
-
-    if (((reason == RING_REASON_COMPLETE) ||
-         (reason == RING_REASON_INCOMPLETE)) &&
-        (descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL)))
-    {
-      io_uring_prep_close(&descriptor->submission, socket->handle);
-      SubmitFastRingDescriptor(descriptor, 0);
-    }
-    else
-    {
-      // FastRing might be under destruction, close socket synchronously
-      close(socket->handle);
-    }
-
-    free(socket);
+    // Prevent inlining less used code
+    FreeSocketInstance(socket, reason);
   }
 }
 

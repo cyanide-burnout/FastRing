@@ -13,35 +13,41 @@
 
 // Supplementary
 
-static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* engine, int reason)
+static void FreeEngine(struct FastBIO* engine, int reason)
 {
   struct FastBuffer* buffer;
   struct FastRingDescriptor* descriptor;
 
+  while (buffer = engine->inbound.tail)
+  {
+    engine->inbound.tail = buffer->next;
+    ReleaseFastBuffer(buffer);
+  }
+
+  if (((reason == RING_REASON_COMPLETE) ||
+       (reason == RING_REASON_INCOMPLETE)) &&
+      (descriptor = AllocateFastRingDescriptor(engine->ring, NULL, NULL)))
+  {
+    io_uring_prep_close(&descriptor->submission, engine->handle);
+    SubmitFastRingDescriptor(descriptor, 0);
+  }
+  else
+  {
+    // FastRing might be under destruction, close socket synchronously
+    close(engine->handle);
+  }
+
+  free(engine);
+}
+
+static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* engine, int reason)
+{
   engine->count --;
 
   if (engine->count == 0)
   {
-    while (buffer = engine->inbound.tail)
-    {
-      engine->inbound.tail = buffer->next;
-      ReleaseFastBuffer(buffer);
-    }
-
-    if (((reason == RING_REASON_COMPLETE) ||
-         (reason == RING_REASON_INCOMPLETE)) &&
-        (descriptor = AllocateFastRingDescriptor(engine->ring, NULL, NULL)))
-    {
-      io_uring_prep_close(&descriptor->submission, engine->handle);
-      SubmitFastRingDescriptor(descriptor, 0);
-    }
-    else
-    {
-      // FastRing might be under destruction, close socket synchronously
-      close(engine->handle);
-    }
-
-    free(engine);
+    // Prevent inlining less used code
+    FreeEngine(engine, reason);
   }
 }
 
