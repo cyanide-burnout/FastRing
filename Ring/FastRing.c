@@ -152,7 +152,6 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
   struct __kernel_timespec timeout;
   struct FastRingFlushEntry* flusher;
   struct FastRingDescriptor* previous;
-  struct FastRingDescriptor* following;
   struct FastRingDescriptor* descriptor;
 
   if (unlikely((ring == NULL) ||
@@ -234,10 +233,7 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
     if (likely(completion->user_data < RING_DATA_UNDEFINED))
     {
       descriptor = (struct FastRingDescriptor*)(completion->user_data & RING_DATA_ADDRESS_MASK);
-      following  = descriptor->next;
       previous   = descriptor->previous;
-
-      CAST(uintptr_t, following) *= (completion->res < 0) && (descriptor->submission.flags & IOSQE_IO_LINK);
 
       HandleCompletedRingDescriptor(ring, descriptor, completion, RING_REASON_COMPLETE);
 
@@ -246,16 +242,6 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
         descriptor = previous;
         previous   = descriptor->previous;
         HandleCompletedRingDescriptor(ring, descriptor, NULL, RING_REASON_COMPLETE);
-      }
-
-      while (following != NULL)
-      {
-        descriptor = following;
-        following  = descriptor->next;
-
-        CAST(uintptr_t, following) *= !!(descriptor->submission.flags & IOSQE_IO_LINK);
-
-        HandleCompletedRingDescriptor(ring, descriptor, NULL, RING_REASON_INCOMPLETE);
       }
     }
 
