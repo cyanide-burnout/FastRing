@@ -70,9 +70,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   engine = (struct FastBIO*)descriptor->closure;
 
-  if ((completion == NULL) ||
-      (completion->res == -ECANCELED) &&
-      (engine->inbound.descriptor == NULL))
+  if (completion == NULL)
   {
     engine->inbound.descriptor = NULL;
     CallHandlerFunction(engine, POLLHUP, 0);
@@ -80,18 +78,27 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
-  if ((completion->res <= 0) &&
-      (completion->res != -ENOBUFS) &&
-      (completion->res != -ECANCELED))
+  if ((completion->res  == -ECANCELED) &&
+      (engine->function == NULL))
+  {
+    engine->inbound.descriptor = NULL;
+    ReleaseEngine(engine, reason);
+    return 0;
+  }
+
+  if ((completion->res  <= 0) &&
+      (completion->res  != -ENOBUFS) &&
+      (completion->res  != -ECANCELED) &&
+      (engine->function != NULL))
   {
     if (completion->flags & IORING_CQE_F_MORE)
     {
-      CallHandlerFunction(engine, POLLERR, -completion->res);
+      engine->function(engine, POLLERR, -completion->res);
       return 1;
     }
 
     engine->inbound.descriptor = NULL;
-    CallHandlerFunction(engine, POLLHUP, -completion->res);
+    engine->function(engine, POLLHUP, -completion->res);
     ReleaseEngine(engine, reason);
     return 0;
   }
@@ -121,10 +128,12 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (~completion->flags & IORING_CQE_F_MORE)
   {
-    if (engine->inbound.descriptor == NULL)
+    if (engine->function == NULL)
     {
-      // Socket could be closed by CallHandlerFunction()
+      // Socket could be closed by function()
       // at the same time with receive last packet
+      engine->inbound.descriptor = NULL;
+      ReleaseEngine(engine, reason);
       return 0;
     }
 
@@ -382,9 +391,8 @@ static int HandleBIODestroy(BIO* handle)
     SubmitFastRingDescriptor(descriptor, 0);
   }
 
-  engine->closure            = NULL;
-  engine->function           = NULL;
-  engine->inbound.descriptor = NULL;
+  engine->closure  = NULL;
+  engine->function = NULL;
 
   ReleaseEngine(engine, -1);
 

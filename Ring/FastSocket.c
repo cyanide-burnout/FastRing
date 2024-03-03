@@ -107,28 +107,34 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   socket = (struct FastSocket*)descriptor->closure;
 
-  if ((completion == NULL) ||
-      (completion->res == -ECANCELED) &&
-      (socket->inbound.descriptor == NULL))
+  if (completion == NULL)
   {
-    socket->inbound.descriptor = NULL;
     CallHandlerFunction(socket, POLLHUP, 0);
     ReleaseSocketInstance(socket, reason);
     return 0;
   }
 
-  if ((completion->res < 0) &&
-      (completion->res != -ENOBUFS) &&
-      (completion->res != -ECANCELED))
+  if ((completion->res  == -ECANCELED) &&
+      (socket->function == NULL))
+  {
+    socket->inbound.descriptor = NULL;
+    ReleaseSocketInstance(socket, reason);
+    return 0;
+  }
+
+  if ((completion->res  <  0) &&
+      (completion->res  != -ENOBUFS) &&
+      (completion->res  != -ECANCELED) &&
+      (socket->function != NULL))
   {
     if (completion->flags & IORING_CQE_F_MORE)
     {
-      CallHandlerFunction(socket, POLLERR, -completion->res);
+      socket->function(socket, POLLERR, -completion->res);
       return 1;
     }
 
     socket->inbound.descriptor = NULL;
-    CallHandlerFunction(socket, POLLHUP, -completion->res);
+    socket->function(socket, POLLHUP, -completion->res);
     ReleaseSocketInstance(socket, reason);
     return 0;
   }
@@ -158,10 +164,12 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (~completion->flags & IORING_CQE_F_MORE)
   {
-    if (socket->inbound.descriptor == NULL)
+    if (socket->function == NULL)
     {
-      // Socket could be closed by CallHandlerFunction()
+      // Socket could be closed by function()
       // at the same time with receive last packet
+      socket->inbound.descriptor = NULL;
+      ReleaseSocketInstance(socket, reason);
       return 0;
     }
 
@@ -583,9 +591,8 @@ void ReleaseFastSocket(struct FastSocket* socket)
       SubmitFastRingDescriptor(descriptor, 0);
     }
 
-    socket->closure            = NULL;
-    socket->function           = NULL;
-    socket->inbound.descriptor = NULL;
+    socket->closure  = NULL;
+    socket->function = NULL;
 
     ReleaseSocketInstance(socket, -1);
   }
