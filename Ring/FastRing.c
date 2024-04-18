@@ -290,13 +290,13 @@ struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, Han
   if (likely((ring != NULL) &&
              (descriptor = AllocateRingDescriptor(ring))))
   {
-    descriptor->ring       = ring;
-    descriptor->state      = RING_DESC_STATE_ALLOCATED;
-    descriptor->length     = sizeof(struct io_uring_sqe);
-    descriptor->closure    = closure;
-    descriptor->function   = function;
-    descriptor->previous   = NULL;
-    descriptor->linked     = 0;
+    descriptor->ring     = ring;
+    descriptor->state    = RING_DESC_STATE_ALLOCATED;
+    descriptor->length   = sizeof(struct io_uring_sqe);
+    descriptor->closure  = closure;
+    descriptor->function = function;
+    descriptor->previous = NULL;
+    descriptor->linked   = 0;
 
     io_uring_prep_nop(&descriptor->submission);
     atomic_store_explicit(&descriptor->next, NULL, memory_order_relaxed);

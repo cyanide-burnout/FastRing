@@ -11,6 +11,9 @@
 // https://github.com/jiangwenyuan/nuster/blob/master/src/ssl_sock.c
 // https://famellee.wordpress.com/2013/02/20/use-openssl-with-io-completion-port-and-certificate-signing/
 
+#define likely(condition)     __builtin_expect(!!(condition), 1)
+#define unlikely(condition)   __builtin_expect(!!(condition), 0)
+
 // Supplementary
 
 static void FreeEngine(struct FastBIO* engine, int reason)
@@ -44,7 +47,7 @@ static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* 
 {
   engine->count --;
 
-  if (engine->count == 0)
+  if (unlikely(engine->count == 0))
   {
     // Prevent inlining less used code
     FreeEngine(engine, reason);
@@ -53,7 +56,7 @@ static void inline __attribute__((always_inline)) ReleaseEngine(struct FastBIO* 
 
 static void inline __attribute__((always_inline)) CallHandlerFunction(struct FastBIO* engine, int event, int parameter)
 {
-  if (engine->function != NULL)
+  if (likely(engine->function != NULL))
   {
     // Handler can be freed earlier then engine
     engine->function(engine, event, parameter);
@@ -70,7 +73,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   engine = (struct FastBIO*)descriptor->closure;
 
-  if (completion == NULL)
+  if (unlikely(completion == NULL))
   {
     engine->inbound.descriptor = NULL;
     CallHandlerFunction(engine, POLLHUP, 0);
@@ -78,33 +81,38 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
-  if ((completion->res  == -ECANCELED) &&
-      (engine->function == NULL))
+  if (unlikely(completion->res < 0))
   {
-    engine->inbound.descriptor = NULL;
-    ReleaseEngine(engine, reason);
-    return 0;
-  }
+    // It seems like there are cases when buffers are supplied when failure
+    AdvanceFastRingBuffer(engine->inbound.provider, completion, NULL, NULL);
 
-  if ((completion->res  <= 0) &&
-      (completion->res  != -ENOBUFS) &&
-      (completion->res  != -ECANCELED) &&
-      (engine->function != NULL))
-  {
-    if (completion->flags & IORING_CQE_F_MORE)
+    if ((completion->res  == -ECANCELED) &&
+        (engine->function == NULL))
     {
-      engine->function(engine, POLLERR, -completion->res);
-      return 1;
+      engine->inbound.descriptor = NULL;
+      ReleaseEngine(engine, reason);
+      return 0;
     }
 
-    engine->inbound.descriptor = NULL;
-    engine->function(engine, POLLHUP, -completion->res);
-    ReleaseEngine(engine, reason);
-    return 0;
+    if ((completion->res  != -ENOBUFS) &&
+        (completion->res  != -ECANCELED) &&
+        (engine->function != NULL))
+    {
+      if (completion->flags & IORING_CQE_F_MORE)
+      {
+        engine->function(engine, POLLERR, -completion->res);
+        return 1;
+      }
+
+      engine->inbound.descriptor = NULL;
+      engine->function(engine, POLLHUP, -completion->res);
+      ReleaseEngine(engine, reason);
+      return 0;
+    }
   }
 
-  if ((completion->res > 0) &&
-      (data = GetFastRingBuffer(engine->inbound.provider, completion)))
+  if (likely((completion->res >= 0) &&
+             (data = GetFastRingBuffer(engine->inbound.provider, completion))))
   {
     AdvanceFastRingBuffer(engine->inbound.provider, completion, AllocateRingFastBuffer, engine->inbound.pool);
 
@@ -126,7 +134,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     CallHandlerFunction(engine, POLLIN, engine->inbound.length);
   }
 
-  if (~completion->flags & IORING_CQE_F_MORE)
+  if (unlikely(~completion->flags & IORING_CQE_F_MORE))
   {
     if (engine->function == NULL)
     {
@@ -151,8 +159,8 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
   engine = (struct FastBIO*)descriptor->closure;
 
-  if ((completion != NULL) &&
-      (completion->res < 0))
+  if (unlikely((completion != NULL) &&
+               (completion->res < 0)))
   {
     // Error may occure during sending
     CallHandlerFunction(engine, POLLERR, -completion->res);
@@ -223,7 +231,7 @@ static int HandleBIORead(BIO* handle, char* data, int length)
 
   engine = (struct FastBIO*)BIO_get_data(handle);
 
-  if (engine->inbound.length == 0)
+  if (unlikely(engine->inbound.length == 0))
   {
     BIO_set_retry_read(handle);
     return -1;
@@ -281,7 +289,7 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
     }
   }
 
-  if (engine->outbound.condition & POLLOUT)
+  if (unlikely(engine->outbound.condition & POLLOUT))
   {
     BIO_set_retry_write(handle);
     return -1;
@@ -292,8 +300,8 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
   buffer     = AllocateFastBuffer(engine->outbound.pool, size, 0);
   descriptor = AllocateFastRingDescriptor(engine->ring, HandleOutboundCompletion, engine);
 
-  if ((buffer     == NULL) ||
-      (descriptor == NULL))
+  if (unlikely((buffer     == NULL) ||
+               (descriptor == NULL)))
   {
     ReleaseFastBuffer(buffer);
     ReleaseFastRingDescriptor(descriptor);
@@ -311,7 +319,7 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
   engine->outbound.count ++;
   engine->count          ++;
 
-  if (engine->outbound.tail == NULL)
+  if (unlikely(engine->outbound.tail == NULL))
   {
     engine->outbound.tail = descriptor;
     engine->outbound.head = descriptor;

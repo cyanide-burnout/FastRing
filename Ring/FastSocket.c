@@ -5,6 +5,9 @@
 #include <unistd.h>
 #include <errno.h>
 
+#define likely(condition)     __builtin_expect(!!(condition), 1)
+#define unlikely(condition)   __builtin_expect(!!(condition), 0)
+
 static void FreeSocketInstance(struct FastSocket* socket, int reason)
 {
   struct FastBuffer* buffer;
@@ -43,7 +46,7 @@ static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct F
 {
   socket->count --;
 
-  if (socket->count == 0)
+  if (unlikely(socket->count == 0))
   {
     // Prevent inlining less used code
     FreeSocketInstance(socket, reason);
@@ -52,7 +55,7 @@ static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct F
 
 static inline void __attribute__((always_inline)) CallHandlerFunction(struct FastSocket* socket, int event, int parameter)
 {
-  if (socket->function != NULL)
+  if (likely(socket->function != NULL))
   {
     // Handler can be freed earlier then socket
     socket->function(socket, event, parameter);
@@ -72,14 +75,14 @@ static inline struct FastSocketOutboundBatch* __attribute__((always_inline)) All
 {
   struct FastSocketOutboundBatch* batch;
 
-  if (batch = queue->stack)
+  if (likely(batch = queue->stack))
   {
     queue->stack = batch->next;
     batch->next  = NULL;
     goto AppendQueue;
   }
 
-  if (batch = (struct FastSocketOutboundBatch*)calloc(1, sizeof(struct FastSocketOutboundBatch)))
+  if (likely(batch = (struct FastSocketOutboundBatch*)calloc(1, sizeof(struct FastSocketOutboundBatch))))
   {
     AppendQueue:
 
@@ -107,40 +110,45 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   socket = (struct FastSocket*)descriptor->closure;
 
-  if (completion == NULL)
+  if (unlikely(completion == NULL))
   {
     CallHandlerFunction(socket, POLLHUP, 0);
     ReleaseSocketInstance(socket, reason);
     return 0;
   }
 
-  if ((completion->res  == -ECANCELED) &&
-      (socket->function == NULL))
+  if (unlikely(completion->res < 0))
   {
-    socket->inbound.descriptor = NULL;
-    ReleaseSocketInstance(socket, reason);
-    return 0;
-  }
+    // It seems like there are cases when buffers are supplied when failure
+    AdvanceFastRingBuffer(socket->inbound.provider, completion, NULL, NULL);
 
-  if ((completion->res  <  0) &&
-      (completion->res  != -ENOBUFS) &&
-      (completion->res  != -ECANCELED) &&
-      (socket->function != NULL))
-  {
-    if (completion->flags & IORING_CQE_F_MORE)
+    if ((completion->res  == -ECANCELED) &&
+        (socket->function == NULL))
     {
-      socket->function(socket, POLLERR, -completion->res);
-      return 1;
+      socket->inbound.descriptor = NULL;
+      ReleaseSocketInstance(socket, reason);
+      return 0;
     }
 
-    socket->inbound.descriptor = NULL;
-    socket->function(socket, POLLHUP, -completion->res);
-    ReleaseSocketInstance(socket, reason);
-    return 0;
+    if ((completion->res  != -ENOBUFS) &&
+        (completion->res  != -ECANCELED) &&
+        (socket->function != NULL))
+    {
+      if (completion->flags & IORING_CQE_F_MORE)
+      {
+        socket->function(socket, POLLERR, -completion->res);
+        return 1;
+      }
+
+      socket->inbound.descriptor = NULL;
+      socket->function(socket, POLLHUP, -completion->res);
+      ReleaseSocketInstance(socket, reason);
+      return 0;
+    }
   }
 
-  if ((completion->res >= 0) &&
-      (data = GetFastRingBuffer(socket->inbound.provider, completion)))
+  if (likely((completion->res >= 0) &&
+             (data = GetFastRingBuffer(socket->inbound.provider, completion))))
   {
     AdvanceFastRingBuffer(socket->inbound.provider, completion, AllocateRingFastBuffer, socket->inbound.pool);
 
@@ -162,7 +170,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     CallHandlerFunction(socket, POLLIN, socket->inbound.length);
   }
 
-  if (~completion->flags & IORING_CQE_F_MORE)
+  if (unlikely(~completion->flags & IORING_CQE_F_MORE))
   {
     if (socket->function == NULL)
     {
@@ -188,17 +196,17 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
   socket = (struct FastSocket*)descriptor->closure;
 
-  if ((completion != NULL) &&
-      (completion->res < 0))
+  if (unlikely((completion != NULL) &&
+               (completion->res < 0)))
   {
     // Error may occure during sending or connecting
     CallHandlerFunction(socket, POLLERR, -completion->res);
     goto Continue;
   }
 
-  if ((descriptor->submission.opcode == IORING_OP_POLL_ADD) &&
-      (completion != NULL) &&
-      (completion->res >= POLLERR))
+  if (unlikely((descriptor->submission.opcode == IORING_OP_POLL_ADD) &&
+               (completion != NULL) &&
+               (completion->res >= POLLERR)))
   {
     // Error may occure during connecting (POLLERR, POLLHUP)
     CallHandlerFunction(socket, POLLERR, EPIPE);
@@ -261,7 +269,7 @@ static void HandleOutboundFlush(struct FastRing* ring, void* closure)
   socket                      = (struct FastSocket*)closure;
   socket->outbound.condition &= ~POLLIN;
 
-  if (~socket->outbound.condition & POLLOUT)
+  if (likely(~socket->outbound.condition & POLLOUT))
   {
     batch                                  = socket->outbound.tail;
     socket->outbound.tail                  = batch->next;
@@ -339,17 +347,17 @@ ssize_t ReceiveFastSocketData(struct FastSocket* socket, void* data, size_t size
   ssize_t count;
   ssize_t rest;
 
-  if ((socket == NULL) ||
-      (data   == NULL) ||
-      (size   == 0))
+  if (unlikely((socket == NULL) ||
+               (data   == NULL) ||
+               (size   == 0)))
   {
     // Cannot proceed a call
     return -EINVAL;
   }
 
-  if ((socket->inbound.length == 0) ||
-      (socket->inbound.length < size) &&
-      (flags & MSG_WAITALL))
+  if (unlikely((socket->inbound.length == 0) ||
+               (socket->inbound.length < size) &&
+               (flags & MSG_WAITALL)))
   {
     // Insufficient length
     return 0;
@@ -388,25 +396,25 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
 {
   struct FastSocketOutboundBatch* batch;
 
-  if ((socket     == NULL) ||
-      (descriptor == NULL) ||
-      (buffer     == NULL) &&
-      (descriptor->submission.opcode != IORING_OP_POLL_ADD))
+  if (unlikely((socket     == NULL) ||
+               (descriptor == NULL) ||
+               (buffer     == NULL) &&
+               (descriptor->submission.opcode != IORING_OP_POLL_ADD)))
   {
     // Cannot proceed a call
     return -EINVAL;
   }
 
-  if (!((batch = socket->outbound.head) &&
-        (batch->count < socket->outbound.limit) ||
-        (batch = AllocateOutboundBatch(&socket->outbound))))
+  if (unlikely(!((batch = socket->outbound.head) &&
+                 (batch->count < socket->outbound.limit) ||
+                 (batch = AllocateOutboundBatch(&socket->outbound)))))
   {
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
     return -ENOMEM;
   }
 
-  if (descriptor->submission.opcode != IORING_OP_URING_CMD)
+  if (likely(descriptor->submission.opcode != IORING_OP_URING_CMD))
   {
     descriptor->function = HandleOutboundCompletion;
     descriptor->closure  = socket;
@@ -437,7 +445,7 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
     batch->head                    = descriptor;
   }
 
-  if (~socket->outbound.condition & POLLIN)
+  if (unlikely(~socket->outbound.condition & POLLIN))
   {
     socket->count ++;
     socket->outbound.condition |= POLLIN;
@@ -456,8 +464,8 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
   uint8_t* pointer;
   size_t length;
 
-  if ((socket  == NULL) ||
-      (message == NULL))
+  if (unlikely((socket  == NULL) ||
+               (message == NULL)))
   {
     // Cannot proceed a call
     return -EINVAL;
@@ -476,8 +484,8 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
   descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL);
   buffer     = AllocateFastBuffer(socket->outbound.pool, length + message->msg_controllen, 0);
 
-  if ((descriptor == NULL) ||
-      (buffer     == NULL))
+  if (unlikely((descriptor == NULL) ||
+               (buffer     == NULL)))
   {
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
@@ -537,7 +545,7 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   struct FastRingDescriptor* descriptor;
   struct FastBuffer* buffer;
 
-  if (socket == NULL)
+  if (unlikely(socket == NULL))
   {
     // Cannot proceed a call
     return -EINVAL;
@@ -546,8 +554,8 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL);
   buffer     = AllocateFastBuffer(socket->outbound.pool, size, 0);
 
-  if ((descriptor == NULL) ||
-      (buffer     == NULL))
+  if (unlikely((descriptor == NULL) ||
+               (buffer     == NULL)))
   {
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
