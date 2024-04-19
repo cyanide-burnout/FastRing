@@ -119,7 +119,6 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (unlikely(completion->res < 0))
   {
-    // It seems like there are cases when buffers are supplied when failure
     AdvanceFastRingBuffer(socket->inbound.provider, completion, NULL, NULL);
 
     if ((completion->res  == -ECANCELED) &&

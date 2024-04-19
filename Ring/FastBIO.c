@@ -81,9 +81,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
-  if (unlikely(completion->res < 0))
+  if (unlikely(completion->res <= 0))
   {
-    // It seems like there are cases when buffers are supplied when failure
     AdvanceFastRingBuffer(engine->inbound.provider, completion, NULL, NULL);
 
     if ((completion->res  == -ECANCELED) &&
@@ -94,7 +93,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
       return 0;
     }
 
-    if ((completion->res  != -ENOBUFS) &&
+    if ((completion->res  != 0) &&
+        (completion->res  != -ENOBUFS) &&
         (completion->res  != -ECANCELED) &&
         (engine->function != NULL))
     {
@@ -111,7 +111,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     }
   }
 
-  if (likely((completion->res >= 0) &&
+  if (likely((completion->res > 0) &&
              (data = GetFastRingBuffer(engine->inbound.provider, completion))))
   {
     AdvanceFastRingBuffer(engine->inbound.provider, completion, AllocateRingFastBuffer, engine->inbound.pool);

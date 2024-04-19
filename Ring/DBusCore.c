@@ -67,8 +67,7 @@ static void UpdateWatchHandler(struct Context* context, int handle, DBusWatch** 
   {
     flags  = dbus_watch_get_flags(list[0]);
     mask  |=
-      RING_EVENT_ERROR | RING_EVENT_HANGUP |
-      (((flags & DBUS_WATCH_READABLE) > 0) * RING_EVENT_READ) |
+      RING_EVENT_ERROR | RING_EVENT_HANGUP | RING_EVENT_READ |
       (((flags & DBUS_WATCH_WRITABLE) > 0) * RING_EVENT_WRITE);
   }
 
@@ -76,8 +75,7 @@ static void UpdateWatchHandler(struct Context* context, int handle, DBusWatch** 
   {
     flags  = dbus_watch_get_flags(list[1]);
     mask  |=
-      RING_EVENT_ERROR | RING_EVENT_HANGUP |
-      (((flags & DBUS_WATCH_READABLE) > 0) * RING_EVENT_READ) |
+      RING_EVENT_ERROR | RING_EVENT_HANGUP | RING_EVENT_READ |
       (((flags & DBUS_WATCH_WRITABLE) > 0) * RING_EVENT_WRITE);
   }
 
