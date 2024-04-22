@@ -121,15 +121,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     AdvanceFastRingBuffer(socket->inbound.provider, completion, NULL, NULL);
 
-    if ((completion->res  == -ECANCELED) &&
-        (socket->function == NULL))
-    {
-      socket->inbound.descriptor = NULL;
-      ReleaseSocketInstance(socket, reason);
-      return 0;
-    }
-
-    if ((completion->res  != -ENOBUFS) &&
+    if ((completion->res  != -ENOBUFS)   &&
         (completion->res  != -ECANCELED) &&
         (socket->function != NULL))
     {
@@ -171,7 +163,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (unlikely(~completion->flags & IORING_CQE_F_MORE))
   {
-    if (socket->function == NULL)
+    if ((socket->function           == NULL) ||
+        (socket->inbound.descriptor == NULL))
     {
       // Socket could be closed by function()
       // at the same time with receive last packet
