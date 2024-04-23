@@ -123,6 +123,12 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
 {
   __builtin_prefetch(&descriptor->state);
 
+  if (unlikely(ring->trace.function != NULL))
+  {
+    // Trace is only for debug purposes, less probable it is in use
+    ring->trace.function(descriptor, completion, reason, ring->trace.closure);
+  }
+
   if (likely(((descriptor->function == NULL) &&
               (( completion == NULL) ||
                (~completion->flags & IORING_CQE_F_MORE)) ||
