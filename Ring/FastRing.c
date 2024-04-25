@@ -493,7 +493,7 @@ int ModifyFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags
     }
 
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_prep_poll_update(&descriptor->submission, (uintptr_t)descriptor, (uintptr_t)descriptor, flags, IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags));
+    io_uring_prep_poll_update(&descriptor->submission, (uintptr_t)descriptor, (uintptr_t)descriptor, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags));
     return SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }
 

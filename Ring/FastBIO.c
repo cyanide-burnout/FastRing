@@ -81,12 +81,17 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
+  if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
+  {
+    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    return 0;
+  }
+
   if (unlikely(completion->res <= 0))
   {
     AdvanceFastRingBuffer(engine->inbound.provider, completion, NULL, NULL);
 
-    if ((completion->res  != 0)          &&
-        (completion->res  != -ENOBUFS)   &&
+    if ((completion->res  != -ENOBUFS)   &&
         (completion->res  != -ECANCELED) &&
         (engine->function != NULL))
     {
@@ -385,11 +390,11 @@ static int HandleBIODestroy(BIO* handle)
     engine->count                 --;
   }
 
-  if ((engine->inbound.descriptor != NULL) &&
-      (descriptor = AllocateFastRingDescriptor(engine->ring, NULL, NULL)))
+  if (descriptor = engine->inbound.descriptor)
   {
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_cancel(&descriptor->submission, engine->inbound.descriptor, 0);
-    SubmitFastRingDescriptor(descriptor, 0);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }
 
   engine->closure  = NULL;

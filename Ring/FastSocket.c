@@ -117,6 +117,12 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
+  if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
+  {
+    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    return 0;
+  }
+
   if (unlikely(completion->res < 0))
   {
     AdvanceFastRingBuffer(socket->inbound.provider, completion, NULL, NULL);
@@ -584,11 +590,11 @@ void ReleaseFastSocket(struct FastSocket* socket)
       socket->count                 --;
     }
 
-    if ((socket->inbound.descriptor != NULL) &&
-        (descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL)))
+    if (descriptor = socket->inbound.descriptor)
     {
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       io_uring_prep_cancel(&descriptor->submission, socket->inbound.descriptor, 0);
-      SubmitFastRingDescriptor(descriptor, 0);
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     }
 
     socket->closure  = NULL;
