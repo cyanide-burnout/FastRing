@@ -1,0 +1,34 @@
+    * Create and execute coroutine
+    Syntax: poll.createWorker(timeout, thread, arguments)
+
+    Example:
+
+      local function doTestThread(arguments, status)
+        local inspect = require('inspect')
+        while true do
+          core.report('*** Multithreading example: %s', inspect(arguments))
+          coroutine.yield(10)
+        end
+      end
+
+      local routine1 = poll.createWorker(1, coroutine.create(doTestThread), { 1, 2, 3 })
+      local routine2 = poll.createWorker(1, coroutine.create(doTestThread), { 4, 5, 6 })
+      local routine3 = poll.createWorker(poll.IMMEDIATELY, coroutine.create(doTestThread))
+      local routine4 = poll.createWorker(poll.HOLD,        coroutine.create(doTestThread))
+
+      poll.wake(routine4)
+
+    Yield syntax:
+
+      local arguments, status = coroutine.yield()                         -- Yield unless wake() called
+      local arguments, status = coroutine.yield(interval)                 -- Yield with an interval
+      local arguments, status = coroutine.yield(handle, flags, interval)  -- Yield and wait for descriptor event (status contains event flags, or 0 when interval reached)
+
+    Status values:
+       - can be set of poll.EVENT_* (descriptor event)
+       - poll.STATUS_AWAKE   when interval = poll.IMMEDIATELY or poll.wake(worker) is called
+       - poll.STATUS_TIMEOUT when interval reached
+
+    * Create decriptor event handler
+    Syntax: poll.createHandler(descriptor, flags, function, agruments)
+      flags can be a sum of poll.EVENT_READ, poll.EVENT_WRITE, poll.EVENT_ERROR and poll.EVENT_HANGUP
