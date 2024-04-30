@@ -110,16 +110,18 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   socket = (struct FastSocket*)descriptor->closure;
 
-  if (unlikely(completion == NULL))
+  if (unlikely((completion != NULL) &&
+               (completion->user_data & RING_DESC_OPTION_IGNORE)))
   {
-    CallHandlerFunction(socket, POLLHUP, 0);
-    ReleaseSocketInstance(socket, reason);
+    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
     return 0;
   }
 
-  if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
+  if (unlikely(completion == NULL))
   {
-    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    socket->inbound.descriptor = NULL;
+    CallHandlerFunction(socket, POLLHUP, 0);
+    ReleaseSocketInstance(socket, reason);
     return 0;
   }
 
@@ -169,12 +171,10 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (unlikely(~completion->flags & IORING_CQE_F_MORE))
   {
-    if ((socket->function           == NULL) ||
-        (socket->inbound.descriptor == NULL))
+    if (socket->inbound.descriptor == NULL)
     {
       // Socket could be closed by function()
       // at the same time with receive last packet
-      socket->inbound.descriptor = NULL;
       ReleaseSocketInstance(socket, reason);
       return 0;
     }
@@ -593,8 +593,9 @@ void ReleaseFastSocket(struct FastSocket* socket)
     if (descriptor = socket->inbound.descriptor)
     {
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      io_uring_prep_cancel(&descriptor->submission, socket->inbound.descriptor, 0);
+      io_uring_prep_cancel(&descriptor->submission, descriptor, 0);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      socket->inbound.descriptor = NULL;
     }
 
     socket->closure  = NULL;

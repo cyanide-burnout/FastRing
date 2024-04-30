@@ -185,7 +185,7 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
                (descriptor->state != RING_DESC_STATE_FREE) &&
                (descriptor = AllocateRingDescriptor(ring))))
   {
-    // Try to submit stub descriptor to force submission of last valuable descriptor
+    // Submit stub descriptor to force submission of last valuable descriptor
     SubmitRingDescriptorRange(ring, descriptor, descriptor);
   }
 
@@ -433,10 +433,10 @@ static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_urin
              (~completion->user_data & RING_DESC_OPTION_MASK)))
     descriptor->data.poll.function(descriptor->data.poll.handle, completion->res, descriptor->closure, descriptor->data.poll.flags);
 
-  if (likely((atomic_load_explicit(&descriptor->references, memory_order_relaxed) == 1) &&
-             ((completion == NULL) ||
-              (~completion->flags & IORING_CQE_F_MORE)) &&
-             (descriptor == descriptor->ring->files.data[descriptor->data.poll.handle].poll)))
+  if (unlikely((atomic_load_explicit(&descriptor->references, memory_order_relaxed) == 1) &&
+               ((completion == NULL) ||
+                (~completion->flags & IORING_CQE_F_MORE)) &&
+               (descriptor == descriptor->ring->files.data[descriptor->data.poll.handle].poll)))
     descriptor->ring->files.data[descriptor->data.poll.handle].poll = NULL;
 
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
@@ -589,9 +589,9 @@ int IsFastRingThread(struct FastRing* ring)
 
 static int HandleTimeoutEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  if (unlikely((completion != NULL) &&
-               (completion->res == -ETIME) &&
-               (descriptor->data.timeout.function != NULL)))
+  if (likely((completion != NULL) &&
+             (completion->res == -ETIME) &&
+             (descriptor->data.timeout.function != NULL)))
   {
     descriptor->data.timeout.function(descriptor);
 

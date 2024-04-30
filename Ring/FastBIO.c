@@ -73,17 +73,18 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   engine = (struct FastBIO*)descriptor->closure;
 
+  if (unlikely((completion != NULL) &&
+               (completion->user_data & RING_DESC_OPTION_IGNORE)))
+  {
+    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    return 0;
+  }
+
   if (unlikely(completion == NULL))
   {
     engine->inbound.descriptor = NULL;
     CallHandlerFunction(engine, POLLHUP, 0);
     ReleaseEngine(engine, reason);
-    return 0;
-  }
-
-  if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
-  {
-    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
     return 0;
   }
 
@@ -133,12 +134,10 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (unlikely(~completion->flags & IORING_CQE_F_MORE))
   {
-    if ((engine->function           == NULL) ||
-        (engine->inbound.descriptor == NULL))
+    if (engine->inbound.descriptor == NULL)
     {
       // Socket could be closed by function()
       // at the same time with receive last packet
-      engine->inbound.descriptor = NULL;
       ReleaseEngine(engine, reason);
       return 0;
     }
@@ -393,8 +392,9 @@ static int HandleBIODestroy(BIO* handle)
   if (descriptor = engine->inbound.descriptor)
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_prep_cancel(&descriptor->submission, engine->inbound.descriptor, 0);
+    io_uring_prep_cancel(&descriptor->submission, descriptor, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    engine->inbound.descriptor = NULL;
   }
 
   engine->closure  = NULL;
