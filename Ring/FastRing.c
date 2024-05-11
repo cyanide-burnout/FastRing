@@ -175,7 +175,12 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
   if (unlikely(io_uring_cq_has_overflow(&ring->ring)))
   {
     result = io_uring_get_events(&ring->ring);
-    goto Handle;
+    if (likely((result == 0) &&
+               (io_uring_cq_ready(&ring->ring) != 0)))
+    {
+      // It seems like io_uring clears IORING_SQ_CQ_OVERFLOW only on call io_uring_submit_and_wait_timeout()
+      goto Handle;
+    }
   }
 
   // Submit pending SQEs

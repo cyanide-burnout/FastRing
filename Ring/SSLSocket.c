@@ -83,6 +83,7 @@ static void HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
       break;
 
     case SSL_ERROR_ZERO_RETURN:
+      socket->state &= ~SSL_FLAG_ACTIVE;
       socket->function(socket->closure, socket->connection, SSL_EVENT_DISCONNECTED, 0, NULL);
       break;
 
@@ -90,6 +91,7 @@ static void HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
       // if (ERR_GET_REASON(error) == SSL_R_UNEXPECTED_EOF_WHILE_READING)
       // The SSL_ERROR_SYSCALL with errno value of 0 indicates unexpected EOF from the peer
       // This will be properly reported as SSL_ERROR_SSL with reason code SSL_R_UNEXPECTED_EOF_WHILE_READING in the OpenSSL 3.0
+      socket->state &= ~SSL_FLAG_ACTIVE;
       socket->function(socket->closure, socket->connection, SSL_EVENT_FAILED, ERR_get_error(), NULL);
       break;
 
@@ -121,7 +123,9 @@ static int HandleIOAction(struct SSLSocket* socket, int action)
       break;
   }
 
-  if (result > 0)
+  if ((result > 0) &&
+      (~socket->state & SSL_FLAG_ACTIVE) &&
+      (~socket->state & SSL_FLAG_REMOVE))
   {
     socket->state |= SSL_FLAG_ACTIVE;
     socket->function(socket->closure, socket->connection, SSL_EVENT_CONNECTED, 0, NULL);
@@ -177,8 +181,8 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
   }
   while (( socket->state & SSL_FLAG_ACTIVE) &&
          (~socket->state & SSL_FLAG_REMOVE) &&
+         (engine->outbound.condition  == 0) &&
          ((engine->inbound.length     != 0) ||
-          (engine->outbound.condition == 0) &&
           (socket->length             != 0)));
 
   Final:

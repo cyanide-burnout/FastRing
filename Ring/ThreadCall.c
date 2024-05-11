@@ -206,17 +206,15 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
       futex((uint32_t*)&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
     }
 
-    if (call->descriptor != NULL)
+    if (descriptor = call->descriptor)
     {
-      if (descriptor = AllocateFastRingDescriptor(call->ring, NULL, NULL))
-      {
-        io_uring_prep_cancel(&descriptor->submission, call->descriptor, 0);
-        SubmitFastRingDescriptor(descriptor, 0);
-      }
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_prep_cancel(&descriptor->submission, call->descriptor, 0);
+      SubmitFastRingDescriptor(descriptor, 0);
 
-      call->descriptor->function = NULL;
-      call->descriptor->closure  = NULL;
-      call->descriptor           = NULL;
+      descriptor->function = NULL;
+      descriptor->closure  = NULL;
+      call->descriptor     = NULL;
     }
 
     RemoveFastRingRegisteredFile(call->ring, call->handle);

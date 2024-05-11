@@ -3,8 +3,6 @@
 #include <malloc.h>
 #include <string.h>
 
-#define STACK_DEFAULT_LENGTH  256
-
 struct FastBufferPool* CreateFastBufferPool(struct FastRing* ring)
 {
   struct FastBufferPool* pool;

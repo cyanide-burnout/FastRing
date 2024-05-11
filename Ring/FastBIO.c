@@ -73,13 +73,6 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   engine = (struct FastBIO*)descriptor->closure;
 
-  if (unlikely((completion != NULL) &&
-               (completion->user_data & RING_DESC_OPTION_IGNORE)))
-  {
-    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
-    return 0;
-  }
-
   if (unlikely(completion == NULL))
   {
     engine->inbound.descriptor = NULL;
@@ -88,22 +81,27 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
+  if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
+  {
+    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    return 0;
+  }
+
   if (unlikely(completion->res <= 0))
   {
     AdvanceFastRingBuffer(engine->inbound.provider, completion, NULL, NULL);
 
-    if ((completion->res  != -ENOBUFS)   &&
-        (completion->res  != -ECANCELED) &&
-        (engine->function != NULL))
+    if ((completion->res != -ENOBUFS) &&
+        (completion->res != -ECANCELED))
     {
       if (completion->flags & IORING_CQE_F_MORE)
       {
-        engine->function(engine, POLLERR, -completion->res);
+        CallHandlerFunction(engine, POLLERR, -completion->res);
         return 1;
       }
 
       engine->inbound.descriptor = NULL;
-      engine->function(engine, POLLHUP, -completion->res);
+      CallHandlerFunction(engine, POLLHUP, -completion->res);
       ReleaseEngine(engine, reason);
       return 0;
     }
@@ -281,7 +279,7 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
     if (size <= buffer->size)
     {
       memcpy(buffer->data + descriptor->submission.len, data, length);
-      descriptor->submission.len  = size;
+      descriptor->submission.len = size;
       return length;
     }
   }

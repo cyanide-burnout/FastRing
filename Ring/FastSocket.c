@@ -110,13 +110,6 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   socket = (struct FastSocket*)descriptor->closure;
 
-  if (unlikely((completion != NULL) &&
-               (completion->user_data & RING_DESC_OPTION_IGNORE)))
-  {
-    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
-    return 0;
-  }
-
   if (unlikely(completion == NULL))
   {
     socket->inbound.descriptor = NULL;
@@ -125,22 +118,27 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     return 0;
   }
 
+  if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
+  {
+    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    return 0;
+  }
+
   if (unlikely(completion->res < 0))
   {
     AdvanceFastRingBuffer(socket->inbound.provider, completion, NULL, NULL);
 
-    if ((completion->res  != -ENOBUFS)   &&
-        (completion->res  != -ECANCELED) &&
-        (socket->function != NULL))
+    if ((completion->res != -ENOBUFS) &&
+        (completion->res != -ECANCELED))
     {
       if (completion->flags & IORING_CQE_F_MORE)
       {
-        socket->function(socket, POLLERR, -completion->res);
+        CallHandlerFunction(socket, POLLERR, -completion->res);
         return 1;
       }
 
       socket->inbound.descriptor = NULL;
-      socket->function(socket, POLLHUP, -completion->res);
+      CallHandlerFunction(socket, POLLHUP, -completion->res);
       ReleaseSocketInstance(socket, reason);
       return 0;
     }
@@ -203,12 +201,23 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   }
 
   if (unlikely((descriptor->submission.opcode == IORING_OP_POLL_ADD) &&
-               (completion != NULL) &&
-               (completion->res >= POLLERR)))
+               (completion != NULL)))
   {
-    // Error may occure during connecting (POLLERR, POLLHUP)
-    CallHandlerFunction(socket, POLLERR, EPIPE);
-    goto Continue;
+    if (completion->res >= POLLERR)
+    {
+      // Error may occure during connecting (POLLERR, POLLHUP)
+      CallHandlerFunction(socket, POLLERR, EPIPE);
+      goto Continue;
+    }
+
+    if ((completion->res > 0)       &&
+        (completion->res & POLLOUT) &&
+        (socket->outbound.condition == 0))
+    {
+      // There are no pending outbound descriptors in the queue
+      CallHandlerFunction(socket, POLLOUT, 0);
+      goto Continue;
+    }
   }
 
   if (( descriptor->data.number == 0) &&
@@ -331,6 +340,7 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
 
     if (descriptor = AllocateFastRingDescriptor(ring, NULL, NULL))
     {
+      socket->count ++;
       io_uring_prep_poll_add(&descriptor->submission, handle, POLLOUT | POLLHUP | POLLERR);
       TransmitFastSocketDescriptor(socket, descriptor, NULL);
     }
