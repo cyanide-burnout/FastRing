@@ -210,7 +210,7 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
     {
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       io_uring_prep_cancel(&descriptor->submission, call->descriptor, 0);
-      SubmitFastRingDescriptor(descriptor, 0);
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
 
       descriptor->function = NULL;
       descriptor->closure  = NULL;

@@ -14,125 +14,132 @@ struct Context
   struct FastRingDescriptor* descriptor;
 };
 
-static void HandleWatchEvent(int handle, uint32_t flags, void* data, uint64_t options)
+static int HandleWatchEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  /*
-    FastPoll supports only one handler per file descriptor,
-    but D-BUS mostly uses separated watches for READ and WRITE operations.
-    https://gitlab.freedesktop.org/dbus/dbus/-/blob/master/dbus/dbus-transport-socket.c#L1291
-  */
-
-  uint32_t mask;
-  uint32_t value;
-  DBusWatch** list;
-
-  list  = (DBusWatch**)data;
-  value =
-    (((flags & RING_EVENT_READ)   > 0) * DBUS_WATCH_READABLE) |
-    (((flags & RING_EVENT_WRITE)  > 0) * DBUS_WATCH_WRITABLE) |
-    (((flags & RING_EVENT_ERROR)  > 0) * DBUS_WATCH_ERROR)    |
-    (((flags & RING_EVENT_HANGUP) > 0) * DBUS_WATCH_HANGUP);
-
-  if (list[0] != NULL)
-  {
-    mask  = dbus_watch_get_flags(list[0]);
-    mask |= DBUS_WATCH_ERROR | DBUS_WATCH_HANGUP;
-    if (value & mask)
-    {
-      // Call watch handler only in suitable condition
-      dbus_watch_handle(list[0], value & mask);
-    }
-  }
-
-  if (list[1] != NULL)
-  {
-    mask  = dbus_watch_get_flags(list[1]);
-    mask |= DBUS_WATCH_ERROR | DBUS_WATCH_HANGUP;
-    if (value & mask)
-    {
-      // Call watch handler only in suitable condition
-      dbus_watch_handle(list[1], value & mask);
-    }
-  }
-}
-
-static void UpdateWatchHandler(struct Context* context, int handle, DBusWatch** list)
-{
+  int handle;
   uint32_t flags;
-  uint64_t mask;
+  DBusWatch* watch;
 
-  mask = 0;
-
-  if (list[0] != NULL)
+  if ((completion != NULL) &&
+      (watch = (DBusWatch*)descriptor->closure) &&
+      (~completion->user_data & RING_DESC_OPTION_IGNORE))
   {
-    flags  = dbus_watch_get_flags(list[0]);
-    mask  |=
-      RING_EVENT_ERROR | RING_EVENT_HANGUP | RING_EVENT_READ |
-      (((flags & DBUS_WATCH_WRITABLE) > 0) * RING_EVENT_WRITE);
+    descriptor->data.number = 1;
+    flags                   =
+      ((completion->res > 0) *
+       ((((completion->res & POLLIN)  != 0) * DBUS_WATCH_READABLE) |
+        (((completion->res & POLLOUT) != 0) * DBUS_WATCH_WRITABLE) |
+        (((completion->res & POLLERR) != 0) * DBUS_WATCH_ERROR)    |
+        (((completion->res & POLLHUP) != 0) * DBUS_WATCH_HANGUP))) |
+      ((completion->res < 0) * DBUS_WATCH_ERROR);
+
+    dbus_watch_handle(watch, flags);
+
+    if (descriptor->data.number != 0)
+    {
+      // Watch didn't clear resubmission flag
+      // Clear flag to indicate an exit from HandleWatchEvent()
+      descriptor->data.number = 0;
+
+      if (descriptor->submission.opcode != IORING_OP_POLL_ADD)
+      {
+        // Last SQE was about io_uring_prep_poll_update()
+        io_uring_prep_rw(IORING_OP_POLL_ADD, &descriptor->submission, -1, NULL, 0, 0);
+        descriptor->submission.fd = dbus_watch_get_unix_fd(watch);
+      }
+
+      if (descriptor->state == RING_DESC_STATE_PENDING)
+      {
+        // Last SQE was about io_uring_prep_poll_update() and still has not been submitted to kernel
+        // Modify a pending FastRingDescriptor instead of submitting once again
+        atomic_fetch_sub_explicit(&descriptor->references, 1, memory_order_relaxed);
+        descriptor->submission.user_data &= ~RING_DESC_OPTION_IGNORE;
+        return 1;
+      }
+
+      // Since D-BUS doesn't support edge triggering we have to submit SQE each time after completion
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
   }
 
-  if (list[1] != NULL)
-  {
-    flags  = dbus_watch_get_flags(list[1]);
-    mask  |=
-      RING_EVENT_ERROR | RING_EVENT_HANGUP | RING_EVENT_READ |
-      (((flags & DBUS_WATCH_WRITABLE) > 0) * RING_EVENT_WRITE);
-  }
-
-  ManageFastRingEventHandler(context->ring, handle, mask, HandleWatchEvent, list);
+  return 0;
 }
 
 static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
 {
+  struct FastRingDescriptor* descriptor;
   struct Context* context;
-  DBusWatch** list;
+  uint32_t flags;
   int handle;
 
-  if (dbus_watch_get_enabled(watch))
+  if (!dbus_watch_get_enabled(watch))
   {
-    context = (struct Context*)data;
-    handle  = dbus_watch_get_unix_fd(watch);
-    list    = (DBusWatch**)GetFastRingEventHandlerData(context->ring, handle);
-
-    if (list == NULL)
-    {
-      // Create a new list when not exists
-      list = (DBusWatch**)calloc(2, sizeof(DBusWatch*));
-    }
-
-    // DBusCore supports up to two watches per handle
-    list[list[0] != NULL] = watch;
-
-    dbus_watch_set_data(watch, list, NULL);
-    UpdateWatchHandler(context, handle, list);
+    // Watch is created in disabled state
+    return TRUE;
   }
 
-  return TRUE;
+  context = (struct Context*)data;
+  handle  = dbus_watch_get_unix_fd(watch);
+  flags   = dbus_watch_get_flags(watch);
+  flags   =
+    (((flags & DBUS_WATCH_READABLE) != 0) * POLLIN)  |
+    (((flags & DBUS_WATCH_WRITABLE) != 0) * POLLOUT) |
+    (((flags & DBUS_WATCH_ERROR)    != 0) * POLLERR) |
+    (((flags & DBUS_WATCH_HANGUP)   != 0) * POLLHUP);
+
+  if (descriptor = (struct FastRingDescriptor*)dbus_watch_get_data(watch))
+  {
+    if ((descriptor->data.number != 0) ||                                            // We are inside a call to HandleWatchEvent()
+        (descriptor->state == RING_DESC_STATE_PENDING) ||                            // There is a pending io_uring_prep_poll_add() or io_uring_prep_poll_update()
+        (descriptor->submission.poll32_events == __io_uring_prep_poll_mask(flags)))  // Poll mask has no changes
+    {
+      // Existing IORING_OP_POLL_ADD or IORING_OP_POLL_REMOVE is not yet submitted to kernel
+      descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
+      return TRUE;
+    }
+
+    // Update any incomplete io_uring_prep_poll_add()
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_prep_poll_update(&descriptor->submission, (uintptr_t)descriptor, (uintptr_t)descriptor, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    return TRUE;
+  }
+
+  if (descriptor = AllocateFastRingDescriptor(context->ring, HandleWatchEvent, watch))
+  {
+    dbus_watch_set_data(watch, descriptor, NULL);
+    io_uring_prep_poll_add(&descriptor->submission, handle, flags);
+    SubmitFastRingDescriptor(descriptor, 0);
+    return TRUE;
+  }
+
+  return FALSE;
 }
 
 static void RemoveWatch(DBusWatch* watch, void* data)
 {
-  struct Context* context;
-  DBusWatch** list;
-  int handle;
+  struct FastRingDescriptor* descriptor;
 
-  if (list = (DBusWatch**)dbus_watch_get_data(watch))
+  if (descriptor = (struct FastRingDescriptor*)dbus_watch_get_data(watch))
   {
-    context = (struct Context*)data;
-    handle  = dbus_watch_get_unix_fd(watch);
-
-    // DBusCore supports up to two watches per handle
-    list[list[0] != watch] = NULL;
-
     dbus_watch_set_data(watch, NULL, NULL);
-    UpdateWatchHandler(context, handle, list);
 
-    if ((list[0] == NULL) &&
-        (list[1] == NULL))
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
+
+    if ((descriptor->data.number != 0) ||                // We are inside a call to HandleWatchEvent()
+        (descriptor->state == RING_DESC_STATE_PENDING))  // io_uring_prep_poll_add() or io_uring_prep_poll_update() is not yet submitted to kernel
     {
-      // Release the list when all watches removed
-      free(list);
+      io_uring_prep_nop(&descriptor->submission);
+      descriptor->data.number = 0;
+      return;
     }
+
+    // Cancel any incomplete io_uring_prep_poll_add()
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_prep_cancel(&descriptor->submission, descriptor, 0);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }
 }
 
