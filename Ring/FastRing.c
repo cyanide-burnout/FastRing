@@ -114,7 +114,7 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
 {
   struct FastRingDescriptor* descriptor;
 
-  atomic_store_explicit(&last->next, NULL, memory_order_relaxed);
+  atomic_store_explicit(&last->next, NULL, memory_order_release);
   descriptor = atomic_exchange_explicit(&ring->pending, last, memory_order_relaxed);
   atomic_store_explicit(&descriptor->next, first, memory_order_relaxed);
 }
@@ -274,17 +274,15 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
   return result * (result != -ETIME);
 }
 
-int SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
+void SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
   struct FastRing* ring;
-  struct io_uring_sqe* submission;
 
   ring                             = descriptor->ring;
   descriptor->state                = RING_DESC_STATE_PENDING;
   descriptor->submission.user_data = (uintptr_t)descriptor | (uint64_t)(option & RING_DESC_OPTION_MASK);
 
   SubmitRingDescriptorRange(ring, descriptor, descriptor);
-  return 0;
 }
 
 void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last)
@@ -438,12 +436,6 @@ static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_urin
              (~completion->user_data & RING_DESC_OPTION_MASK)))
     descriptor->data.poll.function(descriptor->data.poll.handle, completion->res, descriptor->closure, descriptor->data.poll.flags);
 
-  if (unlikely((atomic_load_explicit(&descriptor->references, memory_order_relaxed) == 1) &&
-               ((completion == NULL) ||
-                (~completion->flags & IORING_CQE_F_MORE)) &&
-               (descriptor == descriptor->ring->files.data[descriptor->data.poll.handle].poll)))
-    descriptor->ring->files.data[descriptor->data.poll.handle].poll = NULL;
-
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
@@ -465,7 +457,8 @@ int AddFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags, H
     descriptor->data.poll.handle   = handle;
     descriptor->data.poll.flags    = flags;
 
-    return SubmitFastRingDescriptor(descriptor, 0);
+    SubmitFastRingDescriptor(descriptor, 0);
+    return 0;
   }
 
   return -ENOMEM;
@@ -499,7 +492,8 @@ int ModifyFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags
 
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_poll_update(&descriptor->submission, (uintptr_t)descriptor, (uintptr_t)descriptor, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags));
-    return SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    return 0;
   }
 
   return -EBADF;
@@ -533,7 +527,8 @@ int RemoveFastRingEventHandler(struct FastRing* ring, int handle)
 
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_poll_remove(&descriptor->submission, (uintptr_t)descriptor);
-    return SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    return 0;
   }
 
   return -EBADF;

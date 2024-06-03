@@ -82,7 +82,9 @@ static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct 
     }
 
     SubmitThreadCallState(call, state);
-    futex((uint32_t*)&state->result, FUTEX_WAIT_PRIVATE, TC_RESULT_PREPARED, NULL, NULL, 0);
+
+    do futex((uint32_t*)&state->result, FUTEX_WAIT_PRIVATE, TC_RESULT_PREPARED, NULL, NULL, 0);
+    while (atomic_load_explicit(&state->result, memory_order_relaxed) != TC_RESULT_CALLED);
   }
 }
 
@@ -102,31 +104,32 @@ static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uri
   struct ThreadCall* call;
   struct ThreadCallState* state;
 
-  call = (struct ThreadCall*)descriptor->closure;
-
-  while (state = PeekThreadCallState(call))
+  if (call = (struct ThreadCall*)descriptor->closure)
   {
-    call->function(call->closure, state->arguments);
-    atomic_store_explicit(&state->result, TC_RESULT_CALLED, memory_order_release);
+    while (state = PeekThreadCallState(call))
+    {
+      call->function(call->closure, state->arguments);
+      atomic_store_explicit(&state->result, TC_RESULT_CALLED, memory_order_release);
 
 #ifdef TC_FEATURE_RING_FUTEX
-    if ((call->feature == TC_FEATURE_RING_FUTEX) &&
-        (descriptor = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, NULL)))
-    {
-      io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
-      SubmitFastRingDescriptor(descriptor, 0);
-      continue;
-    }
+      if ((call->feature == TC_FEATURE_RING_FUTEX) &&
+          (descriptor = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, NULL)))
+      {
+        io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
+        SubmitFastRingDescriptor(descriptor, 0);
+        continue;
+      }
 #endif
 
-    futex((uint32_t*)&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
-  }
+      futex((uint32_t*)&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    }
 
-  if ((completion       != NULL) &&
-      (call->descriptor != NULL))
-  {
-    SubmitFastRingDescriptor(call->descriptor, 0);
-    return 1;
+    if ((completion       != NULL) &&
+        (call->descriptor != NULL))
+    {
+      SubmitFastRingDescriptor(call->descriptor, 0);
+      return 1;
+    }
   }
 
   return 0;
@@ -239,8 +242,8 @@ int MakeVariadicThreadCall(struct ThreadCall* call, va_list arguments)
   state = AllocateThreadCallState();
 
   va_copy(state->arguments, arguments);
-  atomic_thread_fence(memory_order_release);
   MakeInternalThreadCall(call, state);
+  va_end(state->arguments);
 
   return atomic_load_explicit(&state->result, memory_order_acquire);
 }
@@ -252,7 +255,6 @@ int MakeThreadCall(struct ThreadCall* call, ...)
   state = AllocateThreadCallState();
 
   va_start(state->arguments, call);
-  atomic_thread_fence(memory_order_release);
   MakeInternalThreadCall(call, state);
   va_end(state->arguments);
 

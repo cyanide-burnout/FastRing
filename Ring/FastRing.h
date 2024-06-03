@@ -189,7 +189,7 @@ struct FastRing
 
 int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask);
 
-int SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option);
+void SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option);
 void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last);
 struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingEventFunction function, void* closure);
 
