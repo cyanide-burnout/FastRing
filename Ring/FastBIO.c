@@ -380,11 +380,10 @@ static int HandleBIODestroy(BIO* handle)
   if ((descriptor = engine->inbound.descriptor) &&
       (descriptor->state == RING_DESC_STATE_PENDING))
   {
-    descriptor->submission.opcode  = IORING_OP_NOP;
-    descriptor->function           = NULL;
-    descriptor->closure            = NULL;
-    engine->inbound.descriptor     = NULL;
-    engine->count                 --;
+    descriptor->submission.opcode     = IORING_OP_NOP;
+    descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
+    engine->inbound.descriptor        = NULL;
+    engine->count                    --;
   }
 
   if (descriptor = engine->inbound.descriptor)

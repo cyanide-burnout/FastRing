@@ -593,11 +593,10 @@ void ReleaseFastSocket(struct FastSocket* socket)
     if ((descriptor = socket->inbound.descriptor) &&
         (descriptor->state == RING_DESC_STATE_PENDING))
     {
-      descriptor->submission.opcode  = IORING_OP_NOP;
-      descriptor->function           = NULL;
-      descriptor->closure            = NULL;
-      socket->inbound.descriptor     = NULL;
-      socket->count                 --;
+      descriptor->submission.opcode     = IORING_OP_NOP;
+      descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
+      socket->inbound.descriptor        = NULL;
+      socket->count                    --;
     }
 
     if (descriptor = socket->inbound.descriptor)
