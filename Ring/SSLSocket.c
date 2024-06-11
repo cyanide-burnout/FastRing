@@ -179,11 +179,11 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
     }
 
   }
-  while (( socket->state & SSL_FLAG_ACTIVE) &&
-         (~socket->state & SSL_FLAG_REMOVE) &&
-         (engine->outbound.condition  == 0) &&
-         ((engine->inbound.length     != 0) ||
-          (socket->length             != 0)));
+  while (( socket->state & SSL_FLAG_ACTIVE)      &&
+         (~socket->state & SSL_FLAG_REMOVE)      &&
+         (~engine->outbound.condition & POLLOUT) &&
+         ((engine->inbound.length          != 0) ||
+          (socket->length                  != 0)));
 
   Final:
 

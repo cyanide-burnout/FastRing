@@ -191,6 +191,7 @@ static int HandleTouchCompletion(struct FastRingDescriptor* descriptor, struct i
   struct FastBIO* engine;
 
   engine = (struct FastBIO*)descriptor->closure;
+  engine->outbound.condition &= ~POLLIN;
 
   CallHandlerFunction(engine, 0, 0);
   ReleaseEngine(engine, reason);
@@ -350,10 +351,12 @@ static long HandleBIOControl(BIO* handle, int command, long argument1, void* arg
       return 1;
 
     case FASTBIO_CTRL_TOUCH:
-      if ((engine->count == 2) &&
+      if (( engine->count >= 2) &&
+          (~engine->outbound.condition & POLLIN) &&
           (descriptor = AllocateFastRingDescriptor(engine->ring, HandleTouchCompletion, engine)))
       {
         engine->count ++;
+        engine->outbound.condition |= POLLIN;
         io_uring_prep_nop(&descriptor->submission);
         SubmitFastRingDescriptor(descriptor, 0);
       }
