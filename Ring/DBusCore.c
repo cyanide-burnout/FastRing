@@ -205,7 +205,6 @@ static void ToggleTimeout(DBusTimeout* timeout, void* data)
 static void HandleDispatchEvent(struct FastRingDescriptor* descriptor)
 {
   struct Context* context;
-  uint64_t value;
 
   context             = (struct Context*)descriptor->closure;
   context->descriptor = NULL;
@@ -221,7 +220,6 @@ static void HandleDispatchEvent(struct FastRingDescriptor* descriptor)
 static void HandleDispatchStatus(DBusConnection* connection, DBusDispatchStatus status, void* data)
 {
   struct Context* context;
-  uint64_t value;
 
   context = (struct Context*)data;
 

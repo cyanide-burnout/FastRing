@@ -11,9 +11,9 @@ extern "C"
 {
 #endif
 
-// Set report proxy:                         g_log_set_default_handler(HandleGLogReport, (gpointer)report);
-// Set adapter as a thread-default context:  g_main_context_push_thread_default(adapter->context);
-// Remove thread-default context:            g_main_context_pop_thread_default(adapter->context);
+// Set report proxy:                 g_log_set_default_handler(HandleGLogReport, (gpointer)report);
+// Set thread's default context:     g_main_context_push_thread_default(loop->context);
+// Remove thread's default context:  g_main_context_pop_thread_default(loop->context);
 
 #ifdef FASTGLOOP_INTERNAL
 struct FastGLoopPoolData
@@ -23,7 +23,6 @@ struct FastGLoopPoolData
   uint32_t current;                       // Actual requested flags
   uint32_t previous;                      // Last requested flags
   struct FastRingDescriptor* descriptor;  // Pending descriptor
-
 };
 #endif
 
