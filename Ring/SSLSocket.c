@@ -158,16 +158,6 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
       HandleIOAction(socket, socket->role);
     }
 
-    if (((socket->length != 0) ||
-         (socket->state & SSL_FLAG_WRITE)) &&
-        ( socket->state & SSL_FLAG_ACTIVE) &&
-        (~socket->state & SSL_FLAG_REMOVE))
-    {
-      socket->state &= ~SSL_FLAG_WRITE;
-      result         = TransmitPendingData(socket);
-      HandleIOResult(socket, result, SSL_FLAG_WRITE);
-    }
-
     if (((engine->inbound.length != 0) ||
          (socket->state & SSL_FLAG_READ))  &&
         ( socket->state & SSL_FLAG_ACTIVE) &&
@@ -178,6 +168,15 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
       HandleIOResult(socket, result, 0);
     }
 
+    if (((socket->length != 0) ||
+         (socket->state & SSL_FLAG_WRITE)) &&
+        ( socket->state & SSL_FLAG_ACTIVE) &&
+        (~socket->state & SSL_FLAG_REMOVE))
+    {
+      socket->state &= ~SSL_FLAG_WRITE;
+      result         = TransmitPendingData(socket);
+      HandleIOResult(socket, result, SSL_FLAG_WRITE);
+    }
   }
   while (( socket->state & SSL_FLAG_ACTIVE)      &&
          (~socket->state & SSL_FLAG_REMOVE)      &&

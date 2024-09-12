@@ -229,10 +229,12 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
     descriptor->data.number ++;
 
-    if ((batch  = socket->outbound.tail) &&
-        (batch != socket->outbound.head))
+    if ( (batch  = socket->outbound.tail) &&
+        ((batch != socket->outbound.head) ||
+         (socket->outbound.condition & POLLHUP)))
     {
-      socket->outbound.tail = batch->next;
+      socket->outbound.tail                  = batch->next;
+      *((uintptr_t*)&socket->outbound.head) *= (uintptr_t)(socket->outbound.tail != NULL);
       SubmitFastRingDescriptorRange(batch->tail, batch->head);
       ReleaseOutboundBatch(&socket->outbound, batch);
     }
@@ -280,7 +282,7 @@ static void HandleOutboundFlush(struct FastRing* ring, void* closure)
   {
     batch                                  = socket->outbound.tail;
     socket->outbound.tail                  = batch->next;
-    *((uintptr_t*)&socket->outbound.head) *= (socket->outbound.tail != NULL);
+    *((uintptr_t*)&socket->outbound.head) *= (uintptr_t)(socket->outbound.tail != NULL);
     socket->outbound.condition            |= POLLOUT;
 
     SubmitFastRingDescriptorRange(batch->tail, batch->head);
@@ -340,7 +342,6 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
 
     if (descriptor = AllocateFastRingDescriptor(ring, NULL, NULL))
     {
-      socket->count ++;
       io_uring_prep_poll_add(&descriptor->submission, handle, POLLOUT | POLLHUP | POLLERR);
       TransmitFastSocketDescriptor(socket, descriptor, NULL);
     }
@@ -407,7 +408,8 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
   if (unlikely((socket     == NULL) ||
                (descriptor == NULL) ||
                (buffer     == NULL) &&
-               (descriptor->submission.opcode != IORING_OP_POLL_ADD)))
+               (descriptor->submission.opcode != IORING_OP_POLL_ADD) &&
+               (descriptor->submission.opcode != IORING_OP_URING_CMD)))
   {
     // Cannot proceed a call
     return -EINVAL;
@@ -422,15 +424,11 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
     return -ENOMEM;
   }
 
-  if (likely(descriptor->submission.opcode != IORING_OP_URING_CMD))
-  {
-    descriptor->function = HandleOutboundCompletion;
-    descriptor->closure  = socket;
-  }
-
   descriptor->data.number          = 0;
   descriptor->state                = RING_DESC_STATE_PENDING;  // It' required to set these values manually
   descriptor->submission.user_data = (uintptr_t)descriptor;    // due to use SubmitFastRingDescriptorRange()
+  descriptor->function             = HandleOutboundCompletion;
+  descriptor->closure              = socket;
 
   descriptor->submission.ioprio |= IORING_RECVSEND_POLL_FIRST *
     ((descriptor->submission.opcode != IORING_OP_POLL_ADD) &&
@@ -448,8 +446,8 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
   else
   {
     batch->tail->linked            = batch->count;
-    batch->head->next              = descriptor;
     batch->head->submission.flags |= IOSQE_IO_LINK;
+    batch->head->next              = descriptor;
     batch->head                    = descriptor;
   }
 
@@ -590,6 +588,8 @@ void ReleaseFastSocket(struct FastSocket* socket)
 
   if (socket != NULL)
   {
+    socket->outbound.condition |= POLLHUP;
+
     if ((descriptor = socket->inbound.descriptor) &&
         (descriptor->state == RING_DESC_STATE_PENDING))
     {

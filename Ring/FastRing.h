@@ -58,10 +58,13 @@ struct FastRingBufferProvider;
 #define RING_REASON_INCOMPLETE     1
 #define RING_REASON_RELEASED       2
 
+#define RING_TRACE_ACTION_HANDLE   0
+#define RING_TRACE_ACTION_RELEASE  1
+
 typedef int (*HandleFastRingEventFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 typedef void (*HandleFlushFunction)(struct FastRing* ring, void* closure);
 typedef void (*LockFastRingFunction)(int lock, void* closure);
-typedef void (*TraceFastRingFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason, void* closure);
+typedef void (*TraceFastRingFunction)(int action, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason, void* closure);
 typedef void (*HandlePollEventFunction)(int handle, uint32_t flags, void* closure, uint64_t options);
 typedef void (*HandleTimeoutFunction)(struct FastRingDescriptor* descriptor);
 

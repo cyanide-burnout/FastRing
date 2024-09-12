@@ -126,7 +126,7 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
   if (unlikely(ring->trace.function != NULL))
   {
     // Trace is only for debug purposes, less probable it is in use
-    ring->trace.function(descriptor, completion, reason, ring->trace.closure);
+    ring->trace.function(RING_TRACE_ACTION_HANDLE, descriptor, completion, reason, ring->trace.closure);
   }
 
   if (likely(((descriptor->function == NULL) &&
@@ -136,16 +136,23 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
               (descriptor->function(descriptor, completion, reason) == 0)) &&
              (atomic_fetch_sub_explicit(&descriptor->references, 1, memory_order_relaxed) == 1)))
   {
-    if (descriptor->next != NULL)
+    if (unlikely(ring->trace.function != NULL))
     {
-      descriptor->next->previous = NULL;
-      descriptor->next           = NULL;
+      // Trace is only for debug purposes, less probable it is in use
+      ring->trace.function(RING_TRACE_ACTION_RELEASE, descriptor, completion, reason, ring->trace.closure);
     }
 
+    if (unlikely((descriptor->next           != NULL) &&
+                 (descriptor->next->previous == descriptor)))
+    {
+      // This case is useful to handle chains with IOSQE_CQE_SKIP_SUCCESS
+      descriptor->next->previous = NULL;
+    }
+
+    descriptor->state    = RING_DESC_STATE_FREE;
+    descriptor->closure  = NULL;
     descriptor->function = NULL;
     descriptor->previous = NULL;
-    descriptor->closure  = NULL;
-    descriptor->state    = RING_DESC_STATE_FREE;
 
     atomic_thread_fence(memory_order_release);
     ReleaseRingDescriptor(ring, descriptor);
@@ -255,6 +262,7 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
       {
         descriptor = previous;
         previous   = descriptor->previous;
+
         HandleCompletedRingDescriptor(ring, descriptor, NULL, RING_REASON_COMPLETE);
       }
     }
@@ -305,10 +313,10 @@ struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, Han
     descriptor->closure  = closure;
     descriptor->function = function;
     descriptor->previous = NULL;
+    descriptor->next     = NULL;
     descriptor->linked   = 0;
 
     io_uring_prep_nop(&descriptor->submission);
-    atomic_store_explicit(&descriptor->next, NULL, memory_order_relaxed);
     atomic_store_explicit(&descriptor->references, 1, memory_order_release);
   }
 
