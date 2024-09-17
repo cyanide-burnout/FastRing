@@ -457,7 +457,7 @@ int AddFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags, H
               (ExpandRingFileList(&ring->files, handle) != NULL)) &&
              (descriptor = AllocateFastRingDescriptor(ring, HandlePollEvent, closure))))
   {
-    ring->files.data[handle].poll = descriptor;
+    ring->files.data[handle].descriptor = descriptor;
 
     io_uring_prep_poll_add(&descriptor->submission, handle, flags);
     descriptor->submission.len     = RING_EVENT_FLAGS(flags);
@@ -479,7 +479,7 @@ int ModifyFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags
   if (likely((ring != NULL) &&
              (handle >= 0)  &&
              (handle < ring->files.length) &&
-             (descriptor = ring->files.data[handle].poll)))
+             (descriptor = ring->files.data[handle].descriptor)))
   {
     descriptor->data.poll.flags = flags;
 
@@ -494,7 +494,7 @@ int ModifyFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags
     if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
     {
       descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
-      descriptor->submission.len           = IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags);
+      descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags);
       return 0;
     }
 
@@ -514,10 +514,10 @@ int RemoveFastRingEventHandler(struct FastRing* ring, int handle)
   if (likely((ring != NULL) &&
              (handle >= 0)  &&
              (handle < ring->files.length) &&
-             (descriptor = ring->files.data[handle].poll)))
+             (descriptor = ring->files.data[handle].descriptor)))
   {
-    descriptor->data.poll.function = NULL;
-    ring->files.data[handle].poll  = NULL;
+    descriptor->data.poll.function      = NULL;
+    ring->files.data[handle].descriptor = NULL;
 
     if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
                  (descriptor->submission.opcode == IORING_OP_POLL_ADD)))
@@ -555,7 +555,7 @@ void DestroyFastRingEventHandler(struct FastRing* ring, HandlePollEventFunction 
 
     while (entry < limit)
     {
-      descriptor = (entry ++)->poll;
+      descriptor = (entry ++)->descriptor;
       if (unlikely((descriptor                     != NULL)            &&
                    (descriptor->function           == HandlePollEvent) &&
                    (descriptor->data.poll.function == function)        &&
@@ -572,15 +572,15 @@ int ManageFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags
 {
   int result;
 
-  result = (flags == 0) ? RemoveFastRingEventHandler(ring, handle) : ModifyFastRingEventHandler(ring, handle, flags);
-  return (result == -EBADF) && (flags != 0) ? AddFastRingEventHandler(ring, handle, flags, function, closure) : result;
+  result = (flags == 0ULL) ? RemoveFastRingEventHandler(ring, handle) : ModifyFastRingEventHandler(ring, handle, flags);
+  return (result == -EBADF) && (flags != 0ULL) ? AddFastRingEventHandler(ring, handle, flags, function, closure) : result;
 }
 
 void* GetFastRingEventHandlerData(struct FastRing* ring, int handle)
 {
   return
-    (ring != NULL) && (handle < ring->files.length) && (ring->files.data[handle].poll != NULL) ?
-    ring->files.data[handle].poll->closure : NULL;
+    (ring != NULL) && (handle < ring->files.length) && (ring->files.data[handle].descriptor != NULL) ?
+    ring->files.data[handle].descriptor->closure : NULL;
 }
 
 int IsFastRingThread(struct FastRing* ring)

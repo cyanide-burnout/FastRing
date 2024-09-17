@@ -138,7 +138,7 @@ struct FastRingFileEntry
 {
   uint32_t index;                                // | Index in registered file table
   uint32_t references;                           // | Count of references to registered file table
-  struct FastRingDescriptor* poll;               // Descriptor for FastPoll API
+  struct FastRingDescriptor* descriptor;         // Descriptor for FastPoll API
 };
 
 struct FastRingFlushEntry
