@@ -20,8 +20,8 @@ static void AppendBuffer(struct SSLSocket* socket, const void* data, size_t leng
 
   if (size > socket->size)
   {
-    socket->buffer = (uint8_t*)realloc(socket->buffer, size);
-    socket->size   = malloc_usable_size(socket->buffer);
+    socket->size   = size;
+    socket->buffer = (uint8_t*)realloc(socket->buffer, socket->size);
   }
 
   memcpy(socket->buffer + socket->length, data, length);

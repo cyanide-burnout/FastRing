@@ -7,6 +7,8 @@
 #include <sys/utsname.h>
 #include <sys/resource.h>
 
+#include <stdio.h>
+
 #define likely(condition)     __builtin_expect(!!(condition), 1)
 #define unlikely(condition)   __builtin_expect(!!(condition), 0)
 #define barrier()             asm volatile ("" : : : "memory")
@@ -32,6 +34,31 @@
 #endif
 
 // Supplementary
+
+static uint8_t GetCRC4(uint64_t data, int count, uint8_t value)
+{
+  // CRC4 is ported from Linux Kernel code
+  // https://github.com/torvalds/linux/blob/master/lib/crc4.c
+
+  static const uint8_t table[] =
+  {
+    0x0, 0x7, 0xe, 0x9, 0xb, 0xc, 0x5, 0x2,
+    0x1, 0x6, 0xf, 0x8, 0xa, 0xd, 0x4, 0x3,
+  };
+
+  data  &= (1ULL << count) - 1ULL;  // Mask off anything above the top bit
+  count  = (count + 3) & ~0x3;      // Align to 4-bits
+  count -= 4;
+
+  while (count >= 0)
+  {
+    // Calculate CRC4 over four-bit nibbles, starting at the most significant bit
+    value  = table[value ^ ((data >> count) & 0xf)];
+    count -= 4;
+  }
+
+  return value;
+}
 
 static void* ExpandRingFileList(struct FastRingFileList* list, int handle)
 {
@@ -119,6 +146,16 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
   atomic_store_explicit(&descriptor->next, first, memory_order_relaxed);
 }
 
+static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct FastRingDescriptor* descriptor, int option)
+{
+  descriptor->state                 = RING_DESC_STATE_PENDING;
+  descriptor->integrity             = GetCRC4((uint64_t)descriptor->function, 64, 0);
+  descriptor->integrity             = GetCRC4((uint64_t)descriptor->closure, 64, descriptor->integrity);
+  descriptor->submission.user_data  = (uint64_t)descriptor;
+  descriptor->submission.user_data |= (uint64_t)(option & RING_DESC_OPTION_MASK);
+  descriptor->submission.user_data |= (uint64_t)descriptor->integrity;
+}
+
 static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   __builtin_prefetch(&descriptor->state);
@@ -127,6 +164,18 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
   {
     // Trace is only for debug purposes, less probable it is in use
     ring->trace.function(RING_TRACE_ACTION_HANDLE, descriptor, completion, reason, ring->trace.closure);
+  }
+
+  if (unlikely((completion != NULL) &&
+               (descriptor->integrity != (completion->user_data & RING_DESC_CRC4_MASK))))
+  {
+    // Leaked descriptor: someone was not in good mood and forgot to solve some cases
+    // Don't touch the descriptor, it could be still in use somewhere else
+
+    fprintf(stderr, "FastRing: completion of descriptor %p is not valid! (res=%d flags=%x user_data=%llx)\n",
+      descriptor, completion->res, completion->flags, completion->user_data);
+
+    return;
   }
 
   if (likely(((descriptor->function == NULL) &&
@@ -149,10 +198,11 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
       descriptor->next->previous = NULL;
     }
 
-    descriptor->state    = RING_DESC_STATE_FREE;
-    descriptor->closure  = NULL;
-    descriptor->function = NULL;
-    descriptor->previous = NULL;
+    descriptor->state     = RING_DESC_STATE_FREE;
+    descriptor->closure   = NULL;
+    descriptor->function  = NULL;
+    descriptor->previous  = NULL;
+    descriptor->integrity = 0;
 
     atomic_thread_fence(memory_order_release);
     ReleaseRingDescriptor(ring, descriptor);
@@ -282,15 +332,15 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
   return result * (result != -ETIME);
 }
 
+void PrepareFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
+{
+  PrepareRingDescriptor(descriptor, option);
+}
+
 void SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
-  struct FastRing* ring;
-
-  ring                             = descriptor->ring;
-  descriptor->state                = RING_DESC_STATE_PENDING;
-  descriptor->submission.user_data = (uintptr_t)descriptor | (uint64_t)(option & RING_DESC_OPTION_MASK);
-
-  SubmitRingDescriptorRange(ring, descriptor, descriptor);
+  PrepareRingDescriptor(descriptor, option);
+  SubmitRingDescriptorRange(descriptor->ring, descriptor, descriptor);
 }
 
 void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last)
@@ -603,24 +653,17 @@ static int HandleTimeoutEvent(struct FastRingDescriptor* descriptor, struct io_u
   {
     descriptor->data.timeout.function(descriptor);
 
-#ifdef IORING_TIMEOUT_MULTISHOT
-    if (likely((completion->flags & IORING_CQE_F_MORE) &&
-               ((descriptor->data.timeout.flags & TIMEOUT_FLAG_REPEAT) != 0ULL)))
-    {
-      // Since liburing 2.5 there are embedded capabilities for multi-shot timeouts
-      return 1;
-    }
-#endif
-
+#ifndef IORING_TIMEOUT_MULTISHOT
     if (likely((descriptor->data.timeout.flags & TIMEOUT_FLAG_REPEAT) != 0ULL))
     {
       io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);
       SubmitFastRingDescriptor(descriptor, 0);
       return 1;
     }
+#endif
   }
 
-  return 0;
+  return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
 static void CreateTimeout(struct FastRingDescriptor* descriptor, HandleTimeoutFunction function, void* closure, uint64_t flags)
@@ -648,9 +691,8 @@ static void UpdateTimeout(struct FastRingDescriptor* descriptor, HandleTimeoutFu
 
 static void RemoveTimeout(struct FastRingDescriptor* descriptor)
 {
-  descriptor->data.timeout.flags    = 0;
+  descriptor->data.timeout.flags    = 0ULL;
   descriptor->data.timeout.function = NULL;
-  descriptor->closure               = NULL;
 
   if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
                (descriptor->submission.opcode == IORING_OP_TIMEOUT)))

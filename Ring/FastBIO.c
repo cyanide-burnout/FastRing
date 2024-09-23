@@ -162,7 +162,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     goto Continue;
   }
 
-  if (( descriptor->data.number == 0) &&
+  if (( descriptor->data.number == 0ULL) &&
       (~descriptor->submission.flags & IOSQE_IO_LINK) &&
       ( engine->outbound.condition   & POLLOUT))
   {
@@ -305,12 +305,11 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
     return -1;
   }
 
+  descriptor->data.number = 0ULL;
+
   memcpy(buffer->data, data, length);
   io_uring_prep_send_zc(&descriptor->submission, engine->handle, buffer->data, length, 0, IORING_RECVSEND_POLL_FIRST);
-
-  descriptor->state                = RING_DESC_STATE_PENDING;  // It' required to set these values manually
-  descriptor->submission.user_data = (uintptr_t)descriptor;    // due to use SubmitFastRingDescriptorRange()
-  descriptor->data.number          = 0;                        //
+  PrepareFastRingDescriptor(descriptor, 0);
 
   engine->outbound.count ++;
   engine->count          ++;
@@ -383,7 +382,7 @@ static int HandleBIODestroy(BIO* handle)
   if ((descriptor = engine->inbound.descriptor) &&
       (descriptor->state == RING_DESC_STATE_PENDING))
   {
-    descriptor->submission.opcode     = IORING_OP_NOP;
+    io_uring_prep_nop(&descriptor->submission);
     descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
     engine->inbound.descriptor        = NULL;
     engine->count                    --;

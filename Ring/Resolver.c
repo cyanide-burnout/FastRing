@@ -53,7 +53,7 @@ static void ManageResolverHandler(void* data, ares_socket_t handle, int readable
   uint64_t flags;
 
   state = (struct ResolverState*)data;
-  flags = (readable * HANDLE_READ) | (writable * HANDLE_WRITE);
+  flags = ((!!readable) * (HANDLE_READ)) | ((!!writable) * (HANDLE_READ | HANDLE_WRITE));
 
   ManageFastRingEventHandler(state->ring, handle, flags, HandleSocketEvent, data);
 }

@@ -81,10 +81,9 @@ inline __attribute__((always_inline)) struct FastBuffer* ReceiveFastSocketBuffer
   if ((socket != NULL) &&
       (buffer  = socket->inbound.tail))
   {
-    socket->inbound.tail                  = buffer->next;
-    *((uintptr_t*)&socket->inbound.head) *= (socket->inbound.tail != NULL);
-    socket->inbound.length               -= buffer->length;
-    socket->inbound.position              = 0;
+    socket->inbound.tail      = buffer->next;
+    socket->inbound.length   -= buffer->length;
+    socket->inbound.position  = 0;
     return buffer;
   }
 

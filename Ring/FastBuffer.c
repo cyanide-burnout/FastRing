@@ -89,12 +89,12 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
     free(buffer);
   }
 
-  if (buffer = (struct FastBuffer*)memalign(RING_DESC_ALIGNMENT, size + offsetof(struct FastBuffer, data)))
+  if (buffer = (struct FastBuffer*)memalign(RING_DESC_ALIGNMENT, size + sizeof(struct FastBuffer)))
   {
     buffer->tag    = tag;
     buffer->pool   = pool;
     buffer->next   = NULL;
-    buffer->size   = malloc_usable_size(buffer) - offsetof(struct FastBuffer, data);
+    buffer->size   = size;
     buffer->length = 0;
     buffer->status = FAST_BUFFER_STATUS_ADDED;
     buffer->index  = INT32_MIN;

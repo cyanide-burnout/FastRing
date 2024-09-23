@@ -46,13 +46,17 @@ struct FastRingBufferProvider;
 #define RING_DESC_STATE_SUBMITTED  3
 
 #define RING_DESC_ALIGNMENT        64
+#define RING_DESC_CRC4_MASK        0xf
 #define RING_DESC_USER_LENGTH      (sizeof(struct FastRingDescriptor) - offsetof(struct FastRingDescriptor, data))
 
-#define RING_DESC_OPTION_MASK      (RING_DESC_ALIGNMENT - 1)  // Fortunately due to alignment lower bits of SQE/CQE user_data can be used to pass an option
-#define RING_DESC_OPTION_IGNORE    1                          // This option is in use by FastPoll and Timeout APIs
+// Fortunately due to alignment the lower bits of SQE/CQE user_data can be used to pass CRC4 and an option
+
+#define RING_DESC_OPTION_MASK      (((uint64_t)RING_DESC_ALIGNMENT - 1ULL) ^ (uint64_t)RING_DESC_CRC4_MASK)
+#define RING_DESC_OPTION_IGNORE    (1 << 4)
+#define RING_DESC_OPTION_USER      (1 << 5)
 
 #define RING_DATA_UNDEFINED        (LIBURING_UDATA_TIMEOUT - 1ULL)
-#define RING_DATA_ADDRESS_MASK     (UINT64_MAX ^ (uint64_t)RING_DESC_OPTION_MASK)
+#define RING_DATA_ADDRESS_MASK     (UINT64_MAX ^ ((uint64_t)RING_DESC_ALIGNMENT - 1ULL))
 
 #define RING_REASON_COMPLETE       0
 #define RING_REASON_INCOMPLETE     1
@@ -115,7 +119,8 @@ struct FastRingDescriptor
   void* closure;                                 // ( 52) User's closure
   HandleFastRingEventFunction function;          // ( 60) Handler function
   ATOMIC(struct FastRingDescriptor*) heap;       // ( 68) Next allocated descriptor (see FastRing's heap)
-  uint32_t alignment[3];                         // ( 80)
+  uint32_t integrity;                            // ( 72) CRC4(function + closure)
+  uint32_t alignment[2];                         // ( 80)
 
   struct io_uring_sqe submission;                // (144) Copy of actual SQE
   uint64_t reserved[8];                          // (208) Reserved for IORING_SETUP_SQE128
@@ -192,6 +197,7 @@ struct FastRing
 
 int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask);
 
+void PrepareFastRingDescriptor(struct FastRingDescriptor* descriptor, int option);
 void SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option);
 void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last);
 struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingEventFunction function, void* closure);
