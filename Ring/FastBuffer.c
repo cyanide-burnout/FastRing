@@ -24,11 +24,11 @@ void ReleaseFastBufferPool(struct FastBufferPool* pool)
       (atomic_fetch_sub_explicit(&pool->count, 1, memory_order_relaxed) == 1))
   {
     heap = atomic_load_explicit(&pool->heap, memory_order_acquire);
-    heap = REMOVE_ABA_TAG(struct FastBuffer, heap, RING_DESC_ALIGNMENT);
+    heap = REMOVE_ABA_TAG(struct FastBuffer, heap, FAST_BUFFER_ALIGNMENT);
 
     while (buffer = heap)
     {
-      heap = REMOVE_ABA_TAG(struct FastBuffer, buffer->next, RING_DESC_ALIGNMENT);
+      heap = REMOVE_ABA_TAG(struct FastBuffer, buffer->next, FAST_BUFFER_ALIGNMENT);
       UpdateFastRingRegisteredBuffer(pool->ring, buffer->index, NULL, 0);
       free(buffer);
     }
@@ -70,7 +70,7 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
   atomic_fetch_add_explicit(&pool->count, 1, memory_order_relaxed);
 
   do pointer = atomic_load_explicit(&pool->heap, memory_order_acquire);
-  while ((buffer = REMOVE_ABA_TAG(struct FastBuffer, pointer, RING_DESC_ALIGNMENT)) &&
+  while ((buffer = REMOVE_ABA_TAG(struct FastBuffer, pointer, FAST_BUFFER_ALIGNMENT)) &&
          (!atomic_compare_exchange_weak_explicit(&pool->heap, &pointer, buffer->next, memory_order_relaxed, memory_order_relaxed)));
 
   if (buffer != NULL)
@@ -89,7 +89,7 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
     free(buffer);
   }
 
-  if (buffer = (struct FastBuffer*)memalign(RING_DESC_ALIGNMENT, size + sizeof(struct FastBuffer)))
+  if (buffer = (struct FastBuffer*)memalign(FAST_BUFFER_ALIGNMENT, size + sizeof(struct FastBuffer)))
   {
     buffer->tag    = tag;
     buffer->pool   = pool;
@@ -125,7 +125,7 @@ void ReleaseFastBuffer(struct FastBuffer* buffer)
     tag  = atomic_fetch_add_explicit(&buffer->tag, 1, memory_order_relaxed) + 1;
 
     do buffer->next = atomic_load_explicit(&pool->heap, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(&pool->heap, &buffer->next, ADD_ABA_TAG(buffer, tag, 0, RING_DESC_ALIGNMENT), memory_order_release, memory_order_relaxed));
+    while (!atomic_compare_exchange_weak_explicit(&pool->heap, &buffer->next, ADD_ABA_TAG(buffer, tag, 0, FAST_BUFFER_ALIGNMENT), memory_order_release, memory_order_relaxed));
 
     // Decrease pool reference count and release when required
     ReleaseFastBufferPool(pool);

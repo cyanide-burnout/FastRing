@@ -45,15 +45,15 @@ struct FastRingBufferProvider;
 #define RING_DESC_STATE_PENDING    2
 #define RING_DESC_STATE_SUBMITTED  3
 
-#define RING_DESC_ALIGNMENT        64
-#define RING_DESC_CRC4_MASK        0xf
-#define RING_DESC_USER_LENGTH      (sizeof(struct FastRingDescriptor) - offsetof(struct FastRingDescriptor, data))
+#define RING_DESC_ALIGNMENT        512
+#define RING_DESC_INTEGRITY_MASK   0x3f
 
-// Fortunately due to alignment the lower bits of SQE/CQE user_data can be used to pass CRC4 and an option
+// Fortunately due to alignment the lower bits of SQE/CQE user_data can be used to pass CRC6 and an option
 
-#define RING_DESC_OPTION_MASK      (((uint64_t)RING_DESC_ALIGNMENT - 1ULL) ^ (uint64_t)RING_DESC_CRC4_MASK)
-#define RING_DESC_OPTION_IGNORE    (1 << 4)
-#define RING_DESC_OPTION_USER      (1 << 5)
+#define RING_DESC_OPTION_MASK      (((uint64_t)RING_DESC_ALIGNMENT - 1ULL) ^ (uint64_t)RING_DESC_INTEGRITY_MASK)
+#define RING_DESC_OPTION_IGNORE    (RING_DESC_ALIGNMENT >> 1)
+#define RING_DESC_OPTION_USER1     (RING_DESC_ALIGNMENT >> 2)
+#define RING_DESC_OPTION_USER2     (RING_DESC_ALIGNMENT >> 3)
 
 #define RING_DATA_UNDEFINED        (LIBURING_UDATA_TIMEOUT - 1ULL)
 #define RING_DATA_ADDRESS_MASK     (UINT64_MAX ^ ((uint64_t)RING_DESC_ALIGNMENT - 1ULL))
@@ -102,6 +102,7 @@ union FastRingData
   struct FastRingPollData poll;
   struct FastRingSocketData socket;
   struct FastRingTimeoutData timeout;
+  uint8_t data[256];
 };
 
 struct FastRingDescriptor
@@ -119,13 +120,13 @@ struct FastRingDescriptor
   void* closure;                                 // ( 52) User's closure
   HandleFastRingEventFunction function;          // ( 60) Handler function
   ATOMIC(struct FastRingDescriptor*) heap;       // ( 68) Next allocated descriptor (see FastRing's heap)
-  uint32_t integrity;                            // ( 72) CRC4(function + closure)
+  uint32_t integrity;                            // ( 72) CRC6(function + closure + tag)
   uint32_t alignment[2];                         // ( 80)
 
-  struct io_uring_sqe submission;                // (144) Copy of actual SQE
-  uint64_t reserved[8];                          // (208) Reserved for IORING_SETUP_SQE128
-  union FastRingData data;                       // (...) User's specified data
-};
+  struct io_uring_sqe submission;                // (152) Copy of actual SQE
+  uint64_t reserved[8];                          // (216) Reserved for IORING_SETUP_SQE128
+  union FastRingData data;                       // (472) User's specified data
+};                                               // ~ 512 bytes block including malloc header (usualy 24 bytes)
 
 struct FastRingLock
 {

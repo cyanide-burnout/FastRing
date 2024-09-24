@@ -9,6 +9,7 @@ extern "C"
 #endif
 
 #define FAST_BUFFER(address)          ((struct FastBuffer*)(((uint8_t*)(address)) - offsetof(struct FastBuffer, data)))
+#define FAST_BUFFER_ALIGNMENT         64
 
 #define FAST_BUFFER_REGISTER          (1 << 0)
 
