@@ -130,6 +130,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     if ((completion->res != -ENOBUFS) &&
         (completion->res != -ECANCELED))
     {
+      socket->outbound.condition |= POLLERR;
+
       if (completion->flags & IORING_CQE_F_MORE)
       {
         CallHandlerFunction(socket, POLLERR, -completion->res);
@@ -210,9 +212,9 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
   Continue:
 
-  if (( descriptor->data.number == 0ULL) &&
-      (~descriptor->submission.flags & IOSQE_IO_LINK) &&
-      ( socket->outbound.condition   & POLLOUT))
+  if ((~descriptor->submission.flags & IOSQE_IO_LINK) &&
+      ( socket->outbound.condition   & POLLOUT) &&
+      ( descriptor->data.number == 0ULL))
   {
     // In case of TCP the kernel may occupy a buffer for much longer,
     // notify handler once about accepted buffer as soon as possible
@@ -266,12 +268,12 @@ static void HandleOutboundFlush(struct FastRing* ring, void* closure)
   socket                      = (struct FastSocket*)closure;
   socket->outbound.condition &= ~POLLIN;
 
-  if (likely(~socket->outbound.condition & POLLOUT))
+  if (likely((~socket->outbound.condition & POLLOUT) &&
+             (batch = socket->outbound.tail)))
   {
-    batch                                  = socket->outbound.tail;
+    socket->outbound.condition            |= POLLOUT;
     socket->outbound.tail                  = batch->next;
     *((uintptr_t*)&socket->outbound.head) *= (uintptr_t)(socket->outbound.tail != NULL);
-    socket->outbound.condition            |= POLLOUT;
 
     SubmitFastRingDescriptorRange(batch->tail, batch->head);
     ReleaseOutboundBatch(&socket->outbound, batch);
@@ -403,6 +405,13 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
     return -EINVAL;
   }
 
+  if (unlikely((socket->outbound.condition & POLLERR)))
+  {
+    ReleaseFastRingDescriptor(descriptor);
+    ReleaseFastBuffer(buffer);
+    return -EPIPE;
+  }
+
   if (unlikely(!((batch = socket->outbound.head) &&
                  (batch->count < socket->outbound.limit) ||
                  (batch = AllocateOutboundBatch(&socket->outbound)))))
@@ -416,8 +425,10 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
   descriptor->function           = HandleOutboundCompletion;
   descriptor->closure            = socket;
   descriptor->submission.ioprio |= IORING_RECVSEND_POLL_FIRST *
-    ((descriptor->submission.opcode != IORING_OP_POLL_ADD) &&
-     (descriptor->submission.opcode != IORING_OP_URING_CMD));
+    ((descriptor->submission.opcode == IORING_OP_SEND)    ||
+     (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
+     (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
+     (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC));
 
   PrepareFastRingDescriptor(descriptor, 0);
 
@@ -588,7 +599,7 @@ void ReleaseFastSocket(struct FastSocket* socket)
     if (descriptor = socket->inbound.descriptor)
     {
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      io_uring_prep_cancel(&descriptor->submission, descriptor, 0);
+      io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       socket->inbound.descriptor = NULL;
     }

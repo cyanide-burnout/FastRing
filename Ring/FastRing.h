@@ -120,8 +120,8 @@ struct FastRingDescriptor
   void* closure;                                 // ( 52) User's closure
   HandleFastRingEventFunction function;          // ( 60) Handler function
   ATOMIC(struct FastRingDescriptor*) heap;       // ( 68) Next allocated descriptor (see FastRing's heap)
-  uint32_t integrity;                            // ( 72) CRC6(function + closure + tag)
-  uint32_t alignment[2];                         // ( 80)
+  uint64_t identifier;                           // ( 76) Prepared user_data identifier for *_update() and *_remove() SQEs
+  uint32_t integrity;                            // ( 80) CRC6(function + closure + tag)
 
   struct io_uring_sqe submission;                // (152) Copy of actual SQE
   uint64_t reserved[8];                          // (216) Reserved for IORING_SETUP_SQE128

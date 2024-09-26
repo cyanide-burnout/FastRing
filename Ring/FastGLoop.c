@@ -45,6 +45,7 @@ static int ExpandPollData(struct FastGLoop* loop, int handle)
 static void HandleRequest(struct FastGLoop* loop)
 {
   struct FastRingDescriptor* descriptor;
+  struct FastRingDescriptor* other;
   struct FastGLoopPoolData* data;
   GPollFD* entry;
   GPollFD* limit;
@@ -91,11 +92,11 @@ static void HandleRequest(struct FastGLoop* loop)
     handle = *(-- top);
     data   = loop->files + handle;
 
-    if ((data->descriptor != NULL) &&
-        (data->previous   != data->current) &&
-        (descriptor = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
+    if ((other           = data->descriptor) &&
+        (data->previous != data->current)    &&
+        (descriptor      = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
     {
-      io_uring_prep_poll_update(&descriptor->submission, (uint64_t)data->descriptor, (uint64_t)data->descriptor, data->current, IORING_POLL_UPDATE_EVENTS);
+      io_uring_prep_poll_update(&descriptor->submission, other->identifier, other->identifier, data->current, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
       SubmitFastRingDescriptor(descriptor, 0);
       data->previous          = data->current;
       descriptor->data.number = handle;
@@ -113,15 +114,15 @@ static void HandleRequest(struct FastGLoop* loop)
 
   // Submit timeout
 
-  if ((loop->descriptor != NULL) &&
+  if ((other      = loop->descriptor) &&
       (descriptor = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
   {
-    io_uring_prep_timeout_update(&descriptor->submission, &loop->timeout, (uint64_t)loop->descriptor, 0);
+    io_uring_prep_timeout_update(&descriptor->submission, &loop->timeout, other->identifier, 0);
     SubmitFastRingDescriptor(descriptor, 0);
   }
 
   if ((loop->descriptor == NULL) &&
-      (descriptor = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
+      (descriptor        = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
   {
     io_uring_prep_timeout(&descriptor->submission, &loop->timeout, 0, 0);
     SubmitFastRingDescriptor(descriptor, 0);

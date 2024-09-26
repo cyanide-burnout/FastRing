@@ -40,7 +40,7 @@ static inline struct ThreadCallState* __attribute__((always_inline)) PeekThreadC
 
   do pointer = atomic_load_explicit(&call->stack, memory_order_acquire);
   while ((state = REMOVE_ABA_TAG(struct ThreadCallState, pointer, ALIGNMENT)) &&
-         (!atomic_compare_exchange_weak_explicit(&call->stack, &pointer, state->next, memory_order_relaxed, memory_order_relaxed)));
+         (!atomic_compare_exchange_weak_explicit(&call->stack, &pointer, state->next, memory_order_acquire, memory_order_relaxed)));
 
   return state;
 }
@@ -212,7 +212,7 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
     if (descriptor = call->descriptor)
     {
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      io_uring_prep_cancel(&descriptor->submission, call->descriptor, 0);
+      io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
 
       descriptor->function = NULL;

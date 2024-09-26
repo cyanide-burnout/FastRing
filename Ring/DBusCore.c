@@ -97,7 +97,7 @@ static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
 
     // Update any incomplete io_uring_prep_poll_add()
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_prep_poll_update(&descriptor->submission, (uintptr_t)descriptor, (uintptr_t)descriptor, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
+    io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     return TRUE;
   }
@@ -135,7 +135,7 @@ static void RemoveWatch(DBusWatch* watch, void* data)
 
     // Cancel any incomplete io_uring_prep_poll_add()
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_prep_cancel(&descriptor->submission, descriptor, 0);
+    io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }
 }
