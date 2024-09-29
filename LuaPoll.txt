@@ -22,13 +22,13 @@
 
       local arguments, status = coroutine.yield()                         -- Yield unless wake() called
       local arguments, status = coroutine.yield(interval)                 -- Yield with an interval
-      local arguments, status = coroutine.yield(handle, flags, interval)  -- Yield and wait for descriptor event (status contains event flags, or 0 when interval reached)
+      local arguments, status = coroutine.yield(handle, flags, interval)  -- Yield and wait for file descriptor event (status contains event flags, or 0 when interval reached)
 
     Status values:
        - can be set of poll.EVENT_* (descriptor event)
        - poll.STATUS_AWAKE   when interval = poll.IMMEDIATELY or poll.wake(worker) is called
        - poll.STATUS_TIMEOUT when interval reached
 
-    * Create decriptor event handler
-    Syntax: poll.createHandler(descriptor, flags, function, agruments)
+    * Create file descriptor event handler
+    Syntax: poll.createHandler(handle, flags, function, agruments)
       flags can be a sum of poll.EVENT_READ, poll.EVENT_WRITE, poll.EVENT_ERROR and poll.EVENT_HANGUP

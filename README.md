@@ -54,3 +54,12 @@ D-BUS adapter for FastRing
 ## WatchDog
 
 WatchDog implementation for systemd
+
+## LuaPoll
+
+Bindings to liblua / luajit. Please read LuaPoll.txt
+
+## Resolver
+
+Bindings to DNS resolution library C-ARES
+
