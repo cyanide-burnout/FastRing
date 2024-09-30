@@ -51,6 +51,7 @@ struct FastGLoop
 
 struct FastGLoop* CreateFastGLoop(struct FastRing* ring, int interval);
 void ReleaseFastGLoop(struct FastGLoop* loop);
+void TouchFastGLoop(struct FastGLoop* loop);
 void StopFastGLoop(struct FastGLoop* loop);
 int IsInFastGLoop();
 

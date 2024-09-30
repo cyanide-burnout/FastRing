@@ -63,3 +63,6 @@ Bindings to liblua / luajit. Please read LuaPoll.txt
 
 Bindings to DNS resolution library C-ARES
 
+## LWSCore
+
+WebSocket client library on top of libwebsockets, it uses main loop integration over Glib 2.0

@@ -85,6 +85,7 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
   context = (struct Context*)descriptor->closure;
 
   if ((completion == NULL)  ||
+      (completion->res == -ECANCELED) ||
       (completion->user_data & RING_DESC_OPTION_IGNORE))
   {
     // Descriptor is in cancellation state
@@ -104,22 +105,22 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
 
   if (descriptor = context->poll)
   {
-    context->poll        = NULL;
-    descriptor->closure  = NULL;
-    descriptor->function = NULL;
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    context->poll        = NULL;
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
   }
 
   if (descriptor = context->timeout)
   {
-    context->timeout     = NULL;
-    descriptor->closure  = NULL;
-    descriptor->function = NULL;
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    context->timeout     = NULL;
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
   }
 
   lua_getfield(context->state, LUA_REGISTRYINDEX, "LuaPoll");
@@ -338,22 +339,22 @@ static int ReleaseLuaWorker(lua_State* state)
 
   if (descriptor = context->poll)
   {
-    context->poll        = NULL;
-    descriptor->closure  = NULL;
-    descriptor->function = NULL;
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    context->poll        = NULL;
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
   }
 
   if (descriptor = context->timeout)
   {
-    context->timeout     = NULL;
-    descriptor->closure  = NULL;
-    descriptor->function = NULL;
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    context->timeout     = NULL;
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
   }
 
   lua_getfield(state, LUA_REGISTRYINDEX, "LuaPoll");
@@ -382,12 +383,12 @@ static int ReleaseLuaHandler(lua_State* state)
 
   if (descriptor = context->poll)
   {
-    context->poll        = NULL;
-    descriptor->closure  = NULL;
-    descriptor->function = NULL;
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    context->poll        = NULL;
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
   }
 
   lua_getfield(state, LUA_REGISTRYINDEX, "LuaPoll");

@@ -92,14 +92,15 @@ static void HandleRequest(struct FastGLoop* loop)
     handle = *(-- top);
     data   = loop->files + handle;
 
-    if ((other           = data->descriptor) &&
-        (data->previous != data->current)    &&
+    if ((data->previous != data->current)    &&
+        (other           = data->descriptor) &&
         (descriptor      = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
     {
-      io_uring_prep_poll_update(&descriptor->submission, other->identifier, other->identifier, data->current, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
+      io_uring_prep_poll_remove(&descriptor->submission, other->identifier);
+      descriptor->submission.flags |= IOSQE_IO_HARDLINK;
+      descriptor->linked            = 2;
+      data->descriptor              = NULL;
       SubmitFastRingDescriptor(descriptor, 0);
-      data->previous          = data->current;
-      descriptor->data.number = handle;
     }
 
     if ((data->descriptor == NULL) &&
@@ -137,7 +138,8 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
   int condition;
   int handle;
 
-  if (completion != NULL)
+  if ((completion      != NULL) &&
+      (completion->res != -ECANCELED))
   {
     loop      = (struct FastGLoop*)descriptor->closure;
     condition = FALSE;
@@ -152,27 +154,16 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
         data->descriptor = NULL;
         break;
 
+      case IORING_OP_TIMEOUT_REMOVE:
+        if (completion->res == 0)
+        {
+          // Timeout successfully updated
+          break;
+        }
+
       case IORING_OP_TIMEOUT:
         condition        = TRUE;
         loop->descriptor = NULL;
-        break;
-
-      case IORING_OP_POLL_REMOVE:
-        if (completion->res < 0)
-        {
-          condition        = TRUE;
-          handle           = descriptor->data.number;
-          data             = loop->files + handle;
-          data->descriptor = NULL;
-        }
-        break;
-
-      case IORING_OP_TIMEOUT_REMOVE:
-        if (completion->res < 0)
-        {
-          condition        = TRUE;
-          loop->descriptor = NULL;
-        }
         break;
     }
 
@@ -304,6 +295,19 @@ void ReleaseFastGLoop(struct FastGLoop* loop)
     free(loop->fibers[FIBER_LOOP].uc_stack.ss_sp);
     free(loop->files);
     free(loop);
+  }
+}
+
+void TouchFastGLoop(struct FastGLoop* loop)
+{
+  struct FastRingDescriptor* descriptor;
+
+  if ((loop  != NULL) &&
+      (state == NULL) &&
+      (!loop->condition))
+  {
+    loop->condition = TRUE;
+    SetFastRingFlushHandler(loop->ring, HandleFlush, loop);
   }
 }
 
