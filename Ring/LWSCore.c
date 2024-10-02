@@ -122,7 +122,7 @@ struct LWSMessage* AllocateLWSMessage(struct LWSSession* session, size_t length,
 
 void TransmitLWSMessage(struct LWSSession* session)
 {
-  if (++ session->queue->count == 1)
+  if ((++ session->queue->count) == 1)
   {
     lws_callback_on_writable(session->instance);
     TouchFastGLoop(session->loop);

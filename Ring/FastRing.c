@@ -33,7 +33,7 @@
 
 // Supplementary
 
-static uint8_t GetCRC6(uint8_t* data, int length, uint8_t value)
+static inline uint8_t GetCRC6(uint64_t data, int length, uint8_t value)
 {
   static const uint8_t table[] =
   {
@@ -55,9 +55,18 @@ static uint8_t GetCRC6(uint8_t* data, int length, uint8_t value)
     0x21, 0x0e, 0x10, 0x3f, 0x2c, 0x03, 0x1d, 0x32, 0x3b, 0x14, 0x0a, 0x25, 0x36, 0x19, 0x07, 0x28
   };
 
-  while (length --)  value = table[(value << 2) ^ *(data ++)] & 0x3f;
+  __builtin_prefetch(table +   0, 0, 2);
+  __builtin_prefetch(table +  64, 0, 2);
+  __builtin_prefetch(table + 128, 0, 2);
+  __builtin_prefetch(table + 192, 0, 2);
 
-  return value & 0x3f;
+  while (length --)
+  {
+    value   = table[(value << 2) ^ (data & 0xff)];
+    data  >>= 8;
+  }
+
+  return value;
 }
 
 static void* ExpandRingFileList(struct FastRingFileList* list, int handle)
@@ -149,9 +158,9 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
 static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
   descriptor->state                = RING_DESC_STATE_PENDING;
-  descriptor->integrity            = GetCRC6((uint8_t*)&descriptor->function, sizeof(uintptr_t), 0);
-  descriptor->integrity            = GetCRC6((uint8_t*)&descriptor->closure,  sizeof(uintptr_t), descriptor->integrity);
-  descriptor->integrity            = GetCRC6((uint8_t*)&descriptor->tag,      sizeof(uint32_t),  descriptor->integrity);
+  descriptor->integrity            = GetCRC6((uint64_t)descriptor->function, sizeof(uintptr_t), 0);
+  descriptor->integrity            = GetCRC6((uint64_t)descriptor->closure,  sizeof(uintptr_t), descriptor->integrity);
+  descriptor->integrity            = GetCRC6((uint64_t)descriptor->tag,      sizeof(uint32_t),  descriptor->integrity);
   descriptor->identifier           = (uint64_t)descriptor             | (uint64_t)descriptor->integrity;
   descriptor->submission.user_data = (uint64_t)descriptor->identifier | (uint64_t)(option & RING_DESC_OPTION_MASK);
 }
