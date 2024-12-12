@@ -98,7 +98,8 @@ struct LWSMessage* AllocateLWSMessage(struct LWSSession* session, size_t length,
   queue   = session->queue;
   message = NULL;
 
-  if (queue->count < queue->length)
+  if ((queue != NULL) &&
+      (queue->count < queue->length))
   {
     message = queue->messages + queue->writing;
     size    = length + LWS_PRE;

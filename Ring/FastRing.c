@@ -203,11 +203,12 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
       descriptor->next->previous = NULL;
     }
 
-    descriptor->state     = RING_DESC_STATE_FREE;
-    descriptor->closure   = NULL;
-    descriptor->function  = NULL;
-    descriptor->previous  = NULL;
-    descriptor->integrity = 0;
+    descriptor->state      = RING_DESC_STATE_FREE;
+    descriptor->closure    = NULL;
+    descriptor->function   = NULL;
+    descriptor->previous   = NULL;
+    descriptor->integrity  = 0;
+    descriptor->identifier = 0;
 
     atomic_thread_fence(memory_order_release);
     ReleaseRingDescriptor(ring, descriptor);
@@ -383,10 +384,12 @@ void ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor)
   if (likely((descriptor != NULL) &&
              (atomic_fetch_sub_explicit(&descriptor->references, 1, memory_order_relaxed) == 1)))
   {
-    descriptor->function = NULL;
-    descriptor->previous = NULL;
-    descriptor->closure  = NULL;
-    descriptor->state    = RING_DESC_STATE_FREE;
+    descriptor->function   = NULL;
+    descriptor->previous   = NULL;
+    descriptor->closure    = NULL;
+    descriptor->state      = RING_DESC_STATE_FREE;
+    descriptor->integrity  = 0;
+    descriptor->identifier = 0;
 
     atomic_thread_fence(memory_order_release);
     ReleaseRingDescriptor(descriptor->ring, descriptor);
