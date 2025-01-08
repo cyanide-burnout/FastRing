@@ -10,7 +10,8 @@ extern "C"
 #endif
 
 #define FASTSOCKET_MODE_REGULAR    0
-#define FASTSOCKET_MODE_ZERO_COPY  1
+#define FASTSOCKET_MODE_ZERO_COPY  MSG_ZEROCOPY
+#define FASTSOCKET_MODE_AUTO_CORK  MSG_MORE
 
 struct FastSocket;
 

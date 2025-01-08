@@ -323,9 +323,9 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
   else
   {
     engine->outbound.tail->linked                = engine->outbound.count;
-    engine->outbound.head->next                  = descriptor;
     engine->outbound.head->submission.flags     |= IOSQE_IO_LINK;
-    engine->outbound.head->submission.msg_flags  = MSG_WAITALL;
+    engine->outbound.head->submission.msg_flags  = MSG_MORE;
+    engine->outbound.head->next                  = descriptor;
     engine->outbound.head                        = descriptor;
   }
 

@@ -176,7 +176,8 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
   }
 
   if (unlikely((completion != NULL) &&
-               (descriptor->integrity != (completion->user_data & RING_DESC_INTEGRITY_MASK))))
+               ((descriptor->identifier == 0ULL) ||
+                (descriptor->integrity  != (completion->user_data & RING_DESC_INTEGRITY_MASK)))))
   {
     // Leaked descriptor: someone was not in good mood and forgot to solve some cases
     // Don't touch the descriptor, it could be still in use somewhere else

@@ -299,7 +299,7 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
     socket->inbound.pool       = inbound;
     socket->outbound.limit     = ring->ring.cq.ring_entries / 2;
     socket->outbound.pool      = outbound;
-    socket->outbound.mode      = mode & FASTSOCKET_MODE_ZERO_COPY;
+    socket->outbound.mode      = mode;
 
     descriptor = socket->inbound.descriptor;
 
@@ -442,10 +442,16 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
   }
   else
   {
-    batch->tail->linked            = batch->count;
-    batch->head->submission.flags |= IOSQE_IO_LINK;
-    batch->head->next              = descriptor;
-    batch->head                    = descriptor;
+    batch->head->submission.flags     |= IOSQE_IO_LINK;
+    batch->head->submission.msg_flags |= (socket->outbound.mode & MSG_MORE) *
+      ((descriptor->submission.opcode == IORING_OP_SEND)    ||
+       (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
+       (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
+       (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC));
+
+    batch->tail->linked = batch->count;
+    batch->head->next   = descriptor;
+    batch->head         = descriptor;
   }
 
   if (unlikely(~socket->outbound.condition & POLLIN))
@@ -509,7 +515,7 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
   {
     io_uring_prep_send(&descriptor->submission, socket->handle, buffer->data, length, flags);
 
-    descriptor->submission.opcode += socket->outbound.mode * (IORING_OP_SEND_ZC - IORING_OP_SEND);
+    descriptor->submission.opcode += (IORING_OP_SEND_ZC - IORING_OP_SEND) * !!(socket->outbound.mode & MSG_ZEROCOPY);
 
     if (message->msg_namelen != 0)
     {
@@ -522,7 +528,7 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
     io_uring_prep_sendmsg(&descriptor->submission, socket->handle, &descriptor->data.socket.message, flags);
     memcpy(pointer, message->msg_control, message->msg_controllen);
 
-    descriptor->submission.opcode                  += socket->outbound.mode * (IORING_OP_SENDMSG_ZC - IORING_OP_SENDMSG);
+    descriptor->submission.opcode                  += (IORING_OP_SENDMSG_ZC - IORING_OP_SENDMSG) * !!(socket->outbound.mode & MSG_ZEROCOPY);
     descriptor->data.socket.vector.iov_base         = buffer->data;
     descriptor->data.socket.vector.iov_len          = length;
     descriptor->data.socket.message.msg_iov         = &descriptor->data.socket.vector;
@@ -568,7 +574,7 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   memcpy(buffer->data, data, size);
   io_uring_prep_send(&descriptor->submission, socket->handle, buffer->data, size, flags);
 
-  descriptor->submission.opcode += socket->outbound.mode * (IORING_OP_SEND_ZC - IORING_OP_SEND);
+  descriptor->submission.opcode += (IORING_OP_SEND_ZC - IORING_OP_SEND) * !!(socket->outbound.mode & MSG_ZEROCOPY);
 
   if (length != 0)
   {

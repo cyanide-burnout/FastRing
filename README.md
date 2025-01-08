@@ -4,6 +4,10 @@ Event multiplexing library for io_uring
 
 This is extract of my libraries I am using in my projects https://brandmeister.network and https://tetrapack.online
 
+The library solves following problems:
+- Submission/complition multiplexing
+- Submission queue boundary control
+
 ## FastRing
 
 TBD
