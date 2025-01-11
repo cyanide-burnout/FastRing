@@ -7,6 +7,8 @@ This is extract of my libraries I am using in my projects https://brandmeister.n
 The library solves following problems:
 - Submission/complition multiplexing
 - Submission queue boundary control
+- Events and handlers tracking, submission ordering
+- Emulation of classic poll-based approach including handle watch and timers
 
 ## FastRing
 

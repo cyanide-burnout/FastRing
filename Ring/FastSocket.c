@@ -244,11 +244,14 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     {
       case IORING_OP_SEND:
       case IORING_OP_SEND_ZC:
+      case IORING_OP_WRITE:
+      case IORING_OP_WRITE_FIXED:
         ReleaseFastBuffer(FAST_BUFFER(descriptor->submission.addr));
         break;
 
       case IORING_OP_SENDMSG:
       case IORING_OP_SENDMSG_ZC:
+      case IORING_OP_WRITEV:
         ReleaseFastBuffer(FAST_BUFFER(descriptor->data.socket.vector.iov_base));
         break;
     }
@@ -316,16 +319,25 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
       socket->outbound.limit = limit;
     }
 
+#if (IO_URING_VERSION_MAJOR > 2) || (IO_URING_VERSION_MAJOR == 2) && (IO_URING_VERSION_MINOR >= 6)
+    if (mode & MSG_DONTROUTE)
+    {
+      io_uring_prep_read_multishot(&descriptor->submission, handle, 0, -1, 0);
+      goto Continue;
+    }
+#endif
+
     if (message == NULL)
     {
       // Socket address or control data are not required, make simple multi-short submission
       io_uring_prep_recv_multishot(&descriptor->submission, handle, NULL, 0, flags);
+      goto Continue;
     }
-    else
-    {
-      memcpy(&descriptor->data.socket.message, message, sizeof(struct msghdr));
-      io_uring_prep_recvmsg_multishot(&descriptor->submission, handle, &descriptor->data.socket.message, flags);
-    }
+
+    memcpy(&descriptor->data.socket.message, message, sizeof(struct msghdr));
+    io_uring_prep_recvmsg_multishot(&descriptor->submission, handle, &descriptor->data.socket.message, flags);
+
+    Continue:
 
     PrepareFastRingBuffer(socket->inbound.provider, &descriptor->submission);
     SubmitFastRingDescriptor(socket->inbound.descriptor, 0);
@@ -429,7 +441,6 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
      (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
      (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
      (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC));
-
   PrepareFastRingDescriptor(descriptor, 0);
 
   batch->count  ++;
@@ -574,7 +585,9 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   memcpy(buffer->data, data, size);
   io_uring_prep_send(&descriptor->submission, socket->handle, buffer->data, size, flags);
 
-  descriptor->submission.opcode += (IORING_OP_SEND_ZC - IORING_OP_SEND) * !!(socket->outbound.mode & MSG_ZEROCOPY);
+  descriptor->submission.opcode += (IORING_OP_SEND_ZC - IORING_OP_SEND)  * !!(socket->outbound.mode & MSG_ZEROCOPY);
+  descriptor->submission.opcode -= (IORING_OP_SEND    - IORING_OP_WRITE) * !!(socket->outbound.mode & MSG_DONTROUTE);
+  descriptor->submission.off    -=                                         !!(socket->outbound.mode & MSG_DONTROUTE);
 
   if (length != 0)
   {

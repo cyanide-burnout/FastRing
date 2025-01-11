@@ -13,6 +13,10 @@ extern "C"
 #define FASTSOCKET_MODE_ZERO_COPY  MSG_ZEROCOPY
 #define FASTSOCKET_MODE_AUTO_CORK  MSG_MORE
 
+#if (IO_URING_VERSION_MAJOR > 2) || (IO_URING_VERSION_MAJOR == 2) && (IO_URING_VERSION_MINOR >= 6)
+#define FASTSOCKET_MODE_FILE_IO    MSG_DONTROUTE
+#endif
+
 struct FastSocket;
 
 typedef void (*HandleFastSocketEvent)(struct FastSocket* socket, int event, int parameter);

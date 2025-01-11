@@ -8,8 +8,8 @@
 
 #include "CRC32C.h"
 
-#define HANDLE_READ                (RING_EVENT_READ | RING_EVENT_ERROR | RING_EVENT_HANGUP)
-#define HANDLE_WRITE               (RING_EVENT_WRITE)
+#define HANDLE_READ                (RING_POLL_READ | RING_POLL_ERROR | RING_POLL_HANGUP)
+#define HANDLE_WRITE               (RING_POLL_WRITE)
 
 #define ENTRY_FLAG_DATA            (1 << 0)
 #define ENTRY_FLAG_NEW             (1 << 1)
@@ -55,7 +55,7 @@ static void ManageResolverHandler(void* data, ares_socket_t handle, int readable
   state = (struct ResolverState*)data;
   flags = ((!!readable) * (HANDLE_READ)) | ((!!writable) * (HANDLE_READ | HANDLE_WRITE));
 
-  ManageFastRingEventHandler(state->ring, handle, flags, HandleSocketEvent, data);
+  ManageFastRingPoll(state->ring, handle, flags, HandleSocketEvent, data);
 }
 
 struct ResolverState* CreateResolver(struct FastRing* ring)

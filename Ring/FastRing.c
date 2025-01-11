@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#define __USE_GNU
 
 #include "FastRing.h"
 
@@ -26,9 +27,9 @@
 #define FILE_LIST_INCREASE       1024
 
 #ifndef USE_RING_LEVEL_TRIGGERING
-#define RING_EVENT_FLAGS(flags)  ((~flags >> RING_EVENT_FLAGS_SHIFT) & (IORING_POLL_ADD_MULTI))
+#define RING_POLL_FLAGS(flags)  ((~flags >> RING_POLL_FLAGS_SHIFT) & (IORING_POLL_ADD_MULTI))
 #else
-#define RING_EVENT_FLAGS(flags)  ((~flags >> RING_EVENT_FLAGS_SHIFT) & (IORING_POLL_ADD_MULTI | IORING_POLL_ADD_LEVEL))
+#define RING_POLL_FLAGS(flags)  ((~flags >> RING_POLL_FLAGS_SHIFT) & (IORING_POLL_ADD_MULTI | IORING_POLL_ADD_LEVEL))
 #endif
 
 // Supplementary
@@ -71,49 +72,40 @@ static inline uint8_t GetCRC6(uint64_t data, int length, uint8_t value)
 
 static void* ExpandRingFileList(struct FastRingFileList* list, int handle)
 {
-  struct FastRingFileEntry* data;
+  struct FastRingFileEntry* entries;
   uint32_t length;
 
   length  = ((handle + 1) | (FILE_LIST_INCREASE - 1)) + 1;
-  data    = (struct FastRingFileEntry*)realloc(list->data, length * sizeof(struct FastRingFileEntry));
+  entries = (struct FastRingFileEntry*)realloc(list->entries, length * sizeof(struct FastRingFileEntry));
 
-  if (likely(data != NULL))
+  if (likely(entries != NULL))
   {
-    memset(data + list->length, 0, (length - list->length) * sizeof(struct FastRingFileEntry));
-    list->length = length;
-    list->data   = data;
+    memset(entries + list->length, 0, (length - list->length) * sizeof(struct FastRingFileEntry));
+    list->length  = length;
+    list->entries = entries;
   }
 
-  return data;
+  return entries;
 }
 
 static void* ExpandRingFlushList(struct FastRingFlushList* list)
 {
-  struct FastRingFlushEntry* data;
+  struct FastRingFlushEntry* entries;
   uint32_t length;
 
-  length = list->length + FLUSH_LIST_INCREASE;
-  data   = (struct FastRingFlushEntry*)realloc(list->data, length * sizeof(struct FastRingFlushEntry));
+  length  = list->length + FLUSH_LIST_INCREASE;
+  entries = (struct FastRingFlushEntry*)realloc(list->entries, length * sizeof(struct FastRingFlushEntry));
 
-  if (likely(data != NULL))
+  if (likely(entries != NULL))
   {
-    list->length = length;
-    list->data   = data;
+    list->length  = length;
+    list->entries = entries;
   }
 
-  return data;
+  return entries;
 }
 
 // FastRing
-
-static inline __attribute__((always_inline)) void SetRingLock(struct FastRing* ring, int lock)
-{
-  if (likely(ring->lock.function != NULL))
-  {
-    // FastRing is not fully thread-safe, in some cases external mutex might me required
-    ring->lock.function(lock, ring->lock.closure);
-  }
-}
 
 static inline __attribute__((always_inline)) struct FastRingDescriptor* AllocateRingDescriptor(struct FastRing* ring)
 {
@@ -165,7 +157,7 @@ static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct F
   descriptor->submission.user_data = (uint64_t)descriptor->identifier | (uint64_t)(option & RING_DESC_OPTION_MASK);
 }
 
-static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+static inline __attribute__((hot)) void HandleCompletedRingDescriptor(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   __builtin_prefetch(&descriptor->state);
 
@@ -216,7 +208,7 @@ static inline void HandleCompletedRingDescriptor(struct FastRing* ring, struct F
   }
 }
 
-int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
+int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
 {
   int result;
   uint32_t position;
@@ -304,8 +296,6 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
 
   Handle:
 
-  SetRingLock(ring, RING_LOCK);
-
   io_uring_for_each_cqe(&ring->ring, position, completion)
   {
     if (likely(completion->user_data < RING_DATA_UNDEFINED))
@@ -324,38 +314,46 @@ int WaitFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
       }
     }
 
-    // Advance is not so expensive, better to release a CQE ASAP
+    // Advance is not so expensive, it is better to release a CQE ASAP
     io_uring_cq_advance(&ring->ring, 1);
   }
 
-  while (ring->flushers.count > 0)
+  pthread_mutex_lock(&ring->flushers.lock);
+
+  while (ring->flushers.count != 0)
   {
-    flusher = ring->flushers.data + (-- ring->flushers.count);
-    flusher->function(ring, flusher->closure);
+    // Handler list could be changed during the call, so it is safer to get entry on each iteration
+    flusher = ring->flushers.entries + (-- ring->flushers.count);
+
+    if (likely(flusher->function != NULL))
+    {
+      // Handler might be canceled by setting function to NULL
+      flusher->function(ring, flusher->closure);
+    }
   }
 
-  SetRingLock(ring, RING_UNLOCK);
+  pthread_mutex_unlock(&ring->flushers.lock);
 
   return result * (result != -ETIME);
 }
 
-void PrepareFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
+void __attribute__((hot)) PrepareFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
   PrepareRingDescriptor(descriptor, option);
 }
 
-void SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
+void __attribute__((hot)) SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
   PrepareRingDescriptor(descriptor, option);
   SubmitRingDescriptorRange(descriptor->ring, descriptor, descriptor);
 }
 
-void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last)
+void __attribute__((hot)) SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last)
 {
   SubmitRingDescriptorRange(first->ring, first, last);
 }
 
-struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingEventFunction function, void* closure)
+struct FastRingDescriptor* __attribute__((hot)) AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingEventFunction function, void* closure)
 {
   struct FastRingDescriptor* descriptor;
 
@@ -380,7 +378,7 @@ struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, Han
   return descriptor;
 }
 
-void ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor)
+void __attribute__((hot)) ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor)
 {
   if (likely((descriptor != NULL) &&
              (atomic_fetch_sub_explicit(&descriptor->references, 1, memory_order_relaxed) == 1)))
@@ -397,29 +395,71 @@ void ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor)
   }
 }
 
-void SetFastRingFlushHandler(struct FastRing* ring, HandleFlushFunction function, void* closure)
+int __attribute__((hot)) SetFastRingFlushHandler(struct FastRing* ring, HandleFlushFunction function, void* closure)
 {
   struct FastRingFlushEntry* flusher;
 
-  if (likely((ring->flushers.count < ring->flushers.length) ||
-             (ExpandRingFlushList(&ring->flushers) != NULL)))
+  if (likely(ring != NULL))
   {
-    flusher = ring->flushers.data + (ring->flushers.count ++);
-    flusher->function = function;
-    flusher->closure  = closure;
+    pthread_mutex_lock(&ring->flushers.lock);
+
+    if (likely((ring->flushers.count < ring->flushers.length) ||
+               (ExpandRingFlushList(&ring->flushers) != NULL)))
+    {
+      flusher           = ring->flushers.entries + ring->flushers.count;
+      flusher->function = function;
+      flusher->closure  = closure;
+
+      return ring->flushers.count ++;
+    }
+
+    pthread_mutex_unlock(&ring->flushers.lock);
+  }
+
+  return -1;
+}
+
+void __attribute__((hot)) RemoveFastRingFlushHandler(struct FastRing* ring, int number)
+{
+  struct FastRingFlushEntry* flusher;
+
+  if (likely((number >= 0) &&
+             (ring   != NULL)))
+  {
+    pthread_mutex_lock(&ring->flushers.lock);
+
+    if (likely(number < ring->flushers.count))
+    {
+      flusher           = ring->flushers.entries + number;
+      flusher->function = NULL;
+      flusher->closure  = NULL;
+    }
+
+    pthread_mutex_unlock(&ring->flushers.lock);
   }
 }
 
 uint16_t GetFastRingBufferGroup(struct FastRing* ring)
 {
-  return ++ ring->groups;
+  return atomic_fetch_add_explicit(&ring->groups, 1, memory_order_relaxed) + 1;
 }
 
-struct FastRing* CreateFastRing(uint32_t length, LockFastRingFunction function, void* closure)
+int IsFastRingThread(struct FastRing* ring)
+{
+  static __thread pid_t thread = 0;
+
+  if (unlikely(thread       == 0))  thread = gettid();
+  if (unlikely(ring->thread == 0))  return -1;
+
+  return ring->thread == thread;
+}
+
+struct FastRing* CreateFastRing(uint32_t length)
 {
   struct FastRing* ring;
   struct utsname name;
   struct rlimit limit;
+  pthread_mutexattr_t attribute;
 
   if ((uname(&name) < 0) ||
       (name.release[1] == '.') &&
@@ -454,9 +494,10 @@ struct FastRing* CreateFastRing(uint32_t length, LockFastRingFunction function, 
 
     ring->probe         = io_uring_get_probe_ring(&ring->ring);
     ring->thread        = gettid();
-    ring->lock.closure  = closure;
-    ring->lock.function = function;
     ring->submitting    = AllocateRingDescriptor(ring);
+    ring->files.lock    = (pthread_mutex_t)PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
+    ring->buffers.lock  = (pthread_mutex_t)PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
+    ring->flushers.lock = (pthread_mutex_t)PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
     atomic_store_explicit(&ring->pending, ring->submitting, memory_order_release);
   }
@@ -485,17 +526,20 @@ void ReleaseFastRing(struct FastRing* ring)
 
     io_uring_free_probe(ring->probe);
     io_uring_queue_exit(&ring->ring);
-    free(ring->flushers.data);
-    free(ring->files.data);
-    free(ring->filters);
-    free(ring->buffers);
+    pthread_mutex_destroy(&ring->files.lock);
+    pthread_mutex_destroy(&ring->buffers.lock);
+    pthread_mutex_destroy(&ring->flushers.lock);
+    free(ring->flushers.entries);
+    free(ring->buffers.vectors);
+    free(ring->files.entries);
+    free(ring->files.filters);
     free(ring);
   }
 }
 
-// FastPoll
+// Poll
 
-static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+static int __attribute__((hot)) HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   if (likely((completion != NULL) &&
              (completion->res >= 0) &&
@@ -506,102 +550,124 @@ static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_urin
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
-int AddFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure)
+int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure)
 {
   struct FastRingDescriptor* descriptor;
 
-  if (likely((ring != NULL) &&
-             (handle >= 0)  &&
-             ((handle < ring->files.length) ||
-              (ExpandRingFileList(&ring->files, handle) != NULL)) &&
-             (descriptor = AllocateFastRingDescriptor(ring, HandlePollEvent, closure))))
+  if (likely((handle >= 0) &&
+             (ring   != NULL)))
   {
-    ring->files.data[handle].descriptor = descriptor;
+    pthread_mutex_lock(&ring->files.lock);
 
-    io_uring_prep_poll_add(&descriptor->submission, handle, flags);
-    descriptor->submission.len     = RING_EVENT_FLAGS(flags);
-    descriptor->data.poll.function = function;
-    descriptor->data.poll.handle   = handle;
-    descriptor->data.poll.flags    = flags;
+    if (likely((handle < ring->files.length) ||
+               (ExpandRingFileList(&ring->files, handle) != NULL)) &&
+               (descriptor = AllocateFastRingDescriptor(ring, HandlePollEvent, closure)))
+    {
+      ring->files.entries[handle].descriptor = descriptor;
+      pthread_mutex_unlock(&ring->files.lock);
 
-    SubmitFastRingDescriptor(descriptor, 0);
-    return 0;
+      io_uring_prep_poll_add(&descriptor->submission, handle, flags);
+      descriptor->submission.len     = RING_POLL_FLAGS(flags);
+      descriptor->data.poll.function = function;
+      descriptor->data.poll.handle   = handle;
+      descriptor->data.poll.flags    = flags;
+
+      SubmitFastRingDescriptor(descriptor, 0);
+      pthread_mutex_unlock(&ring->files.lock);
+      return 0;
+    }
+
+    pthread_mutex_unlock(&ring->files.lock);
   }
 
   return -ENOMEM;
 }
 
-int ModifyFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags)
+int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
 {
   struct FastRingDescriptor* descriptor;
 
-  if (likely((ring != NULL) &&
-             (handle >= 0)  &&
-             (handle < ring->files.length) &&
-             (descriptor = ring->files.data[handle].descriptor)))
+  if (likely((handle >= 0) &&
+             (ring != NULL)))
   {
-    descriptor->data.poll.flags = flags;
+    pthread_mutex_lock(&ring->files.lock);
 
-    if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
-                 (descriptor->submission.opcode == IORING_OP_POLL_ADD)))
+    if (likely((handle < ring->files.length) &&
+               (descriptor = ring->files.entries[handle].descriptor)))
     {
-      descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
-      descriptor->submission.len           = RING_EVENT_FLAGS(flags);
+      descriptor->data.poll.flags = flags;
+      pthread_mutex_unlock(&ring->files.lock);
+
+      if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
+                   (descriptor->submission.opcode == IORING_OP_POLL_ADD)))
+      {
+        descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
+        descriptor->submission.len           = RING_POLL_FLAGS(flags);
+        return 0;
+      }
+
+      if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
+      {
+        descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
+        descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_POLL_FLAGS(flags);
+        return 0;
+      }
+
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_POLL_FLAGS(flags));
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       return 0;
     }
 
-    if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
-    {
-      descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
-      descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags);
-      return 0;
-    }
-
-    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_EVENT_FLAGS(flags));
-    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-    return 0;
+    pthread_mutex_unlock(&ring->files.lock);
   }
 
   return -EBADF;
 }
 
-int RemoveFastRingEventHandler(struct FastRing* ring, int handle)
+int RemoveFastRingPoll(struct FastRing* ring, int handle)
 {
   struct FastRingDescriptor* descriptor;
 
-  if (likely((ring != NULL) &&
-             (handle >= 0)  &&
-             (handle < ring->files.length) &&
-             (descriptor = ring->files.data[handle].descriptor)))
+  if (likely((handle >= 0) &&
+             (ring   != NULL)))
   {
-    descriptor->data.poll.function      = NULL;
-    ring->files.data[handle].descriptor = NULL;
+    pthread_mutex_lock(&ring->files.lock);
 
-    if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
-                 (descriptor->submission.opcode == IORING_OP_POLL_ADD)))
+    if (likely((handle < ring->files.length) &&
+               (descriptor = ring->files.entries[handle].descriptor)))
     {
-      io_uring_prep_nop(&descriptor->submission);
-      descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
-      return 0;
-    }
+      descriptor->data.poll.function         = NULL;
+      ring->files.entries[handle].descriptor = NULL;
+      pthread_mutex_unlock(&ring->files.lock);
 
-    if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
-    {
+      if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
+                   (descriptor->submission.opcode == IORING_OP_POLL_ADD)))
+      {
+        io_uring_prep_nop(&descriptor->submission);
+        descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
+        return 0;
+      }
+
+      if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
+      {
+        io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
+        return 0;
+      }
+
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       return 0;
     }
 
-    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
-    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-    return 0;
+    pthread_mutex_unlock(&ring->files.lock);
   }
 
   return -EBADF;
 }
 
-void DestroyFastRingEventHandler(struct FastRing* ring, HandlePollEventFunction function, void* closure)
+void DestroyFastRingPoll(struct FastRing* ring, HandlePollEventFunction function, void* closure)
 {
   struct FastRingFileEntry* entry;
   struct FastRingFileEntry* limit;
@@ -609,8 +675,8 @@ void DestroyFastRingEventHandler(struct FastRing* ring, HandlePollEventFunction 
 
   if (likely(ring != NULL))
   {
-    entry = ring->files.data;
-    limit = ring->files.data + ring->files.length;
+    entry = ring->files.entries;
+    limit = ring->files.entries + ring->files.length;
 
     while (entry < limit)
     {
@@ -621,40 +687,44 @@ void DestroyFastRingEventHandler(struct FastRing* ring, HandlePollEventFunction 
                    (descriptor->closure            == closure)))
       {
         // Remove handler and submit cancel request
-        RemoveFastRingEventHandler(ring, descriptor->data.poll.handle);
+        RemoveFastRingPoll(ring, descriptor->data.poll.handle);
       }
     }
   }
 }
 
-int ManageFastRingEventHandler(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure)
+int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure)
 {
   int result;
 
-  result = (flags == 0ULL) ? RemoveFastRingEventHandler(ring, handle) : ModifyFastRingEventHandler(ring, handle, flags);
-  return (result == -EBADF) && (flags != 0ULL) ? AddFastRingEventHandler(ring, handle, flags, function, closure) : result;
+  result = (flags == 0ULL) ? RemoveFastRingPoll(ring, handle) : ModifyFastRingPoll(ring, handle, flags);
+  return (result == -EBADF) && (flags != 0ULL) ? AddFastRingPoll(ring, handle, flags, function, closure) : result;
 }
 
-void* GetFastRingEventHandlerData(struct FastRing* ring, int handle)
+void* GetFastRingPollData(struct FastRing* ring, int handle)
 {
-  return
-    (ring != NULL) && (handle < ring->files.length) && (ring->files.data[handle].descriptor != NULL) ?
-    ring->files.data[handle].descriptor->closure : NULL;
-}
+  void* closure;
 
-int IsFastRingThread(struct FastRing* ring)
-{
-  static __thread pid_t thread = 0;
+  closure = NULL;
 
-  if (unlikely(thread == 0))        thread = gettid();
-  if (unlikely(ring->thread == 0))  return -1;
+  if (likely((handle >= 0) &&
+             (ring   != NULL)))
+  {
+    pthread_mutex_lock(&ring->files.lock);
 
-  return ring->thread == thread;
+    if (likely((handle < ring->files.length) &&
+               (ring->files.entries[handle].descriptor != NULL)))
+      closure = ring->files.entries[handle].descriptor->closure;
+
+    pthread_mutex_unlock(&ring->files.lock);
+  }
+
+  return closure;
 }
 
 // Timeout
 
-static int HandleTimeoutEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+static int __attribute__((hot)) HandleTimeoutEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   if (likely((completion != NULL) &&
              (completion->res == -ETIME) &&
@@ -939,49 +1009,63 @@ int AddFastRingRegisteredFile(struct FastRing* ring, int handle)
 
   result = -EBADF;
 
-  if (likely((ring != NULL) &&
-             (handle >= 0)  &&
-             ((handle < ring->files.length) ||
-              (ExpandRingFileList(&ring->files, handle) != NULL))))
+  if (likely((handle >= 0) &&
+             (ring   != NULL)))
   {
-    entry = ring->files.data + handle;
+    pthread_mutex_lock(&ring->files.lock);
 
-    if (likely(entry->references > 0))
+    if (likely((handle < ring->files.length) ||
+               (ExpandRingFileList(&ring->files, handle) != NULL)))
     {
-      entry->references ++;
-      return entry->index;
+      entry = ring->files.entries + handle;
+
+      if (likely(entry->references > 0))
+      {
+        entry->references ++;
+        pthread_mutex_unlock(&ring->files.lock);
+        return entry->index;
+      }
+
+      index = 0;
+      limit = ring->limit / 2;
+
+      if (unlikely(ring->files.filters == NULL))
+      {
+        // Upper part is reserved for allocation by kernel, a half will be enough
+        ring->files.filters = (uint32_t*)calloc((limit >> 5) + 1, sizeof(uint32_t));
+
+        if (unlikely(ring->files.filters == NULL))
+        {
+          pthread_mutex_unlock(&ring->files.lock);
+          return -ENOMEM;
+        }
+      }
+
+      while ((index < limit) &&
+             (ring->files.filters[index >> 5] == UINT32_MAX))
+        index += 32;
+
+      index += __builtin_ffs(~ring->files.filters[index >> 5]) - 1;
+
+      if (unlikely(index >= limit))
+      {
+        // All registered files are already in use
+        pthread_mutex_unlock(&ring->files.lock);
+        return -EOVERFLOW;
+      }
+
+      result = io_uring_register_files_update(&ring->ring, index, &handle, 1);
+
+      if (likely(result >= 0))
+      {
+        ring->files.filters[index >> 5] |= 1 << (index & 31);
+        result             = index;
+        entry->index       = index;
+        entry->references ++;
+      }
     }
 
-    index = 0;
-    limit = ring->limit / 2;
-
-    if (unlikely(ring->filters == NULL))
-    {
-      // Upper part is reserved for allocation by kernel, a half will be enough
-      ring->filters = (uint32_t*)calloc((limit >> 5) + 1, sizeof(uint32_t));
-    }
-
-    while ((index < limit) &&
-           (ring->filters[index >> 5] == UINT32_MAX))
-      index += 32;
-
-    index += __builtin_ffs(~ring->filters[index >> 5]) - 1;
-
-    if (unlikely(index >= limit))
-    {
-      // All registered files are already in use
-      return -EOVERFLOW;
-    }
-
-    result = io_uring_register_files_update(&ring->ring, index, &handle, 1);
-
-    if (likely(result >= 0))
-    {
-      ring->filters[index >> 5] |= 1 << (index & 31);
-      entry->index       = index;
-      entry->references ++;
-      return index;
-    }
+    pthread_mutex_unlock(&ring->files.lock);
   }
 
   return result;
@@ -991,16 +1075,22 @@ void RemoveFastRingRegisteredFile(struct FastRing* ring, int handle)
 {
   struct FastRingFileEntry* entry;
 
-  if (likely((ring != NULL) &&
-             (handle >= 0)  &&
-             (handle < ring->files.length)       &&
-             (entry = ring->files.data + handle) &&
-             (entry->references > 0)             &&
-             ((-- entry->references) == 0)))
+  if (likely((handle >= 0) &&
+             (ring  != NULL)))
   {
-    handle = -1;
-    ring->filters[entry->index >> 5] &= ~(1 << (entry->index & 31));
-    io_uring_register_files_update(&ring->ring, entry->index, &handle, 1);
+    pthread_mutex_lock(&ring->files.lock);
+
+    if (likely((handle < ring->files.length)          &&
+               (entry = ring->files.entries + handle) &&
+               (entry->references > 0)                &&
+               ((-- entry->references) == 0)))
+    {
+      handle = -1;
+      ring->files.filters[entry->index >> 5] &= ~(1 << (entry->index & 31));
+      io_uring_register_files_update(&ring->ring, entry->index, &handle, 1);
+    }
+
+    pthread_mutex_unlock(&ring->files.lock);
   }
 }
 
@@ -1011,50 +1101,60 @@ int AddFastRingRegisteredBuffer(struct FastRing* ring, void* address, size_t len
   __u64 tag;
   int result;
   struct iovec* vector;
-  struct FastRingBufferList* buffers;
 
   result = -EINVAL;
 
-  if (likely((ring != NULL) &&
-             (address != NULL)))
+  if (likely((address != NULL) &&
+             (ring    != NULL)))
   {
-    buffers = ring->buffers;
+    pthread_mutex_lock(&ring->buffers.lock);
 
-    if (unlikely(buffers == NULL))
+    if (unlikely(ring->buffers.vectors == NULL))
     {
-      buffers         = (struct FastRingBufferList*)calloc(1, sizeof(struct FastRingBufferList) + sizeof(struct iovec) * BUFFER_MAXIMUM_COUNT);
-      ring->buffers   = buffers;
-      buffers->length = BUFFER_MAXIMUM_COUNT;
-      io_uring_register_buffers_sparse(&ring->ring, buffers->length);
+      ring->buffers.length  = BUFFER_MAXIMUM_COUNT;
+      ring->buffers.vectors = (struct iovec*)calloc(sizeof(struct iovec), ring->buffers.length);
+
+      if (unlikely(ring->buffers.vectors == NULL))
+      {
+        pthread_mutex_unlock(&ring->buffers.lock);
+        return -ENOMEM;
+      }
+
+      io_uring_register_buffers_sparse(&ring->ring, ring->buffers.length);
     }
 
-    if (unlikely(buffers->count == buffers->length))
+    if (unlikely(ring->buffers.count == ring->buffers.length))
     {
       // All registered files are already in use
+      pthread_mutex_unlock(&ring->buffers.lock);
       return -EOVERFLOW;
     }
 
-    while (buffers->vectors[buffers->position].iov_base != NULL)
+    while (ring->buffers.vectors[ring->buffers.position].iov_base != NULL)
     {
-      buffers->position ++;
-      buffers->position &= buffers->length - 1;
+      ring->buffers.position ++;
+      ring->buffers.position &= ring->buffers.length - 1;
     }
 
-    vector           = buffers->vectors + buffers->position;
+    vector           = ring->buffers.vectors + ring->buffers.position;
     vector->iov_base = address;
     vector->iov_len  = length;
 
     tag    = 0;
-    result = io_uring_register_buffers_update_tag(&ring->ring, buffers->position, vector, &tag, 1);
+    result = io_uring_register_buffers_update_tag(&ring->ring, ring->buffers.position, vector, &tag, 1);
 
     if (likely(result >= 0))
     {
-      buffers->count ++;
-      return buffers->position;
+      ring->buffers.count ++;
+      result = ring->buffers.position;
+    }
+    else
+    {
+      vector->iov_base = NULL;
+      vector->iov_len  = 0;
     }
 
-    vector->iov_base = NULL;
-    vector->iov_len  = 0;
+    pthread_mutex_unlock(&ring->buffers.lock);
   }
 
   return result;
@@ -1070,10 +1170,11 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
   result = -EINVAL;
 
   if (likely((index >= 0) &&
-             (ring != NULL) &&
-             (buffers = ring->buffers)))
+             (ring  != NULL)))
   {
-    vector           = buffers->vectors + index;
+    pthread_mutex_lock(&ring->buffers.lock);
+
+    vector           = ring->buffers.vectors + index;
     vector->iov_base = address;
     vector->iov_len  = length;
 
@@ -1082,9 +1183,11 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
 
     if (likely(result >= 0))
     {
-      buffers->count -= (address == NULL);
-      return buffers->position;
+      ring->buffers.count -= (address == NULL);
+      result               = ring->buffers.position;
     }
+
+    pthread_mutex_unlock(&ring->buffers.lock);
   }
 
   return result;
