@@ -19,7 +19,7 @@ typedef void FetchTransmission;
 
 typedef void (*HandleFetchData)(int code, CURL* easy, char* data, size_t length, void* parameter1, void* parameter2);
 
-Fetch* CreateFetch(struct FastRing* ring, long interval);
+Fetch* CreateFetch(struct FastRing* ring);
 void ReleaseFetch(Fetch* fetch);
 
 FetchTransmission* MakeExtendedFetchTransmission(Fetch* fetch, CURL* easy, HandleFetchData function, void* parameter1, void* parameter2);

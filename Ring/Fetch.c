@@ -25,13 +25,11 @@ struct FetchContext
   CURLM* multi;
   CURLSH* share;
   struct FastRing* ring;
-  struct FastRingDescriptor* descriptor1;  // One-time timer for CURLMOPT_TIMERFUNCTION
-  struct FastRingDescriptor* descriptor2;  // Repeating timer to handle transmissions
-  int handler;                             // Event to handle transmissions
+  struct FastRingDescriptor* descriptor;
+  int handler;
 
   TransmissionReference first;
   TransmissionReference last;
-  long interval;
   int count;
 };
 
@@ -82,34 +80,8 @@ struct TransmissionContext
     list->last = record->previous;
 
 static void HandleSocketEvent(int handle, uint32_t flags, void* data, uint64_t options);
-static void HandleTimeout1Event(struct FastRingDescriptor* descriptor);
-static void HandleTimeout2Event(struct FastRingDescriptor* descriptor);
+static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor);
 static void HandleFlushEvent(struct FastRing* ring, void* closure);
-
-static void AddTransmissionToList(struct FetchContext* fetch, struct TransmissionContext* transmission)
-{
-  APPEND(fetch, transmission);
-  fetch->count ++;
-
-  if (fetch->descriptor2 == NULL)
-  {
-    // Add HandleTimeout2Event if not added yet
-    fetch->descriptor2 = SetFastRingTimeout(fetch->ring, fetch->descriptor2, fetch->interval, TIMEOUT_FLAG_REPEAT, HandleTimeout2Event, fetch);
-  }
-};
-
-static void RemoveTransmissionFromList(struct FetchContext* fetch, struct TransmissionContext* transmission)
-{
-  REMOVE(fetch, transmission);
-  fetch->count --;
-
-  if ((fetch->first       == NULL) &&
-      (fetch->descriptor2 != NULL))
-  {
-    // Remove HandleTimeout2Event if there no transmissions in the list
-    fetch->descriptor2 = SetFastRingTimeout(fetch->ring, fetch->descriptor2, -1, 0, HandleTimeout2Event, fetch);
-  }
-};
 
 // CURL I/O Functions
 
@@ -138,13 +110,13 @@ static void HandleSocketEvent(int handle, uint32_t flags, void* data, uint64_t o
   TouchTransmissionQueue(fetch);
 }
 
-static void HandleTimeout1Event(struct FastRingDescriptor* descriptor)
+static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor)
 {
   struct FetchContext* fetch;
   int count;
 
-  fetch              = (struct FetchContext*)descriptor->closure;
-  fetch->descriptor1 = NULL;
+  fetch             = (struct FetchContext*)descriptor->closure;
+  fetch->descriptor = NULL;
 
   curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
   TouchTransmissionQueue(fetch);
@@ -175,7 +147,6 @@ static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation
       break;
   }
 
-  TouchTransmissionQueue(fetch);
   return 0;
 }
 
@@ -183,10 +154,9 @@ static int HandleTimerOperation(CURLM* multi, long timeout, void* data)
 {
   struct FetchContext* fetch;
 
-  fetch              = (struct FetchContext*)data;
-  fetch->descriptor1 = SetFastRingTimeout(fetch->ring, fetch->descriptor1, timeout, 0, HandleTimeout1Event, fetch);
+  fetch             = (struct FetchContext*)data;
+  fetch->descriptor = SetFastRingTimeout(fetch->ring, fetch->descriptor, timeout, 0, HandleTimeoutEvent, fetch);
   
-  TouchTransmissionQueue(fetch);
   return 0;
 }
 
@@ -274,7 +244,9 @@ static void ReleaseTransmissionContext(struct TransmissionContext* transmission)
     }
   }
 
-  RemoveTransmissionFromList(fetch, transmission);
+  REMOVE(fetch, transmission);
+  fetch->count --;
+
   curl_multi_remove_handle(fetch->multi, transmission->easy);
   curl_easy_cleanup(transmission->easy);
   free(transmission->buffer);
@@ -300,11 +272,6 @@ static void ProceedTransmissionQueue(struct FetchContext* fetch)
   }
 }
 
-static void HandleTimeout2Event(struct FastRingDescriptor* descriptor)
-{
-  TouchTransmissionQueue((struct FetchContext*)descriptor->closure);
-}
-
 static void HandleFlushEvent(struct FastRing* ring, void* closure)
 {
   struct FetchContext* fetch;
@@ -317,13 +284,12 @@ static void HandleFlushEvent(struct FastRing* ring, void* closure)
 
 // Public Functions
 
-struct FetchContext* CreateFetch(struct FastRing* ring, long interval)
+struct FetchContext* CreateFetch(struct FastRing* ring)
 {
   struct FetchContext* fetch;
 
   fetch           = (struct FetchContext*)calloc(1, sizeof(struct FetchContext));
   fetch->ring     = ring;
-  fetch->interval = interval;
   fetch->handler  = -1;
   fetch->multi    = curl_multi_init();
   fetch->share    = curl_share_init();
@@ -344,8 +310,7 @@ void ReleaseFetch(struct FetchContext* fetch)
   struct TransmissionContext* transmission;
 
   RemoveFastRingFlushHandler(fetch->ring, fetch->handler);
-  SetFastRingTimeout(fetch->ring, fetch->descriptor1, -1, 0, NULL, NULL);
-  SetFastRingTimeout(fetch->ring, fetch->descriptor2, -1, 0, NULL, NULL);
+  SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
 
   while (fetch->first != NULL)
   {
@@ -385,7 +350,9 @@ struct TransmissionContext* MakeExtendedFetchTransmission(struct FetchContext* f
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
   }
 
-  AddTransmissionToList(fetch, transmission);
+  APPEND(fetch, transmission);
+  fetch->count ++;
+
   curl_multi_add_handle(fetch->multi, transmission->easy);
 
   return transmission;
