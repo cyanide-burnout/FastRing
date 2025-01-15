@@ -10,8 +10,6 @@
 
 #define likely(condition)     __builtin_expect(!!(condition), 1)
 #define unlikely(condition)   __builtin_expect(!!(condition), 0)
-#define barrier()             asm volatile ("" : : : "memory")
-#define CAST(type, value)     (*(type*)&(value))
 
 // https://github.com/torvalds/linux/blob/6e98b09da931a00bf4e0477d0fa52748bf28fcce/io_uring/io_uring.c#L100
 #define RING_MAXIMUM_LENGTH      16384
@@ -88,62 +86,103 @@ static void* ExpandRingFileList(struct FastRingFileList* list, int handle)
   return entries;
 }
 
-static void* ExpandRingFlushList(struct FastRingFlushList* list)
-{
-  struct FastRingFlushEntry* entries;
-  uint32_t length;
-
-  length  = list->length + FLUSH_LIST_INCREASE;
-  entries = (struct FastRingFlushEntry*)realloc(list->entries, length * sizeof(struct FastRingFlushEntry));
-
-  if (likely(entries != NULL))
-  {
-    list->length  = length;
-    list->entries = entries;
-  }
-
-  return entries;
-}
-
 // FastRing
 
-static inline __attribute__((always_inline)) struct FastRingDescriptor* AllocateRingDescriptor(struct FastRing* ring)
+static inline __attribute__((always_inline)) void ReleaseRingFlusherStack(struct FastRingFlusherStack* stack)
+{
+  struct FastRingFlusher* current;
+  struct FastRingFlusher* next;
+
+  next = atomic_load_explicit(&stack->top, memory_order_acquire);
+  while (current = REMOVE_ABA_TAG(struct FastRingFlusher, next, RING_FLUSH_ALIGNMENT))
+  {
+    next = current->next;
+    if (likely(current->state == RING_FLUSH_STATE_PENDING))
+    {
+      // Before freeing a flusher call related handler to complete all incomplete activity
+      current->function(current->closure, RING_REASON_RELEASED);
+    }
+    free(current);
+  }
+}
+
+static inline __attribute__((always_inline)) void PushRingFlusher(struct FastRingFlusherStack* stack, struct FastRingFlusher* flusher, int increment)
+{
+  uint32_t tag;
+
+  tag = atomic_fetch_add_explicit(&flusher->tag, increment, memory_order_relaxed) + increment;
+
+  do flusher->next = atomic_load_explicit(&stack->top, memory_order_relaxed);
+  while (!atomic_compare_exchange_weak_explicit(&stack->top, &flusher->next, ADD_ABA_TAG(flusher, tag, 0, RING_FLUSH_ALIGNMENT), memory_order_release, memory_order_relaxed));
+}
+
+static inline __attribute__((always_inline)) struct FastRingFlusher* PopRingFlusher(struct FastRingFlusherStack* stack)
+{
+  void* _Atomic pointer;
+  struct FastRingFlusher* flusher;
+
+  do pointer = atomic_load_explicit(&stack->top, memory_order_acquire);
+  while ((flusher = REMOVE_ABA_TAG(struct FastRingFlusher, pointer, RING_FLUSH_ALIGNMENT)) &&
+         (!atomic_compare_exchange_weak_explicit(&stack->top, &pointer, flusher->next, memory_order_relaxed, memory_order_relaxed)));
+
+  return flusher;
+}
+
+static inline __attribute__((always_inline)) void ReleaseRingDescriptorHeap(struct FastRingDescriptorSet* set)
+{
+  struct FastRingDescriptor* current;
+  struct FastRingDescriptor* next;
+
+  next = atomic_load_explicit(&set->heap, memory_order_acquire);
+  while (current = next)
+  {
+    next = current->heap;
+    if (current->function != NULL)
+    {
+      // Before freeing a descriptor call related handler to complete all incomplete submissions
+      current->function(current, NULL, RING_REASON_RELEASED);
+    }
+    free(current);
+  }
+}
+
+static inline __attribute__((always_inline)) struct FastRingDescriptor* AllocateRingDescriptor(struct FastRingDescriptorSet* set)
 {
   void* _Atomic pointer;
   struct FastRingDescriptor* descriptor;
 
-  do pointer = atomic_load_explicit(&ring->available, memory_order_acquire);
+  do pointer = atomic_load_explicit(&set->available, memory_order_acquire);
   while ((descriptor = REMOVE_ABA_TAG(struct FastRingDescriptor, pointer, RING_DESC_ALIGNMENT)) &&
-         (!atomic_compare_exchange_weak_explicit(&ring->available, &pointer, descriptor->next, memory_order_relaxed, memory_order_relaxed)));
+         (!atomic_compare_exchange_weak_explicit(&set->available, &pointer, descriptor->next, memory_order_relaxed, memory_order_relaxed)));
 
   if (unlikely(((descriptor == NULL) ||
                 (descriptor->state != RING_DESC_STATE_FREE)) &&
                (descriptor = (struct FastRingDescriptor*)memalign(RING_DESC_ALIGNMENT, sizeof(struct FastRingDescriptor)))))
   {
     memset(descriptor, 0, sizeof(struct FastRingDescriptor));
-    do descriptor->heap = atomic_load_explicit(&ring->heap, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(&ring->heap, &descriptor->heap, descriptor, memory_order_release, memory_order_acquire));
+    do descriptor->heap = atomic_load_explicit(&set->heap, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(&set->heap, &descriptor->heap, descriptor, memory_order_release, memory_order_acquire));
   }
 
   return descriptor;
 }
 
-static inline __attribute__((always_inline)) void ReleaseRingDescriptor(struct FastRing* ring, struct FastRingDescriptor* descriptor)
+static inline __attribute__((always_inline)) void ReleaseRingDescriptor(struct FastRingDescriptorSet* set, struct FastRingDescriptor* descriptor)
 {
   uint32_t tag;
 
   tag = atomic_fetch_add_explicit(&descriptor->tag, 1, memory_order_relaxed) + 1;
 
-  do descriptor->next = atomic_load_explicit(&ring->available, memory_order_relaxed);
-  while (!atomic_compare_exchange_weak_explicit(&ring->available, &descriptor->next, ADD_ABA_TAG(descriptor, tag, 0, RING_DESC_ALIGNMENT), memory_order_release, memory_order_relaxed));
+  do descriptor->next = atomic_load_explicit(&set->available, memory_order_relaxed);
+  while (!atomic_compare_exchange_weak_explicit(&set->available, &descriptor->next, ADD_ABA_TAG(descriptor, tag, 0, RING_DESC_ALIGNMENT), memory_order_release, memory_order_relaxed));
 }
 
-static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(struct FastRing* ring, struct FastRingDescriptor* first, struct FastRingDescriptor* last)
+static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(struct FastRingDescriptorSet* set, struct FastRingDescriptor* first, struct FastRingDescriptor* last)
 {
   struct FastRingDescriptor* descriptor;
 
   atomic_store_explicit(&last->next, NULL, memory_order_release);
-  descriptor = atomic_exchange_explicit(&ring->pending, last, memory_order_relaxed);
+  descriptor = atomic_exchange_explicit(&set->pending, last, memory_order_relaxed);
   atomic_store_explicit(&descriptor->next, first, memory_order_relaxed);
 }
 
@@ -204,18 +243,20 @@ static inline __attribute__((hot)) void HandleCompletedRingDescriptor(struct Fas
     descriptor->identifier = 0;
 
     atomic_thread_fence(memory_order_release);
-    ReleaseRingDescriptor(ring, descriptor);
+    ReleaseRingDescriptor(&ring->descriptors, descriptor);
   }
 }
 
 int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask)
 {
   int result;
-  uint32_t position;
+  unsigned position;
   struct io_uring_cqe* completion;
   struct io_uring_sqe* submission;
   struct __kernel_timespec timeout;
-  struct FastRingFlushEntry* flusher;
+
+  int state;
+  struct FastRingFlusher* flusher;
   struct FastRingDescriptor* previous;
   struct FastRingDescriptor* descriptor;
 
@@ -241,22 +282,22 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
 
   // Submit pending SQEs
 
-  if (unlikely((descriptor = atomic_load_explicit(&ring->pending, memory_order_relaxed)) &&
+  if (unlikely((descriptor = atomic_load_explicit(&ring->descriptors.pending, memory_order_relaxed)) &&
                (atomic_load_explicit(&descriptor->next, memory_order_acquire) == NULL) &&
                (descriptor->state != RING_DESC_STATE_FREE) &&
-               (descriptor = AllocateRingDescriptor(ring))))
+               (descriptor = AllocateRingDescriptor(&ring->descriptors))))
   {
     // Submit stub descriptor to force submission of last valuable descriptor
-    SubmitRingDescriptorRange(ring, descriptor, descriptor);
+    SubmitRingDescriptorRange(&ring->descriptors, descriptor, descriptor);
   }
 
-  while ((descriptor = ring->submitting) &&
+  while ((descriptor = ring->descriptors.submitting) &&
          (atomic_load_explicit(&descriptor->next, memory_order_acquire) != NULL))
   {
     if (descriptor->state == RING_DESC_STATE_FREE)
     {
-      ring->submitting = atomic_load_explicit(&descriptor->next, memory_order_relaxed);
-      ReleaseRingDescriptor(ring, descriptor);
+      ring->descriptors.submitting = atomic_load_explicit(&descriptor->next, memory_order_relaxed);
+      ReleaseRingDescriptor(&ring->descriptors, descriptor);
       continue;
     }
 
@@ -269,8 +310,8 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
                (submission = io_uring_get_sqe(&ring->ring))))
     {
       memcpy(submission, &descriptor->submission, descriptor->length);
-      descriptor->state = RING_DESC_STATE_SUBMITTED;
-      ring->submitting  = atomic_load_explicit(&descriptor->next, memory_order_relaxed);
+      descriptor->state             = RING_DESC_STATE_SUBMITTED;
+      ring->descriptors.submitting  = atomic_load_explicit(&descriptor->next, memory_order_relaxed);
       continue;
     }
 
@@ -318,21 +359,19 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
     io_uring_cq_advance(&ring->ring, 1);
   }
 
-  pthread_mutex_lock(&ring->flushers.lock);
+  // Call flushers
 
-  while (ring->flushers.count != 0)
+  while (flusher = PopRingFlusher(&ring->flushers.pending))
   {
-    // Handler list could be changed during the call, so it is safer to get entry on each iteration
-    flusher = ring->flushers.entries + (-- ring->flushers.count);
-
-    if (likely(flusher->function != NULL))
+    if (atomic_exchange_explicit(&flusher->state, RING_FLUSH_STATE_LOCKED, memory_order_acquire) == RING_FLUSH_STATE_PENDING)
     {
-      // Handler might be canceled by setting function to NULL
-      flusher->function(ring, flusher->closure);
+      // Flusher might be canceled by setting state to RING_FLUSH_STATE_FREE
+      flusher->function(flusher->closure, RING_REASON_COMPLETE);
     }
-  }
 
-  pthread_mutex_unlock(&ring->flushers.lock);
+    atomic_store_explicit(&flusher->state, RING_FLUSH_STATE_FREE, memory_order_relaxed);
+    PushRingFlusher(&ring->flushers.available, flusher, 0);
+  }
 
   return result * (result != -ETIME);
 }
@@ -344,23 +383,31 @@ void __attribute__((hot)) PrepareFastRingDescriptor(struct FastRingDescriptor* d
 
 void __attribute__((hot)) SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
+  struct FastRing* ring;
+
+  ring = descriptor->ring;
+
   PrepareRingDescriptor(descriptor, option);
-  SubmitRingDescriptorRange(descriptor->ring, descriptor, descriptor);
+  SubmitRingDescriptorRange(&ring->descriptors, descriptor, descriptor);
 }
 
 void __attribute__((hot)) SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last)
 {
-  SubmitRingDescriptorRange(first->ring, first, last);
+  struct FastRing* ring;
+
+  ring = first->ring;
+
+  SubmitRingDescriptorRange(&ring->descriptors, first, last);
 }
 
-struct FastRingDescriptor* __attribute__((hot)) AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingEventFunction function, void* closure)
+struct FastRingDescriptor* __attribute__((hot)) AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingCompletionFunction function, void* closure)
 {
   struct FastRingDescriptor* descriptor;
 
   descriptor = NULL;
 
   if (likely((ring != NULL) &&
-             (descriptor = AllocateRingDescriptor(ring))))
+             (descriptor = AllocateRingDescriptor(&ring->descriptors))))
   {
     descriptor->ring     = ring;
     descriptor->state    = RING_DESC_STATE_ALLOCATED;
@@ -380,9 +427,13 @@ struct FastRingDescriptor* __attribute__((hot)) AllocateFastRingDescriptor(struc
 
 void __attribute__((hot)) ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor)
 {
+  struct FastRing* ring;
+
   if (likely((descriptor != NULL) &&
              (atomic_fetch_sub_explicit(&descriptor->references, 1, memory_order_relaxed) == 1)))
   {
+    ring = descriptor->ring;
+
     descriptor->function   = NULL;
     descriptor->previous   = NULL;
     descriptor->closure    = NULL;
@@ -391,52 +442,42 @@ void __attribute__((hot)) ReleaseFastRingDescriptor(struct FastRingDescriptor* d
     descriptor->identifier = 0;
 
     atomic_thread_fence(memory_order_release);
-    ReleaseRingDescriptor(descriptor->ring, descriptor);
+    ReleaseRingDescriptor(&ring->descriptors, descriptor);
   }
 }
 
-int __attribute__((hot)) SetFastRingFlushHandler(struct FastRing* ring, HandleFlushFunction function, void* closure)
+struct FastRingFlusher* __attribute__((hot)) SetFastRingFlushHandler(struct FastRing* ring, HandleFastRingFlushFunction function, void* closure)
 {
-  struct FastRingFlushEntry* flusher;
+  struct FastRingFlusher* flusher;
 
-  if (likely(ring != NULL))
+  flusher = NULL;
+
+  if (likely((ring != NULL) &&
+             ((flusher = PopRingFlusher(&ring->flushers.available)) ||
+              (flusher = (struct FastRingFlusher*)memalign(RING_FLUSH_ALIGNMENT, sizeof(struct FastRingFlusher))))))
   {
-    pthread_mutex_lock(&ring->flushers.lock);
+    flusher->function = function;
+    flusher->closure  = closure;
 
-    if (likely((ring->flushers.count < ring->flushers.length) ||
-               (ExpandRingFlushList(&ring->flushers) != NULL)))
-    {
-      flusher           = ring->flushers.entries + ring->flushers.count;
-      flusher->function = function;
-      flusher->closure  = closure;
-
-      return ring->flushers.count ++;
-    }
-
-    pthread_mutex_unlock(&ring->flushers.lock);
+    atomic_store_explicit(&flusher->state, RING_FLUSH_STATE_PENDING, memory_order_release);
+    PushRingFlusher(&ring->flushers.pending, flusher, 1);
   }
 
-  return -1;
+  return flusher;
 }
 
-void __attribute__((hot)) RemoveFastRingFlushHandler(struct FastRing* ring, int number)
+int __attribute__((hot)) RemoveFastRingFlushHandler(struct FastRing* ring, struct FastRingFlusher* flusher)
 {
-  struct FastRingFlushEntry* flusher;
+  uint32_t state;
 
-  if (likely((number >= 0) &&
-             (ring   != NULL)))
+  if (likely((flusher != NULL) &&
+             (ring    != NULL)))
   {
-    pthread_mutex_lock(&ring->flushers.lock);
-
-    if (likely(number < ring->flushers.count))
-    {
-      flusher           = ring->flushers.entries + number;
-      flusher->function = NULL;
-      flusher->closure  = NULL;
-    }
-
-    pthread_mutex_unlock(&ring->flushers.lock);
+    state = RING_FLUSH_STATE_PENDING;
+    return atomic_compare_exchange_strong_explicit(&flusher->state, &state, RING_FLUSH_STATE_FREE, memory_order_relaxed, memory_order_relaxed) - 1;  // 0 or -EPERM
   }
+
+  return -EBADF;
 }
 
 uint16_t GetFastRingBufferGroup(struct FastRing* ring)
@@ -492,14 +533,13 @@ struct FastRing* CreateFastRing(uint32_t length)
     io_uring_register_files_sparse(&ring->ring, ring->limit);
     io_uring_register_file_alloc_range(&ring->ring, ring->limit / 2, ring->limit / 2);
 
-    ring->probe         = io_uring_get_probe_ring(&ring->ring);
-    ring->thread        = gettid();
-    ring->submitting    = AllocateRingDescriptor(ring);
-    ring->files.lock    = (pthread_mutex_t)PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
-    ring->buffers.lock  = (pthread_mutex_t)PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
-    ring->flushers.lock = (pthread_mutex_t)PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+    ring->probe                  = io_uring_get_probe_ring(&ring->ring);
+    ring->thread                 = gettid();
+    ring->files.lock             = (pthread_mutex_t)PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
+    ring->buffers.lock           = (pthread_mutex_t)PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
+    ring->descriptors.submitting = AllocateRingDescriptor(&ring->descriptors);
 
-    atomic_store_explicit(&ring->pending, ring->submitting, memory_order_release);
+    atomic_store_explicit(&ring->descriptors.pending, ring->descriptors.submitting, memory_order_release);
   }
 
   return ring;
@@ -507,29 +547,19 @@ struct FastRing* CreateFastRing(uint32_t length)
 
 void ReleaseFastRing(struct FastRing* ring)
 {
-  struct FastRingDescriptor* current;
-  struct FastRingDescriptor* next;
-
   if (ring != NULL)
   {
-    next = atomic_load_explicit(&ring->heap, memory_order_acquire);
-    while (current = next)
-    {
-      next = current->heap;
-      if (current->function != NULL)
-      {
-        // Before freeing a descriptor call related handler to complete all incomplete submissions
-        current->function(current, NULL, RING_REASON_RELEASED);
-      }
-      free(current);
-    }
-
+    printf("1\n");
+    ReleaseRingFlusherStack(&ring->flushers.pending);
+    printf("2\n");
+    ReleaseRingFlusherStack(&ring->flushers.available);
+    printf("3\n");
+    ReleaseRingDescriptorHeap(&ring->descriptors);
+    printf("4\n");
     io_uring_free_probe(ring->probe);
     io_uring_queue_exit(&ring->ring);
     pthread_mutex_destroy(&ring->files.lock);
     pthread_mutex_destroy(&ring->buffers.lock);
-    pthread_mutex_destroy(&ring->flushers.lock);
-    free(ring->flushers.entries);
     free(ring->buffers.vectors);
     free(ring->files.entries);
     free(ring->files.filters);
@@ -550,7 +580,7 @@ static int __attribute__((hot)) HandlePollEvent(struct FastRingDescriptor* descr
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
-int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure)
+int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure)
 {
   struct FastRingDescriptor* descriptor;
 
@@ -667,7 +697,7 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle)
   return -EBADF;
 }
 
-void DestroyFastRingPoll(struct FastRing* ring, HandlePollEventFunction function, void* closure)
+void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingEventFunction function, void* closure)
 {
   struct FastRingFileEntry* entry;
   struct FastRingFileEntry* limit;
@@ -693,7 +723,7 @@ void DestroyFastRingPoll(struct FastRing* ring, HandlePollEventFunction function
   }
 }
 
-int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure)
+int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure)
 {
   int result;
 
@@ -745,7 +775,7 @@ static int __attribute__((hot)) HandleTimeoutEvent(struct FastRingDescriptor* de
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
-static void CreateTimeout(struct FastRingDescriptor* descriptor, HandleTimeoutFunction function, void* closure, uint64_t flags)
+static void CreateTimeout(struct FastRingDescriptor* descriptor, HandleFastRingTimeoutFunction function, void* closure, uint64_t flags)
 {
   descriptor->data.timeout.flags    = flags;
   descriptor->data.timeout.function = function;
@@ -755,7 +785,7 @@ static void CreateTimeout(struct FastRingDescriptor* descriptor, HandleTimeoutFu
   SubmitFastRingDescriptor(descriptor, 0);
 }
 
-static void UpdateTimeout(struct FastRingDescriptor* descriptor, HandleTimeoutFunction function, void* closure)
+static void UpdateTimeout(struct FastRingDescriptor* descriptor, HandleFastRingTimeoutFunction function, void* closure)
 {
   if (likely(descriptor->state == RING_DESC_STATE_SUBMITTED))
   {
@@ -789,7 +819,7 @@ static void RemoveTimeout(struct FastRingDescriptor* descriptor)
   SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
 }
 
-struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleTimeoutFunction function, void* closure)
+struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure)
 {
   if ((interval < 0) &&
       (descriptor != NULL))
@@ -820,7 +850,7 @@ struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct Fast
   return NULL;
 }
 
-struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleTimeoutFunction function, void* closure)
+struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure)
 {
   if ((interval == NULL) &&
       (descriptor != NULL))
@@ -851,7 +881,7 @@ struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, stru
   return NULL;
 }
 
-struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timespec* interval, uint64_t flags, HandleTimeoutFunction function, void* closure)
+struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timespec* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure)
 {
   if ((interval == NULL) &&
       (descriptor != NULL))

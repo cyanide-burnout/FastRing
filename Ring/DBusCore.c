@@ -10,8 +10,8 @@
 struct Context
 {
   struct FastRing* ring;
+  struct FastRingFlusher* flusher;
   DBusConnection* connection;
-  int handler;
 };
 
 static int HandleWatchEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
@@ -202,18 +202,21 @@ static void ToggleTimeout(DBusTimeout* timeout, void* data)
   RemoveTimeout(timeout, data);
 }
 
-static void HandleDispatchEvent(struct FastRing* ring, void* closure)
+static void HandleDispatchEvent(void* closure, int reason)
 {
   struct Context* context;
 
-  context          = (struct Context*)closure;
-  context->handler = -1;
-
-  if ((dbus_connection_dispatch(context->connection) != DBUS_DISPATCH_COMPLETE) &&
-      (context->handler == -1))
+  if (reason == RING_REASON_COMPLETE)
   {
-    // Schedule one-time call of dbus_connection_dispatch
-    context->handler = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);
+    context          = (struct Context*)closure;
+    context->flusher = NULL;
+
+    if ((dbus_connection_dispatch(context->connection) != DBUS_DISPATCH_COMPLETE) &&
+        (context->flusher == NULL))
+    {
+      // Schedule one-time call of dbus_connection_dispatch
+      context->flusher = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);
+    }
   }
 }
 
@@ -224,10 +227,10 @@ static void HandleDispatchStatus(DBusConnection* connection, DBusDispatchStatus 
   context = (struct Context*)data;
 
   if ((status != DBUS_DISPATCH_COMPLETE) &&
-      (context->handler == -1))
+      (context->flusher == NULL))
   {
     // Schedule one-time call of dbus_connection_dispatch
-    context->handler = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);
+    context->flusher = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);
   }
 }
 
@@ -239,7 +242,7 @@ struct Context* CreateDBusCore(DBusConnection* connection, struct FastRing* ring
 
   context->ring       = ring;
   context->connection = connection;
-  context->handler    = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);;
+  context->flusher    = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);;
 
   dbus_connection_ref(connection);
   dbus_connection_set_dispatch_status_function(connection, HandleDispatchStatus, context, NULL);
@@ -251,7 +254,7 @@ struct Context* CreateDBusCore(DBusConnection* connection, struct FastRing* ring
 
 void ReleaseDBusCore(struct Context* context)
 {
-  RemoveFastRingFlushHandler(context->ring, context->handler);
+  RemoveFastRingFlushHandler(context->ring, context->flusher);
 
   dbus_connection_set_timeout_functions(context->connection, NULL, NULL, NULL, NULL, NULL);
   dbus_connection_set_watch_functions(context->connection, NULL, NULL, NULL, NULL, NULL);

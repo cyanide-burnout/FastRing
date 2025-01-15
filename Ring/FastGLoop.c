@@ -15,7 +15,7 @@
 static void JumpToLoop(struct FastGLoop* loop);
 static void HandleRequest(struct FastGLoop* loop);
 static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
-static void HandleFlush(struct FastRing* ring, void* closure);
+static void HandleFlush(void* closure, int reason);
 
 // Supplementary
 
@@ -177,7 +177,7 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
   return 0;  
 }
 
-static void HandleFlush(struct FastRing* ring, void* closure)
+static void HandleFlush(void* closure, int reason)
 {
   struct FastGLoop* loop;
   struct FastGLoopPoolData* data;
@@ -185,22 +185,25 @@ static void HandleFlush(struct FastRing* ring, void* closure)
   GPollFD* entry;
   GPollFD* limit;
 
-  loop            = (struct FastGLoop*)closure;
-  loop->condition = FALSE;
-
-  entry = loop->entries;
-  limit = loop->entries + loop->count;
-
-  for ( ; entry < limit; entry ++)
+  if (reason == RING_REASON_COMPLETE)
   {
-    data            = loop->files + entry->fd;
-    entry->revents  = (data->result > 0) * data->result;
-    entry->revents &= entry->events;
-    loop->result   += entry->revents > 0;
-  }
+    loop            = (struct FastGLoop*)closure;
+    loop->condition = FALSE;
 
-  JumpToLoop(loop);
-  HandleRequest(loop);
+    entry = loop->entries;
+    limit = loop->entries + loop->count;
+
+    for ( ; entry < limit; entry ++)
+    {
+      data            = loop->files + entry->fd;
+      entry->revents  = (data->result > 0) * data->result;
+      entry->revents &= entry->events;
+      loop->result   += entry->revents > 0;
+    }
+
+    JumpToLoop(loop);
+    HandleRequest(loop);
+  }
 }
 
 // GMainLoop

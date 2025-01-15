@@ -25,8 +25,8 @@ struct FetchContext
   CURLM* multi;
   CURLSH* share;
   struct FastRing* ring;
+  struct FastRingFlusher* flusher;
   struct FastRingDescriptor* descriptor;
-  int handler;
 
   TransmissionReference first;
   TransmissionReference last;
@@ -81,16 +81,16 @@ struct TransmissionContext
 
 static void HandleSocketEvent(int handle, uint32_t flags, void* data, uint64_t options);
 static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor);
-static void HandleFlushEvent(struct FastRing* ring, void* closure);
+static void HandleFlushEvent(void* closure, int reason);
 
 // CURL I/O Functions
 
 static void TouchTransmissionQueue(struct FetchContext* fetch)
 {
-  if (fetch->handler == -1)
+  if (fetch->flusher == NULL)
   {
     // HandleFlushEvent should be only set once per cycle
-    fetch->handler = SetFastRingFlushHandler(fetch->ring, HandleFlushEvent, fetch);
+    fetch->flusher = SetFastRingFlushHandler(fetch->ring, HandleFlushEvent, fetch);
   }
 }
 
@@ -272,14 +272,17 @@ static void ProceedTransmissionQueue(struct FetchContext* fetch)
   }
 }
 
-static void HandleFlushEvent(struct FastRing* ring, void* closure)
+static void HandleFlushEvent(void* closure, int reason)
 {
   struct FetchContext* fetch;
 
-  fetch          = (struct FetchContext*)closure;
-  fetch->handler = -1;
+  if (reason == RING_REASON_COMPLETE)
+  {
+    fetch          = (struct FetchContext*)closure;
+    fetch->flusher = NULL;
 
-  ProceedTransmissionQueue(fetch);
+    ProceedTransmissionQueue(fetch);
+  }
 }
 
 // Public Functions
@@ -288,11 +291,10 @@ struct FetchContext* CreateFetch(struct FastRing* ring)
 {
   struct FetchContext* fetch;
 
-  fetch           = (struct FetchContext*)calloc(1, sizeof(struct FetchContext));
-  fetch->ring     = ring;
-  fetch->handler  = -1;
-  fetch->multi    = curl_multi_init();
-  fetch->share    = curl_share_init();
+  fetch        = (struct FetchContext*)calloc(1, sizeof(struct FetchContext));
+  fetch->ring  = ring;
+  fetch->multi = curl_multi_init();
+  fetch->share = curl_share_init();
 
   curl_multi_setopt(fetch->multi, CURLMOPT_TIMERDATA,      fetch);
   curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETDATA,     fetch);
@@ -309,7 +311,7 @@ void ReleaseFetch(struct FetchContext* fetch)
 {
   struct TransmissionContext* transmission;
 
-  RemoveFastRingFlushHandler(fetch->ring, fetch->handler);
+  RemoveFastRingFlushHandler(fetch->ring, fetch->flusher);
   SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
 
   while (fetch->first != NULL)

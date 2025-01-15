@@ -53,6 +53,12 @@ struct FastRingBufferProvider;
 #define RING_DESC_OPTION_USER1     (RING_DESC_ALIGNMENT >> 2)
 #define RING_DESC_OPTION_USER2     (RING_DESC_ALIGNMENT >> 3)
 
+#define RING_FLUSH_STATE_FREE      0
+#define RING_FLUSH_STATE_PENDING   1
+#define RING_FLUSH_STATE_LOCKED    2
+
+#define RING_FLUSH_ALIGNMENT       64
+
 #define RING_DATA_UNDEFINED        (LIBURING_UDATA_TIMEOUT - 1ULL)
 #define RING_DATA_ADDRESS_MASK     (UINT64_MAX ^ ((uint64_t)RING_DESC_ALIGNMENT - 1ULL))
 
@@ -63,24 +69,24 @@ struct FastRingBufferProvider;
 #define RING_TRACE_ACTION_HANDLE   0
 #define RING_TRACE_ACTION_RELEASE  1
 
-typedef int (*HandleFastRingEventFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
-typedef void (*HandleFlushFunction)(struct FastRing* ring, void* closure);
+typedef int (*HandleFastRingCompletionFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
+typedef void (*HandleFastRingFlushFunction)(void* closure, int reason);
 typedef void (*TraceFastRingFunction)(int action, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason, void* closure);
-typedef void (*HandlePollEventFunction)(int handle, uint32_t flags, void* closure, uint64_t options);
-typedef void (*HandleTimeoutFunction)(struct FastRingDescriptor* descriptor);
+typedef void (*HandleFastRingEventFunction)(int handle, uint32_t flags, void* closure, uint64_t options);
+typedef void (*HandleFastRingTimeoutFunction)(struct FastRingDescriptor* descriptor);
 
 struct FastRingPollData
 {
   int handle;
   uint64_t flags;
-  HandlePollEventFunction function;
+  HandleFastRingEventFunction function;
 };
 
 struct FastRingTimeoutData
 {
   uint64_t flags;
   struct __kernel_timespec interval;
-  HandleTimeoutFunction function;
+  HandleFastRingTimeoutFunction function;
 };
 
 struct FastRingSocketData
@@ -115,7 +121,7 @@ struct FastRingDescriptor
   ATOMIC(struct FastRingDescriptor*) next;       // ( 44) Next descriptor in the queue (available, pending, IOSQE_CQE_SKIP_SUCCESS)
 
   void* closure;                                 // ( 52) User's closure
-  HandleFastRingEventFunction function;          // ( 60) Handler function
+  HandleFastRingCompletionFunction function;          // ( 60) Handler function
   ATOMIC(struct FastRingDescriptor*) heap;       // ( 68) Next allocated descriptor (see FastRing's heap)
   uint64_t identifier;                           // ( 76) Prepared user_data identifier for *_update() and *_remove() SQEs
   uint32_t integrity;                            // ( 80) CRC6(function + closure + tag)
@@ -124,6 +130,35 @@ struct FastRingDescriptor
   uint64_t reserved[8];                          // (216) Reserved for IORING_SETUP_SQE128
   union FastRingData data;                       // (472) User's specified data
 };                                               // ~ 512 bytes block including malloc header (usualy 24 bytes)
+
+struct FastRingDescriptorSet
+{
+  ATOMIC(struct FastRingDescriptor*) heap;       // Last allocated descriptor (required for release)
+  ATOMIC(struct FastRingDescriptor*) available;  // Last available (free) descriptor
+  ATOMIC(struct FastRingDescriptor*) pending;    // Last pending descriptor prepared for submission
+  struct FastRingDescriptor* submitting;         // Next descriptor to submit
+};
+
+struct FastRingFlusher
+{
+  ATOMIC(uint32_t) tag;                          // ( 4) Lock-free stack tag
+  ATOMIC(uint32_t) state;                        // ( 8) RING_FLUSH_STATE_*
+  ATOMIC(struct FastRingFlusher*) next;          // (16) Next flusher on the stack
+
+  void* closure;                                 // (24) User's closure
+  HandleFastRingFlushFunction function;          // (32) Handler function
+};
+
+struct FastRingFlusherStack
+{
+  ATOMIC(struct FastRingFlusher*) top;
+};
+
+struct FastRingFlusherSet
+{
+  struct FastRingFlusherStack available;         // Last available (free) flusher
+  struct FastRingFlusherStack pending;           // Last pending flusher prepared for call
+};
 
 struct FastRingTrace
 {
@@ -135,13 +170,7 @@ struct FastRingFileEntry
 {
   uint32_t index;                                // | Index in registered file table
   uint32_t references;                           // | Count of references to registered file table
-  struct FastRingDescriptor* descriptor;         // Descriptor for FastPoll API
-};
-
-struct FastRingFlushEntry
-{
-  void* closure;
-  HandleFlushFunction function;
+  struct FastRingDescriptor* descriptor;         // Descriptor for Poll API
 };
 
 struct FastRingFileList
@@ -161,14 +190,6 @@ struct FastRingBufferList
   struct iovec* vectors;                         // List of vectors
 };
 
-struct FastRingFlushList
-{
-  pthread_mutex_t lock;                          //
-  uint32_t count;                                // Count of available elements
-  uint32_t length;                               // Length of data in elements
-  struct FastRingFlushEntry* entries;            //
-};
-
 struct FastRing
 {
   struct io_uring ring;                          //
@@ -177,15 +198,12 @@ struct FastRing
   struct FastRingTrace trace;                    //
   pid_t thread;                                  // TID of processing thread
 
-  ATOMIC(struct FastRingDescriptor*) heap;       // Last allocated descriptor (required for release)
-  ATOMIC(struct FastRingDescriptor*) available;  // Last available (free) descriptor
-  ATOMIC(struct FastRingDescriptor*) pending;    // Last pending descriptor prepared for submission
-  struct FastRingDescriptor* submitting;         // Next descriptor to submit
+  struct FastRingDescriptorSet descriptors;      //
+  struct FastRingFlusherSet flushers;            //
 
   uint32_t limit;                                // Limit for registered files
   ATOMIC(uint16_t) groups;                       // Count of buffer rings (GetFastRingBufferGroup)
   struct FastRingFileList files;                 // List of watching file descriptors (Poll API)
-  struct FastRingFlushList flushers;             // List of flush handlers (SetFastRingFlushHandler)
   struct FastRingBufferList buffers;             // List of registered buffers (Registered Buffer API)
 };
 
@@ -194,13 +212,13 @@ int WaitForFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask);
 void PrepareFastRingDescriptor(struct FastRingDescriptor* descriptor, int option);
 void SubmitFastRingDescriptor(struct FastRingDescriptor* descriptor, int option);
 void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct FastRingDescriptor* last);
-struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingEventFunction function, void* closure);
+struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingCompletionFunction function, void* closure);
 
-// Note: ReleaseFastRingDescriptor has to be used only in special cases, normally release will be done automatically by result of HandleFastRingEventFunction
+// Note: ReleaseFastRingDescriptor has to be used only in special cases, normally release will be done automatically by result of HandleFastRingCompletionFunction
 void ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor);
 
-int SetFastRingFlushHandler(struct FastRing* ring, HandleFlushFunction function, void* closure);
-void RemoveFastRingFlushHandler(struct FastRing* ring, int number);
+struct FastRingFlusher* SetFastRingFlushHandler(struct FastRing* ring, HandleFastRingFlushFunction function, void* closure);
+int RemoveFastRingFlushHandler(struct FastRing* ring, struct FastRingFlusher* flusher);
 
 uint16_t GetFastRingBufferGroup(struct FastRing* ring);
 int IsFastRingThread(struct FastRing* ring);
@@ -228,12 +246,12 @@ void ReleaseFastRing(struct FastRing* ring);
 #define RING_POLL_ERROR   (uint64_t)POLLERR
 #define RING_POLL_HANGUP  (uint64_t)POLLHUP
 
-int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure);
+int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure);
 int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags);
 int RemoveFastRingPoll(struct FastRing* ring, int handle);
-void DestroyFastRingPoll(struct FastRing* ring, HandlePollEventFunction function, void* closure);
+void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingEventFunction function, void* closure);
 
-int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandlePollEventFunction function, void* closure);
+int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure);
 void* GetFastRingPollData(struct FastRing* ring, int handle);
 
 // Timeout
@@ -244,9 +262,9 @@ void* GetFastRingPollData(struct FastRing* ring, int handle);
 #define TIMEOUT_FLAG_REPEAT  IORING_TIMEOUT_MULTISHOT
 #endif
 
-struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleTimeoutFunction function, void* closure);
-struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleTimeoutFunction function, void* closure);
-struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timespec* interval, uint64_t flags, HandleTimeoutFunction function, void* closure);
+struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
+struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
+struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timespec* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
 
 // Buffer Provider
 

@@ -263,7 +263,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   return 1;
 }
 
-static void HandleOutboundFlush(struct FastRing* ring, void* closure)
+static void HandleOutboundFlush(void* closure, int reason)
 {
   struct FastSocketOutboundBatch* batch;
   struct FastSocket* socket;

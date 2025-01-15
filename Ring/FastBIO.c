@@ -199,7 +199,7 @@ static int HandleTouchCompletion(struct FastRingDescriptor* descriptor, struct i
   return 0;
 }
 
-static void FlushOutboundQueue(struct FastRing* ring, void* closure)
+static void FlushOutboundQueue(void* closure, int reason)
 {
   struct FastBIO* engine;
 
