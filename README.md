@@ -72,3 +72,8 @@ Bindings to DNS resolution library C-ARES
 ## LWSCore
 
 WebSocket client library on top of libwebsockets, it uses main loop integration over Glib 2.0
+
+## Fetch
+
+CURL wrapper with asynchronous fetch using CURL's multi interface.
+

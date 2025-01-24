@@ -549,13 +549,9 @@ void ReleaseFastRing(struct FastRing* ring)
 {
   if (ring != NULL)
   {
-    printf("1\n");
     ReleaseRingFlusherStack(&ring->flushers.pending);
-    printf("2\n");
     ReleaseRingFlusherStack(&ring->flushers.available);
-    printf("3\n");
     ReleaseRingDescriptorHeap(&ring->descriptors);
-    printf("4\n");
     io_uring_free_probe(ring->probe);
     io_uring_queue_exit(&ring->ring);
     pthread_mutex_destroy(&ring->files.lock);

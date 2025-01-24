@@ -4,10 +4,10 @@
 
 #include "Fetch.h"
 
-#include <fcntl.h>
 #include <malloc.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -27,10 +27,12 @@ struct FetchContext
   struct FastRing* ring;
   struct FastRingFlusher* flusher;
   struct FastRingDescriptor* descriptor;
+  atomic_int count;
 
+#if (LIBCURL_VERSION_NUM < 0x082800)
   TransmissionReference first;
   TransmissionReference last;
-  int count;
+#endif
 };
 
 struct TransmissionContext
@@ -48,8 +50,10 @@ struct TransmissionContext
   void* parameter1;
   void* parameter2;
 
+#if (LIBCURL_VERSION_NUM < 0x082800)
   TransmissionReference previous;
   TransmissionReference next;
+#endif
 };
 
 #ifdef BLOCK_SIZE
@@ -244,9 +248,11 @@ static void ReleaseTransmissionContext(struct TransmissionContext* transmission)
     }
   }
 
+#if (LIBCURL_VERSION_NUM < 0x082800)
   REMOVE(fetch, transmission);
-  fetch->count --;
+#endif
 
+  atomic_fetch_sub_explicit(&fetch->count, 1, memory_order_relaxed);
   curl_multi_remove_handle(fetch->multi, transmission->easy);
   curl_easy_cleanup(transmission->easy);
   free(transmission->buffer);
@@ -310,15 +316,33 @@ struct FetchContext* CreateFetch(struct FastRing* ring)
 void ReleaseFetch(struct FetchContext* fetch)
 {
   struct TransmissionContext* transmission;
+  CURL** handle;
+  CURL** list;
 
   RemoveFastRingFlushHandler(fetch->ring, fetch->flusher);
   SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
 
+#if (LIBCURL_VERSION_NUM >= 0x082800)
+  if (list = curl_multi_get_handles(fetch->multi))
+  {
+    handle = list;
+
+    while (*handle != NULL)
+    {
+      curl_easy_getinfo(*handle, CURLINFO_PRIVATE, (char**)&transmission);
+      ReleaseTransmissionContext(transmission);
+      handle ++;
+    }
+
+    curl_free(list);
+  }
+#else
   while (fetch->first != NULL)
   {
     // libcurl doesn't release contexts automatically :/
     ReleaseTransmissionContext(fetch->last);
   }
+#endif
 
   curl_share_cleanup(fetch->share);
   curl_multi_cleanup(fetch->multi);
@@ -352,9 +376,11 @@ struct TransmissionContext* MakeExtendedFetchTransmission(struct FetchContext* f
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
   }
 
+#if (LIBCURL_VERSION_NUM < 0x082800)
   APPEND(fetch, transmission);
-  fetch->count ++;
+#endif
 
+  atomic_fetch_add_explicit(&fetch->count, 1, memory_order_relaxed);
   curl_multi_add_handle(fetch->multi, transmission->easy);
 
   return transmission;
@@ -372,7 +398,7 @@ struct TransmissionContext* MakeSimpleFetchTransmission(struct FetchContext* fet
 
   if (headers != NULL)
   {
-    // Headers can be overwritten by application
+    // Headers could be overwritten by application
     curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
   }
 
@@ -395,11 +421,12 @@ struct TransmissionContext* MakeSimpleFetchTransmission(struct FetchContext* fet
 void CancelFetchTransmission(struct TransmissionContext* transmission)
 {
   transmission->function = NULL;
+  ReleaseTransmissionContext(transmission);
 }
 
 int GetFetchTransmissionCount(struct FetchContext* fetch)
 {
-  return fetch->count;
+  return atomic_load_explicit(&fetch->count, memory_order_relaxed);
 }
 
 struct curl_slist* AppendFetchHeader(struct curl_slist* list, int size, const char* format, ...)
