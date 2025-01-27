@@ -146,8 +146,10 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
   if (status == LUA_ERRRUN)
   {
     lua_getfield(context->state, -1, "HandlerFunction");
-    lua_xmove(thread, context->state, 1);
-    lua_call(context->state, 1, 0);
+    lua_xmove(context->state, thread, 1);
+    lua_pushvalue(thread, -2);
+    lua_call(thread, 1, 0);
+    lua_pop(thread, 1);
   }
 
   if ((status == LUA_YIELD) &&
