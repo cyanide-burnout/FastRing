@@ -44,6 +44,7 @@ struct FastRingBufferProvider;
 #define RING_DESC_STATE_SUBMITTED  3
 
 #define RING_DESC_ALIGNMENT        512
+#define RING_DESC_INTEGRITY_MARK   0x20
 #define RING_DESC_INTEGRITY_MASK   0x3f
 
 // Fortunately due to alignment the lower bits of SQE/CQE user_data can be used to pass CRC6 and an option

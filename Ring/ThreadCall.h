@@ -21,12 +21,16 @@ extern "C"
 #define TC_RESULT_CALLED    1
 #define TC_RESULT_CANCELED  2
 
+#define TC_WAKE_LAZY        0
+#define TC_WAKE_HARD        1
+
 typedef void (*HandleThreadCallFunction)(void* closure, va_list arguments);
 
 struct ThreadCallState
 {
-  ATOMIC(struct ThreadCallState*) next;
   ATOMIC(uint32_t) result;
+  ATOMIC(uint32_t) tag;
+  ATOMIC(struct ThreadCallState*) next;
   va_list arguments;
 };
 
@@ -41,8 +45,8 @@ struct ThreadCall
   int index;
   int handle;
   int feature;
+  ATOMIC(int) count;
   ATOMIC(int) weight;
-  ATOMIC(uint32_t) tag;
   ATOMIC(struct ThreadCallState*) stack;
 };
 

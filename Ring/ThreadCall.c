@@ -1,7 +1,7 @@
 #include "ThreadCall.h"
 
+#include <errno.h>
 #include <malloc.h>
-#include <alloca.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
@@ -10,30 +10,28 @@
 
 #define ALIGNMENT  64ULL
 
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#define NOTCH(pointer)  (uint32_t*)((uintptr_t)pointer + sizeof(uintptr_t) - sizeof(uint32_t))
-#else
-#define NOTCH(pointer)  (uint32_t*)pointer
-#endif
-
-#define AllocateThreadCallState()  GetThreadCallState(alloca(sizeof(struct ThreadCallState) + ALIGNMENT))
+// futex(address, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, value, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
+// futex(address, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, count, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
 
 static inline int __attribute__((always_inline)) futex(uint32_t* address1, int operation, uint32_t value1, const struct timespec* timeout, uint32_t* address2, uint32_t value2)
 {
   return syscall(SYS_futex, address1, operation, value1, timeout, address2, value2);
 }
 
-static inline struct ThreadCallState* __attribute__((always_inline)) GetThreadCallState(void* pointer)
+static struct ThreadCallState* GetThreadCallState()
 {
-  struct ThreadCallState* state;
+  static __thread uint8_t buffer[sizeof(struct ThreadCallState) + ALIGNMENT] = { };
 
-  state = (struct ThreadCallState*)(((uintptr_t)pointer + ALIGNMENT - 1ULL) & (~(ALIGNMENT - 1ULL)));
-  memset(state, 0, sizeof(struct ThreadCallState));
+  struct ThreadCallState* state;
+  void* pointer;
+
+  pointer = buffer;
+  state   = (struct ThreadCallState*)(((uintptr_t)pointer + ALIGNMENT - 1ULL) & (~(ALIGNMENT - 1ULL)));
 
   return state;
 }
 
-static inline struct ThreadCallState* __attribute__((always_inline)) PeekThreadCallState(struct ThreadCall* call)
+static struct ThreadCallState* PeekThreadCallState(struct ThreadCall* call)
 {
   void* _Atomic pointer;
   struct ThreadCallState* state;
@@ -45,32 +43,37 @@ static inline struct ThreadCallState* __attribute__((always_inline)) PeekThreadC
   return state;
 }
 
-static inline void __attribute__((always_inline)) SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallState* state)
+static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallState* state)
 {
   uint32_t tag;
   uint64_t count;
 
-  tag = atomic_fetch_add_explicit(&call->tag, 1, memory_order_relaxed);
+  tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
 
   do state->next = atomic_load_explicit(&call->stack, memory_order_relaxed);
   while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, tag, 0, ALIGNMENT), memory_order_release, memory_order_relaxed));
 
-  if (state->next == NULL)
+  if (atomic_fetch_add_explicit(&call->count, 1, memory_order_relaxed) == 0)
   {
 #ifdef TC_FEATURE_RING_FUTEX
-    if (state->feature == TC_FEATURE_RING_FUTEX)
+    if (call->feature == TC_FEATURE_RING_FUTEX)
     {
-      futex(NOTCH(&call->stack), FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+      while (futex((uint32_t*)&call->count, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
       return;
     }
 #endif
 
-    count = 1;
-    write(call->handle, &count, sizeof(uint64_t));
+    if (call->handle >= 0)
+    {
+      count = 1ULL;
+      while ((write(call->handle, &count, sizeof(uint64_t)) <= 0) &&
+             (errno != EBADF));
+      return;
+    }
   }
 }
 
-static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallState* state)
+static void MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallState* state)
 {
   if (atomic_load_explicit(&call->weight, memory_order_relaxed) > TC_ROLE_HANDLER)
   {
@@ -81,22 +84,65 @@ static inline void __attribute__((always_inline)) MakeInternalThreadCall(struct 
       return;
     }
 
+    atomic_store_explicit(&state->result, TC_RESULT_PREPARED, memory_order_relaxed);
+
     SubmitThreadCallState(call, state);
 
-    do futex((uint32_t*)&state->result, FUTEX_WAIT_PRIVATE, TC_RESULT_PREPARED, NULL, NULL, 0);
-    while (atomic_load_explicit(&state->result, memory_order_relaxed) != TC_RESULT_CALLED);
+    while ((atomic_load_explicit(&state->result, memory_order_relaxed) == TC_RESULT_PREPARED) &&
+           (futex((uint32_t*)&state->result, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, TC_RESULT_PREPARED, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
+
+    atomic_fetch_add_explicit(&state->tag, 1, memory_order_relaxed);
   }
 }
 
 static int HandleThreadWakeup(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
+  struct ThreadCallState* state;
+
+  state = (struct ThreadCallState*)descriptor->submission.addr;
+
   if (reason != RING_REASON_COMPLETE)
   {
-    // IORING_OP_FUTEX_WAKE is not completed, call futex() synchronously instead
-    futex((uint32_t*)descriptor->submission.addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+    while ((descriptor->data.number == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
+           (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
+    return 0;
+  }
+
+  if ((completion              != NULL) &&
+      (completion->res         <  0)    &&
+      (descriptor->data.number == atomic_load_explicit(&state->tag, memory_order_relaxed)))
+  {
+    SubmitFastRingDescriptor(descriptor, 0);
+    return 1;
   }
 
   return 0;
+}
+
+static void PostThreadCallResult(struct ThreadCall* call, struct ThreadCallState* state, int result, int wake)
+{
+  uint32_t tag;
+  struct FastRingDescriptor* descriptor;
+
+#ifdef TC_FEATURE_RING_FUTEX
+  if ((wake          == TC_WAKE_LAZY)          &&
+      (call->feature == TC_FEATURE_RING_FUTEX) &&
+      (descriptor     = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, NULL)))
+  {
+    descriptor->data.number = atomic_load_explicit(&state->tag, memory_order_relaxed);
+    atomic_store_explicit(&state->result, result, memory_order_release);
+
+    io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
+    SubmitFastRingDescriptor(descriptor, 0);
+    return;
+  }
+#endif
+
+  tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
+  atomic_store_explicit(&state->result, result, memory_order_release);
+
+  while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
+         (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
 }
 
 static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
@@ -106,28 +152,17 @@ static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uri
 
   if (call = (struct ThreadCall*)descriptor->closure)
   {
-    while (state = PeekThreadCallState(call))
+    while ((atomic_load_explicit(&call->count, memory_order_relaxed) > 0) &&
+           (state = PeekThreadCallState(call)))
     {
+      atomic_fetch_sub_explicit(&call->count, 1, memory_order_relaxed);
       call->function(call->closure, state->arguments);
-      atomic_store_explicit(&state->result, TC_RESULT_CALLED, memory_order_release);
-
-#ifdef TC_FEATURE_RING_FUTEX
-      if ((call->feature == TC_FEATURE_RING_FUTEX) &&
-          (descriptor = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, NULL)))
-      {
-        io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
-        SubmitFastRingDescriptor(descriptor, 0);
-        continue;
-      }
-#endif
-
-      futex((uint32_t*)&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+      PostThreadCallResult(call, state, TC_RESULT_CALLED, TC_WAKE_LAZY);
     }
 
-    if ((completion       != NULL) &&
-        (call->descriptor != NULL))
+    if (completion != NULL)
     {
-      SubmitFastRingDescriptor(call->descriptor, 0);
+      SubmitFastRingDescriptor(descriptor, 0);
       return 1;
     }
   }
@@ -165,7 +200,7 @@ struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunct
 
   if (call->feature == TC_FEATURE_RING_FUTEX)
   {
-    io_uring_prep_futex_wait(&descriptor->submission, NOTCH(&call->stack), 0, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
+    io_uring_prep_futex_wait(&descriptor->submission, (uint32_t*)&call->count, 0, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
     SubmitFastRingDescriptor(descriptor, 0);
     return call;
   }
@@ -196,6 +231,7 @@ struct ThreadCall* HoldThreadCall(struct ThreadCall* call)
 void ReleaseThreadCall(struct ThreadCall* call, int role)
 {
   int weight;
+  uint32_t tag;
   struct ThreadCallState* state;
   struct FastRingDescriptor* descriptor;
 
@@ -205,8 +241,11 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
   {
     while (state = PeekThreadCallState(call))
     {
+      tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
       atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_relaxed);
-      futex((uint32_t*)&state->result, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+
+      while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
+             (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
     }
 
     if (descriptor = call->descriptor)
@@ -239,7 +278,7 @@ int MakeVariadicThreadCall(struct ThreadCall* call, va_list arguments)
 {
   struct ThreadCallState* state;
 
-  state = AllocateThreadCallState();
+  state = GetThreadCallState();
 
   va_copy(state->arguments, arguments);
   MakeInternalThreadCall(call, state);
@@ -252,7 +291,7 @@ int MakeThreadCall(struct ThreadCall* call, ...)
 {
   struct ThreadCallState* state;
 
-  state = AllocateThreadCallState();
+  state = GetThreadCallState();
 
   va_start(state->arguments, call);
   MakeInternalThreadCall(call, state);
