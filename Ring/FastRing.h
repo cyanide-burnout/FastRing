@@ -116,20 +116,20 @@ struct FastRingDescriptor
   uint32_t state;                                // ( 12) RING_DESC_STATE_*
   uint32_t length;                               // ( 16) Length of submission
   uint32_t linked;                               // ( 20) Count of following linked descriptors in chain (when check is required)
-  ATOMIC(uint32_t) tag;                          // ( 24) Lock-free stack tag (see FastRing's available)
-  ATOMIC(uint32_t) references;                   // ( 28) Count of references (SQEs, files, etc.)
-  struct FastRingDescriptor* previous;           // ( 36) Previous linked descriptor (useful for chains with IOSQE_CQE_SKIP_SUCCESS)
-  ATOMIC(struct FastRingDescriptor*) next;       // ( 44) Next descriptor in the queue (available, pending, IOSQE_CQE_SKIP_SUCCESS)
+  uint32_t alignment;                            // ( 24)
+  uint64_t identifier;                           // ( 32) Prepared entry identifier (for SQEs and CQEs)
+  ATOMIC(uint32_t) tag;                          // ( 36) Lock-free stack tag (see FastRing's available)
+  ATOMIC(uint32_t) references;                   // ( 40) Count of references (SQEs, files, etc.)
+  struct FastRingDescriptor* previous;           // ( 48) Previous linked descriptor (useful for chains with IOSQE_CQE_SKIP_SUCCESS)
+  ATOMIC(struct FastRingDescriptor*) next;       // ( 56) Next descriptor in the queue (available, pending, IOSQE_CQE_SKIP_SUCCESS)
+  ATOMIC(struct FastRingDescriptor*) heap;       // ( 64) Next allocated descriptor (see FastRing's heap)
 
-  void* closure;                                 // ( 52) User's closure
-  HandleFastRingCompletionFunction function;          // ( 60) Handler function
-  ATOMIC(struct FastRingDescriptor*) heap;       // ( 68) Next allocated descriptor (see FastRing's heap)
-  uint64_t identifier;                           // ( 76) Prepared user_data identifier for *_update() and *_remove() SQEs
-  uint32_t integrity;                            // ( 80) CRC6(function + closure + tag)
+  void* closure;                                 // ( 72) User's closure
+  HandleFastRingCompletionFunction function;     // ( 80) Handler function
+  struct io_uring_sqe submission;                // (144) Copy of actual SQE
+  uint64_t reserved[8];                          // (208) Reserved for IORING_SETUP_SQE128
 
-  struct io_uring_sqe submission;                // (152) Copy of actual SQE
-  uint64_t reserved[8];                          // (216) Reserved for IORING_SETUP_SQE128
-  union FastRingData data;                       // (472) User's specified data
+  union FastRingData data;                       // (464) User-specified data
 };                                               // ~ 512 bytes block including malloc header (usualy 24 bytes)
 
 struct FastRingDescriptorSet

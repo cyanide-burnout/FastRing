@@ -153,8 +153,7 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
 static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
   descriptor->state                = RING_DESC_STATE_PENDING;
-  descriptor->integrity            = (descriptor->tag & RING_DESC_INTEGRITY_MASK) | RING_DESC_INTEGRITY_MARK;
-  descriptor->identifier           = (uint64_t)descriptor             | (uint64_t)descriptor->integrity;
+  descriptor->identifier           = (uint64_t)descriptor | (uint64_t)(descriptor->tag & RING_DESC_INTEGRITY_MASK) | (uint64_t)RING_DESC_INTEGRITY_MARK;
   descriptor->submission.user_data = (uint64_t)descriptor->identifier | (uint64_t)(option & RING_DESC_OPTION_MASK);
 }
 
@@ -169,8 +168,7 @@ static inline __attribute__((hot)) void HandleCompletedRingDescriptor(struct Fas
   }
 
   if (unlikely((completion != NULL) &&
-               ((descriptor->identifier == 0ULL) ||
-                (descriptor->integrity  != (completion->user_data & RING_DESC_INTEGRITY_MASK)))))
+               ((completion->user_data & ~RING_DESC_OPTION_MASK) != descriptor->identifier)))
   {
     // Leaked descriptor: someone was not in good mood and forgot to solve some cases
     // Don't touch the descriptor, it could be still in use somewhere else
@@ -201,7 +199,6 @@ static inline __attribute__((hot)) void HandleCompletedRingDescriptor(struct Fas
     descriptor->closure    = NULL;
     descriptor->function   = NULL;
     descriptor->previous   = NULL;
-    descriptor->integrity  = 0;
     descriptor->identifier = 0;
 
     atomic_thread_fence(memory_order_release);
@@ -271,9 +268,22 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
                 (descriptor->linked < io_uring_sq_space_left(&ring->ring))) &&
                (submission = io_uring_get_sqe(&ring->ring))))
     {
+      ring->descriptors.submitting = atomic_load_explicit(&descriptor->next, memory_order_relaxed);
+      descriptor->state            = RING_DESC_STATE_SUBMITTED;
+
+      if (likely(descriptor->length == sizeof(struct io_uring_sqe)))
+      {
+        __builtin_memcpy(submission, &descriptor->submission, sizeof(struct io_uring_sqe));
+        continue;
+      }
+
+      if (likely(descriptor->length == sizeof(struct io_uring_sqe) + 64))
+      {
+        __builtin_memcpy(submission, &descriptor->submission, sizeof(struct io_uring_sqe) + 64);
+        continue;
+      }
+
       memcpy(submission, &descriptor->submission, descriptor->length);
-      descriptor->state             = RING_DESC_STATE_SUBMITTED;
-      ring->descriptors.submitting  = atomic_load_explicit(&descriptor->next, memory_order_relaxed);
       continue;
     }
 
@@ -404,7 +414,6 @@ void __attribute__((hot)) ReleaseFastRingDescriptor(struct FastRingDescriptor* d
     descriptor->previous   = NULL;
     descriptor->closure    = NULL;
     descriptor->state      = RING_DESC_STATE_FREE;
-    descriptor->integrity  = 0;
     descriptor->identifier = 0;
 
     atomic_thread_fence(memory_order_release);

@@ -99,7 +99,7 @@ static int HandleThreadWakeup(struct FastRingDescriptor* descriptor, struct io_u
 {
   struct ThreadCallState* state;
 
-  state = (struct ThreadCallState*)descriptor->submission.addr;
+  state = (struct ThreadCallState*)descriptor->closure;
 
   if (reason != RING_REASON_COMPLETE)
   {
@@ -124,22 +124,26 @@ static void PostThreadCallResult(struct ThreadCall* call, struct ThreadCallState
   uint32_t tag;
   struct FastRingDescriptor* descriptor;
 
+  tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
+  atomic_store_explicit(&state->result, result, memory_order_release);
+
 #ifdef TC_FEATURE_RING_FUTEX
   if ((wake          == TC_WAKE_LAZY)          &&
       (call->feature == TC_FEATURE_RING_FUTEX) &&
-      (descriptor     = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, NULL)))
+      (descriptor     = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, state)))
   {
-    descriptor->data.number = atomic_load_explicit(&state->tag, memory_order_relaxed);
-    atomic_store_explicit(&state->result, result, memory_order_release);
+    if (tag == atomic_load_explicit(&state->tag, memory_order_relaxed))
+    {
+      descriptor->data.number = tag;
+      io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
+      SubmitFastRingDescriptor(descriptor, 0);
+      return;
+    }
 
-    io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&state->result, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
-    SubmitFastRingDescriptor(descriptor, 0);
+    ReleaseFastRingDescriptor(descriptor);
     return;
   }
 #endif
-
-  tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
-  atomic_store_explicit(&state->result, result, memory_order_release);
 
   while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
          (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
