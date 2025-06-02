@@ -555,7 +555,7 @@ static int __attribute__((hot)) HandlePollEvent(struct FastRingDescriptor* descr
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
-int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure)
+int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure)
 {
   struct FastRingDescriptor* descriptor;
 
@@ -672,7 +672,7 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle)
   return -EBADF;
 }
 
-void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingEventFunction function, void* closure)
+void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction function, void* closure)
 {
   struct FastRingFileEntry* entry;
   struct FastRingFileEntry* limit;
@@ -698,7 +698,7 @@ void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingEventFunction func
   }
 }
 
-int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure)
+int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure)
 {
   int result;
 
@@ -884,6 +884,36 @@ struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, stru
   }
 
   return NULL;
+}
+
+// Event
+
+struct FastRingDescriptor* CreateFastRingEvent(struct FastRing* ring, HandleFastRingCompletionFunction function, void* closure)
+{
+  struct FastRingDescriptor* descriptor;
+
+  if (descriptor = AllocateFastRingDescriptor(ring, function, closure))
+  {
+    PrepareRingDescriptor(descriptor, 0);
+    return descriptor;
+  }
+
+  return NULL;
+}
+
+int SubmitFastRingEvent(struct FastRing* ring, struct FastRingDescriptor* event, uint32_t parameter, int option)
+{
+  struct FastRingDescriptor* descriptor;
+
+  if ((event != NULL) &&
+      (descriptor = AllocateFastRingDescriptor(ring, NULL, NULL)))
+  {
+    io_uring_prep_msg_ring(&descriptor->submission, event->ring->ring.ring_fd, parameter, event->identifier, 0);
+    SubmitFastRingDescriptor(descriptor, option);
+    return 0;
+  }
+
+  return -EINVAL;
 }
 
 // Buffer Provider

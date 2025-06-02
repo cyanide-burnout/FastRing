@@ -73,14 +73,14 @@ struct FastRingBufferProvider;
 typedef int (*HandleFastRingCompletionFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 typedef void (*HandleFastRingFlushFunction)(void* closure, int reason);
 typedef void (*TraceFastRingFunction)(int action, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason, void* closure);
-typedef void (*HandleFastRingEventFunction)(int handle, uint32_t flags, void* closure, uint64_t options);
+typedef void (*HandleFastRingPollFunction)(int handle, uint32_t flags, void* closure, uint64_t options);
 typedef void (*HandleFastRingTimeoutFunction)(struct FastRingDescriptor* descriptor);
 
 struct FastRingPollData
 {
   int handle;
   uint64_t flags;
-  HandleFastRingEventFunction function;
+  HandleFastRingPollFunction function;
 };
 
 struct FastRingTimeoutData
@@ -247,12 +247,12 @@ void ReleaseFastRing(struct FastRing* ring);
 #define RING_POLL_ERROR   (uint64_t)POLLERR
 #define RING_POLL_HANGUP  (uint64_t)POLLHUP
 
-int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure);
+int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
 int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags);
 int RemoveFastRingPoll(struct FastRing* ring, int handle);
-void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingEventFunction function, void* closure);
+void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction function, void* closure);
 
-int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingEventFunction function, void* closure);
+int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
 void* GetFastRingPollData(struct FastRing* ring, int handle);
 
 // Timeout
@@ -266,6 +266,11 @@ void* GetFastRingPollData(struct FastRing* ring, int handle);
 struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
 struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
 struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timespec* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
+
+// Event
+
+struct FastRingDescriptor* CreateFastRingEvent(struct FastRing* ring, HandleFastRingCompletionFunction function, void* closure);
+int SubmitFastRingEvent(struct FastRing* ring, struct FastRingDescriptor* event, uint32_t parameter, int option);
 
 // Buffer Provider
 

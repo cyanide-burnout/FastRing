@@ -58,7 +58,8 @@ struct ResolverState* CreateResolver(struct FastRing* ring)
   options.sock_state_cb      = ManageResolverHandler;
   options.sock_state_cb_data = state;
 
-  if (ares_init_options(&state->channel, &options, ARES_OPT_FLAGS | ARES_OPT_SOCK_STATE_CB) != ARES_SUCCESS)
+  if ((state == NULL) ||
+      (ares_init_options(&state->channel, &options, ARES_OPT_FLAGS | ARES_OPT_SOCK_STATE_CB) != ARES_SUCCESS))
   {
     free(state);
     return NULL;
