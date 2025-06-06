@@ -45,13 +45,10 @@ static struct ThreadCallState* PeekThreadCallState(struct ThreadCall* call)
 
 static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallState* state)
 {
-  uint32_t tag;
   uint64_t count;
 
-  tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
-
   do state->next = atomic_load_explicit(&call->stack, memory_order_relaxed);
-  while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, tag, 0, ALIGNMENT), memory_order_release, memory_order_relaxed));
+  while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, state->tag, 0, ALIGNMENT), memory_order_release, memory_order_relaxed));
 
   if (atomic_fetch_add_explicit(&call->count, 1, memory_order_relaxed) == 0)
   {
@@ -95,7 +92,7 @@ static void MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallSta
   }
 }
 
-static int HandleThreadWakeup(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+static int HandleThreadWakeupCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct ThreadCallState* state;
 
@@ -130,7 +127,7 @@ static void PostThreadCallResult(struct ThreadCall* call, struct ThreadCallState
 #ifdef TC_FEATURE_RING_FUTEX
   if ((wake          == TC_WAKE_LAZY)          &&
       (call->feature == TC_FEATURE_RING_FUTEX) &&
-      (descriptor     = AllocateFastRingDescriptor(call->ring, HandleThreadWakeup, state)))
+      (descriptor     = AllocateFastRingDescriptor(call->ring, HandleThreadWakeupCompletion, state)))
   {
     if (tag == atomic_load_explicit(&state->tag, memory_order_relaxed))
     {
@@ -149,7 +146,7 @@ static void PostThreadCallResult(struct ThreadCall* call, struct ThreadCallState
          (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
 }
 
-static int HandleThreadCall(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+static int HandleThreadCallCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct ThreadCall* call;
   struct ThreadCallState* state;
@@ -180,7 +177,7 @@ struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunct
   struct FastRingDescriptor* descriptor;
 
   call       = (struct ThreadCall*)calloc(1, sizeof(struct ThreadCall));
-  descriptor = AllocateFastRingDescriptor(ring, HandleThreadCall, call);
+  descriptor = AllocateFastRingDescriptor(ring, HandleThreadCallCompletion, call);
 
   if ((call       == NULL) ||
       (descriptor == NULL))

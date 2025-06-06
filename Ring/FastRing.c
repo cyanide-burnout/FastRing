@@ -215,6 +215,7 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
   struct __kernel_timespec timeout;
 
   int state;
+  void* condition;
   struct FastRingFlusher* flusher;
   struct FastRingDescriptor* previous;
   struct FastRingDescriptor* descriptor;
@@ -251,7 +252,7 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
   }
 
   while ((descriptor = ring->descriptors.submitting) &&
-         (atomic_load_explicit(&descriptor->next, memory_order_acquire) != NULL))
+         (condition  = atomic_load_explicit(&descriptor->next, memory_order_acquire)))
   {
     if (descriptor->state == RING_DESC_STATE_FREE)
     {
@@ -290,9 +291,10 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
     break;
   }
 
-  // Submit SQEs and handle CQEs without waiting when at least one CQE exists
+  // Submit SQEs and handle CQEs without waiting when at least one pending SQE or CQE exists
 
-  if (io_uring_cq_ready(&ring->ring) > 0)
+  if (likely((condition != NULL) ||
+             (io_uring_cq_ready(&ring->ring) > 0)))
   {
     result = io_uring_submit(&ring->ring);
     goto Handle;
