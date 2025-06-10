@@ -242,10 +242,10 @@ int __attribute__((hot)) WaitForFastRing(struct FastRing* ring, uint32_t interva
 
   // Submit pending SQEs
 
-  if (unlikely((descriptor = atomic_load_explicit(&ring->descriptors.pending, memory_order_relaxed)) &&
-               (atomic_load_explicit(&descriptor->next, memory_order_acquire) == NULL) &&
-               (descriptor->state != RING_DESC_STATE_FREE) &&
-               (descriptor = AllocateRingDescriptor(&ring->descriptors))))
+  if (likely((descriptor = atomic_load_explicit(&ring->descriptors.pending, memory_order_relaxed)) &&
+             (atomic_load_explicit(&descriptor->next, memory_order_acquire) == NULL) &&
+             (descriptor->state != RING_DESC_STATE_FREE) &&
+             (descriptor = AllocateRingDescriptor(&ring->descriptors))))
   {
     // Submit stub descriptor to force submission of last valuable descriptor
     SubmitRingDescriptorRange(&ring->descriptors, descriptor, descriptor);
@@ -910,8 +910,8 @@ int SubmitFastRingEvent(struct FastRing* ring, struct FastRingDescriptor* event,
   if ((event != NULL) &&
       (descriptor = AllocateFastRingDescriptor(ring, NULL, NULL)))
   {
-    io_uring_prep_msg_ring(&descriptor->submission, event->ring->ring.ring_fd, parameter, event->identifier, 0);
-    SubmitFastRingDescriptor(descriptor, option);
+    io_uring_prep_msg_ring(&descriptor->submission, event->ring->ring.ring_fd, parameter, event->identifier | (uint64_t)(option & RING_DESC_OPTION_MASK), 0);
+    SubmitFastRingDescriptor(descriptor, 0);
     return 0;
   }
 
