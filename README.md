@@ -16,8 +16,8 @@ TBD
 
 ## FastBuffer
 
-Fast buffer pool implementation especialy to use with FastRing
-Check usage examples at FastBIO and FastSocket
+Fast buffer pool implementation, specifically designed for use with FastRing.
+See usage examples in FastBIO and FastSocket.
 
 ## CoRing
 
@@ -27,7 +27,7 @@ That is a small adapter to use in C++ coroutines with my Compromise library (htt
 
 Adapter to incorporate Glib 2.0 main loop into FastRing. It creates green-thread / fiber for GLib by using ucontext.h.
 
-- *CreateFastGLoop* - create a new instance of FastGLoop
+- *CreateFastGLoop* - creates a new instance of FastGLoop
 - *ReleaseFastGLoop* - destroys FastGLoop
 - *StopFastGLoop* - you optionally can call it before ReleaseFastGLoop when you need to make extra actions before destruction of GMainLoop.
 
@@ -39,11 +39,21 @@ Adapter to incorporate Glib 2.0 main loop into FastRing. It creates green-thread
 
 Make a call to a handler running FastRing from any other thread
 
-- *CreateThreadCall* - create a new ThreadCall
+- *CreateThreadCall* - creates a new ThreadCall
 - *HoldThreadCall* - should be used by caller to increment weight (kind of reference counter) to hold the object
 - *ReleaseThreadCall* - decrements weight, releases ThreadCall
 - *FreeThreadCall* - simplified form of ReleaseThreadCall for caller, useful for callbacks
 - *MakeVariadicThreadCall* / *MakeThreadCall* - makes a call
+
+## FastSemaphore
+
+Reactive backend for glibc's sem_t
+
+- *SubmitFastSemaphoreWait* - registers an asynchronous handler to be called when a token becomes available, replaces sem_wait()
+- *CancelFastSemaphoreWait* - cancels a previously registered asynchronous handler
+- *SubmitFastSemaphorePost* - posts token to the semaphore, can be used instead of sem_post() to avoid a synchronous syscall futex_wake()
+
+*FastSemaphoreFunction* can return 1 to continue receiving tokens or 0 to stop receiving tokens
 
 ## FastSocket
 
@@ -59,7 +69,7 @@ D-BUS adapter for FastRing
 
 ## WatchDog
 
-WatchDog implementation for systemd
+Watchdog implementation for systemd
 
 ## LuaPoll
 
