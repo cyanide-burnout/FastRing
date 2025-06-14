@@ -21,17 +21,19 @@ extern "C"
 {
 #endif
 
+// Returns 1 to continue wating for tokens, 0 to stop
 typedef int (*FastSemaphoreFunction)(sem_t* semaphore, void* closure);
 
 struct FastSemaphoreData
 {
-  sem_t* semaphore;
-  FastSemaphoreFunction function;
-  void* closure;
-  int state;
+  sem_t* semaphore;                // Make sure that the semaphore remains available for the entire service life of the waiter
+  FastSemaphoreFunction function;  //
+  void* closure;                   //
+  int limit;                       // Limits the number of tokens processed per callback
+  int state;                       // A non-zero value means entering the callback required for smooth destruction
 };
 
-struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure);
+struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure, int limit);
 void CancelFastSemaphoreWait(struct FastRingDescriptor* descriptor);
 
 int SubmitFastSemaphorePost(struct FastRing* ring, sem_t* semaphore);

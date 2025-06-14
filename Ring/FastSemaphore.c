@@ -45,6 +45,7 @@ static int HandleSemaphoreWaitCompletion(struct FastRingDescriptor* descriptor, 
   struct new_sem* primitive;
   uint64_t _Atomic value;
   int result;
+  int count;
 
   if ((completion != NULL) &&
       (~completion->user_data & RING_DESC_OPTION_IGNORE))
@@ -52,10 +53,12 @@ static int HandleSemaphoreWaitCompletion(struct FastRingDescriptor* descriptor, 
     data      = (struct FastSemaphoreData*)&descriptor->data;
     primitive = (struct new_sem*)data->semaphore;
     result    = 1;
+    count     = data->limit;
 
     data->state ++;
 
-    while ((result         != 0)    &&
+    while ((count          != 0)    &&
+           (result         != 0)    &&
            (data->function != NULL) &&
            (value = atomic_load_explicit(&primitive->data, memory_order_relaxed)) &&
            (value & SEM_VALUE_MASK))
@@ -69,7 +72,9 @@ static int HandleSemaphoreWaitCompletion(struct FastRingDescriptor* descriptor, 
       }
 
       result = data->function(data->semaphore, data->closure);
+
       atomic_fetch_add_explicit(&primitive->data, (uint64_t)(!!result) << SEM_NWAITERS_SHIFT, memory_order_relaxed);
+      count --;
     }
 
     data->state --;
@@ -88,7 +93,7 @@ static int HandleSemaphoreWaitCompletion(struct FastRingDescriptor* descriptor, 
   return 0;
 }
 
-struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure)
+struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure, int limit)
 {
   struct FastRingDescriptor* descriptor;
   struct FastSemaphoreData* data;
@@ -101,6 +106,7 @@ struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t*
     data->semaphore = semaphore;
     data->function  = function;
     data->closure   = closure;
+    data->limit     = limit;
     data->state     = 0;
 
     atomic_fetch_add_explicit(&primitive->data, (1ULL << SEM_NWAITERS_SHIFT), memory_order_relaxed);
@@ -149,15 +155,22 @@ int SubmitFastSemaphorePost(struct FastRing* ring, sem_t* semaphore)
 
     if ((value & SEM_VALUE_MASK) == SEM_VALUE_MAX)
     {
-      //
+      // The maximum allowable value for a semaphore would be exceeded
       return -EOVERFLOW;
     }
   }
   while (!atomic_compare_exchange_weak_explicit(&primitive->data, &value, value + 1, memory_order_release, memory_order_relaxed));
 
-  if ((value >> SEM_NWAITERS_SHIFT) &&
-      (descriptor = AllocateFastRingDescriptor(ring, NULL, NULL)))
+  if (value >> SEM_NWAITERS_SHIFT)
   {
+    descriptor = AllocateFastRingDescriptor(ring, NULL, NULL);
+
+    if (descriptor == NULL)
+    {
+      // The available data space is not large enough
+      return -ENOMEM;
+    }
+
     io_uring_prep_futex_wake(&descriptor->submission, (uint32_t*)&primitive->data + SEM_VALUE_OFFSET, 1, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | primitive->private ^ FUTEX2_PRIVATE, 0);
     SubmitFastRingDescriptor(descriptor, 0);
   }
