@@ -21,22 +21,24 @@ extern "C"
 {
 #endif
 
-// Returns 1 to continue wating for tokens, 0 to stop
+// Asynchronous token handler; return 1 to keep waiting for more tokens, 0 to unregister.
 typedef int (*FastSemaphoreFunction)(sem_t* semaphore, void* closure);
 
 struct FastSemaphoreData
 {
-  sem_t* semaphore;                // Make sure that the semaphore remains available for the entire service life of the waiter
-  FastSemaphoreFunction function;  //
-  void* closure;                   //
-  int limit;                       // Limits the number of tokens processed per callback
-  int state;                       // A non-zero value means entering the callback required for smooth destruction
+  sem_t* semaphore;                // The semaphore must remain valid for the entire lifetime of the waiter
+  FastSemaphoreFunction function;  // User-provided callback to handle tokens
+  void* closure;                   // Opaque user data passed to the callback
+  int limit;                       // Maximum number of tokens to process per callback invocation
+  int state;                       // Non-zero if inside callback; used to ensure safe destruction
 };
 
-struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure, int limit);
-void CancelFastSemaphoreWait(struct FastRingDescriptor* descriptor);
+// RegisterFastSemaphore() and CancelFastSemaphore() provide a reactive, asynchronous alternative to sem_wait()
+struct FastRingDescriptor* RegisterFastSemaphore(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure, int limit);
+void CancelFastSemaphore(struct FastRingDescriptor* descriptor);
 
-int SubmitFastSemaphorePost(struct FastRing* ring, sem_t* semaphore);
+// PostFastSemaphore() acts as a replacement for sem_post(), providing asynchronous wake-up
+int PostFastSemaphore(struct FastRing* ring, sem_t* semaphore);
 
 #ifdef __cplusplus
 }

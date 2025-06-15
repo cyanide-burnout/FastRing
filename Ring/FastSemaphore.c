@@ -93,7 +93,7 @@ static int HandleSemaphoreWaitCompletion(struct FastRingDescriptor* descriptor, 
   return 0;
 }
 
-struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure, int limit)
+struct FastRingDescriptor* RegisterFastSemaphore(struct FastRing* ring, sem_t* semaphore, FastSemaphoreFunction function, void* closure, int limit)
 {
   struct FastRingDescriptor* descriptor;
   struct FastSemaphoreData* data;
@@ -118,7 +118,7 @@ struct FastRingDescriptor* SubmitFastSemaphoreWait(struct FastRing* ring, sem_t*
   return descriptor;
 }
 
-void CancelFastSemaphoreWait(struct FastRingDescriptor* descriptor)
+void CancelFastSemaphore(struct FastRingDescriptor* descriptor)
 {
   struct FastSemaphoreData* data;
   struct new_sem* primitive;
@@ -140,7 +140,7 @@ void CancelFastSemaphoreWait(struct FastRingDescriptor* descriptor)
   }
 }
 
-int SubmitFastSemaphorePost(struct FastRing* ring, sem_t* semaphore)
+int PostFastSemaphore(struct FastRing* ring, sem_t* semaphore)
 {
   struct FastRingDescriptor* descriptor;
   struct FastSemaphoreData* data;
