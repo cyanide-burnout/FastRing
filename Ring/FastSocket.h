@@ -1,6 +1,8 @@
 #ifndef FASTSOCKET_H
 #define FASTSOCKET_H
 
+#include <stdio.h>
+
 #include "FastRing.h"
 #include "FastBuffer.h"
 
@@ -69,6 +71,8 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
 int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message, int flags);
 int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, socklen_t length, const void* data, size_t size, int flags);
 void ReleaseFastSocket(struct FastSocket* socket);
+
+FILE* GetFastSocketStream(struct FastSocket* socket, int own);
 
 inline __attribute__((always_inline)) struct msghdr* GetFastSocketMessageHeader(struct FastSocket* socket)
 {

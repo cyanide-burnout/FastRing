@@ -1,9 +1,11 @@
-#include "FastSocket.h"
+#define _GNU_SOURCE
 
 #include <malloc.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+
+#include "FastSocket.h"
 
 #define likely(condition)     __builtin_expect(!!(condition), 1)
 #define unlikely(condition)   __builtin_expect(!!(condition), 0)
@@ -628,4 +630,58 @@ void ReleaseFastSocket(struct FastSocket* socket)
 
     ReleaseSocketInstance(socket, -1);
   }
+}
+
+static ssize_t HandleStreamRead(void* cookie, char* data, size_t size)
+{
+  int result;
+
+  result = ReceiveFastSocketData((struct FastSocket*)cookie, data, size, 0);
+
+  if (unlikely(result < 0))
+  {
+    errno = -result;
+    return -1;
+  }
+
+  return result;
+}
+
+static ssize_t HandleStreamWrite(void* cookie, const char* data, size_t size)
+{
+  int result;
+
+  result = TransmitFastSocketData((struct FastSocket*)cookie, NULL, 0, data, size, 0);
+
+  if (unlikely(result < 0))
+  {
+    errno = -result;
+    return -1;
+  }
+
+  return size;
+}
+
+static int HandleStreamClose(void* cookie)
+{
+  ReleaseFastSocket((struct FastSocket*)cookie);
+  return 0;
+}
+
+FILE* GetFastSocketStream(struct FastSocket* socket, int own)
+{
+  cookie_io_functions_t functions;
+
+  functions.seek  = NULL;
+  functions.read  = HandleStreamRead;
+  functions.write = HandleStreamWrite;
+  functions.close = NULL;
+
+  if (own)
+  {
+    // Release FastSocket on fclose()
+    functions.close = HandleStreamClose;
+  }
+
+  return fopencookie(socket, "a+", functions);
 }
