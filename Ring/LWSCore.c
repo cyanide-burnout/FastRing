@@ -145,6 +145,15 @@ static int HandleServiceEvent(struct lws* instance, enum lws_callback_reasons re
 
   switch (reason)
   {
+    case LWS_CALLBACK_WSI_DESTROY:
+      session = (struct LWSSession*)user;
+      if (session != NULL)
+      {
+        // Instance is already destroyed and pointer has to be cleared before calling a function
+        session->instance = NULL;
+        return session->function(session, reason, NULL, 0);
+      }
+
     case LWS_CALLBACK_PROTOCOL_INIT:
     case LWS_CALLBACK_PROTOCOL_DESTROY:
       return 0;
@@ -156,17 +165,6 @@ static int HandleServiceEvent(struct lws* instance, enum lws_callback_reasons re
       if (core->option & LWS_OPTION_IGNORE_CERTIFICATE)        SSL_CTX_set_cert_verify_callback(context, HandleCertificate, NULL);
       if (core->function != NULL)                              core->function(context, core->closure);
       return 0;
-
-    case LWS_CALLBACK_WSI_DESTROY:
-      session        = (struct LWSSession*)user;
-      core           = (struct LWSCore*)lws_context_user(lws_get_context(instance));
-
-      if (session != NULL)
-      {
-        // Instance is already destroyed and pointer has to be cleared before calling a function
-        session->instance = NULL;
-        return session->function(session, reason, NULL, 0);
-      }
 
     case LWS_CALLBACK_CLIENT_WRITEABLE:
       session = (struct LWSSession*)user;
@@ -219,7 +217,11 @@ struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, LWSCreateFunct
 
 void ReleaseLWSCore(struct LWSCore* core)
 {
+#if (LWS_LIBRARY_VERSION_MAJOR < 4) || (LWS_LIBRARY_VERSION_MINOR < 3)
   lws_context_destroy2(core->context);
+#else
+  lws_context_destroy(core->context);
+#endif
   free(core);
 }
 
