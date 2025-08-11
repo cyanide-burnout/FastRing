@@ -580,7 +580,6 @@ int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFas
       descriptor->data.poll.flags    = flags;
 
       SubmitFastRingDescriptor(descriptor, 0);
-      pthread_mutex_unlock(&ring->files.lock);
       return 0;
     }
 

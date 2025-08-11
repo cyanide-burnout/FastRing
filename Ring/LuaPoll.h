@@ -1,5 +1,5 @@
-#ifndef LUAPOOL_H
-#define LUAPOOL_H
+#ifndef LUAPOLL_H
+#define LUAPOLL_H
 
 #include "FastRing.h"
 

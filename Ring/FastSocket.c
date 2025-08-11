@@ -547,15 +547,15 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
     descriptor->data.socket.message.msg_iov         = &descriptor->data.socket.vector;
     descriptor->data.socket.message.msg_iovlen      = 1;
     descriptor->data.socket.message.msg_name        = NULL;
-    descriptor->data.socket.message.msg_iovlen      = 0;
+    descriptor->data.socket.message.msg_namelen     = 0;
     descriptor->data.socket.message.msg_control     = pointer;
     descriptor->data.socket.message.msg_controllen  = message->msg_controllen;
 
     if (message->msg_namelen != 0)
     {
       memcpy(&descriptor->data.socket.address, message->msg_name, message->msg_namelen);
-      descriptor->data.socket.message.msg_name   = &descriptor->data.socket.address;
-      descriptor->data.socket.message.msg_iovlen = message->msg_namelen;
+      descriptor->data.socket.message.msg_name    = &descriptor->data.socket.address;
+      descriptor->data.socket.message.msg_namelen = message->msg_namelen;
     }
   }
 
