@@ -32,32 +32,33 @@ void SetLWSReportHandler(int level, LWSReportFunction function)
 
 // Queue
 
-static int TransmitPendingData(struct lws* instance, struct LWSQueue* queue)
+static int TransmitPendingMessages(struct lws* instance, struct LWSSession* session)
 {
   int result;
   struct LWSMessage* message;
 
-  message = NULL;
   result  = 0;
+  message = NULL;
 
-  while ((queue->count > 0) &&
-         (message = queue->messages + queue->reading) &&
-         (message->data != NULL) &&
+  while ((message        = session->head) &&
+         (message->data != NULL)          &&
          (result = lws_write(instance, message->data, message->length, message->protocol)) &&
          (result > 0))
   {
-    queue->count   --;
-    queue->reading ++;
-    queue->reading %= queue->length;
+    session->head = message->next;
+    message->next = session->heap;
+    session->heap = message;
   }
 
-  if ((result < 0) || (message != NULL) && (message->data == NULL))
+  if ((result         < 0)    ||
+      (message       != NULL) &&
+      (message->data == NULL))
   {
-    // Close connection
+    // All pending messages will be released by ReleaseLWSSession()
     return -1;
   }
 
-  if (queue->count > 0)
+  if (session->head != NULL)
   {
     // Postpone next transmission
     lws_callback_on_writable(instance);
@@ -66,53 +67,35 @@ static int TransmitPendingData(struct lws* instance, struct LWSQueue* queue)
   return 0;
 }
 
-static void ReleaseQueue(struct LWSQueue* queue)
-{
-  if (queue != NULL)
-  {
-    while (queue->length > 0)
-    {
-      queue->length --;
-      free(queue->messages[queue->length].buffer);
-    }
-
-    free(queue);
-  }
-}
-
-void CreateLWSQueue(struct LWSSession* session, size_t length)
-{
-  if (session != NULL)
-  {
-    session->queue         = (struct LWSQueue*)calloc(1, sizeof(struct LWSQueue) + sizeof(struct LWSMessage) * length);
-    session->queue->length = length;
-  }
-}
-
 struct LWSMessage* AllocateLWSMessage(struct LWSSession* session, size_t length, enum lws_write_protocol protocol)
 {
   size_t size;
-  struct LWSQueue* queue;
   struct LWSMessage* message;
 
-  queue   = session->queue;
-  message = NULL;
+  size = sizeof(struct LWSMessage) + LWS_PRE + length;
 
-  if ((queue != NULL) &&
-      (queue->count < queue->length))
+  if (session->heap != NULL)
   {
-    message = queue->messages + queue->writing;
-    size    = length + LWS_PRE;
+    message       = session->heap;
+    session->heap = message->next;
 
-    queue->writing ++;
-    queue->writing %= queue->length;
-
-    if (size > message->size)
+    if (size <= message->size)
     {
-      message->size   = size;
-      message->buffer = (char*)realloc(message->buffer, message->size);
+      message->next     = NULL;
+      message->data     = message->buffer + LWS_PRE;
+      message->length   = length;
+      message->protocol = protocol;
+      return message;
     }
 
+    free(message);
+  }
+
+  if (message = (struct LWSMessage*)malloc(size))
+  {
+    message->session  = session;
+    message->size     = size;
+    message->next     = NULL;
     message->data     = message->buffer + LWS_PRE;
     message->length   = length;
     message->protocol = protocol;
@@ -121,13 +104,24 @@ struct LWSMessage* AllocateLWSMessage(struct LWSSession* session, size_t length,
   return message;
 }
 
-void TransmitLWSMessage(struct LWSSession* session)
+void TransmitLWSMessage(struct LWSMessage* message)
 {
-  if ((++ session->queue->count) == 1)
+  struct LWSSession* session;
+
+  session       = message->session;
+  message->next = NULL;
+
+  if (session->head != NULL)
   {
-    lws_callback_on_writable(session->instance);
-    TouchFastGLoop(session->loop);
+    session->tail->next = message;
+    session->tail       = message;
+    return;
   }
+
+  session->head = message;
+  session->tail = message;
+  lws_callback_on_writable(session->instance);
+  TouchFastGLoop(session->loop);
 }
 
 // Core
@@ -168,10 +162,11 @@ static int HandleServiceEvent(struct lws* instance, enum lws_callback_reasons re
 
     case LWS_CALLBACK_CLIENT_WRITEABLE:
       session = (struct LWSSession*)user;
-      if ((session != NULL) && (session->queue != NULL))
+      if ((session       != NULL) &&
+          (session->head != NULL))
       {
         // Instance is ready to send, queue mode is activated
-        return TransmitPendingData(instance, session->queue);
+        return TransmitPendingMessages(instance, session);
       }
 
     default:
@@ -186,7 +181,7 @@ static int HandleServiceEvent(struct lws* instance, enum lws_callback_reasons re
   return -1;
 }
 
-struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, LWSCreateFunction function, void* closure)
+struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, int depth, LWSCreateFunction function, void* closure)
 {
   struct LWSCore* core;
   struct lws_protocols* protocol;
@@ -206,6 +201,10 @@ struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, LWSCreateFunct
   core->information.foreign_loops = (void**)&loop->loop;
   core->information.count_threads = 1;
 
+#if (LWS_LIBRARY_VERSION_MAJOR > 4) || (LWS_LIBRARY_VERSION_MAJOR == 4) && (LWS_LIBRARY_VERSION_MINOR >= 2)
+   core->information.smd_queue_depth = depth;
+#endif
+
   core->loop     = loop;
   core->option   = option;
   core->closure  = closure;
@@ -217,7 +216,7 @@ struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, LWSCreateFunct
 
 void ReleaseLWSCore(struct LWSCore* core)
 {
-#if (LWS_LIBRARY_VERSION_MAJOR < 4) || (LWS_LIBRARY_VERSION_MINOR < 3)
+#if (LWS_LIBRARY_VERSION_MAJOR < 4) || (LWS_LIBRARY_VERSION_MAJOR == 4) && (LWS_LIBRARY_VERSION_MINOR < 3)
   lws_context_destroy2(core->context);
 #else
   lws_context_destroy(core->context);
@@ -342,13 +341,26 @@ struct LWSSession* CreateLWSSessionFromAddress(struct LWSCore* core, struct sock
 
 void ReleaseLWSSession(struct LWSSession* session)
 {
+  struct LWSMessage* message;
+
   if (session->instance != NULL)
   {
     lws_close_reason(session->instance, LWS_CLOSE_STATUS_NOSTATUS, NULL, 0);
     lws_set_wsi_user(session->instance, NULL);
   }
 
-  ReleaseQueue(session->queue);
+  while (message = session->heap)
+  {
+    session->heap = message->next;
+    free(message);
+  }
+
+  while (message = session->head)
+  {
+    session->head = message->next;
+    free(message);
+  }
+
   free(session->protocols);
   free(session->location);
   free(session->host);

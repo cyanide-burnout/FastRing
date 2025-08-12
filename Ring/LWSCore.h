@@ -30,7 +30,7 @@ extern "C"
 #define LWS_OPTION_IGNORE_CERTIFICATE        (1 << 12)
 
 struct LWSSession;
-struct LWSQueue;
+struct LWSMessage;
 
 typedef void (*LWSReportFunction)(int priority, const char* format, ...);
 typedef void (*LWSCreateFunction)(SSL_CTX* context, void* closure);
@@ -55,45 +55,41 @@ struct LWSSession
   struct FastGLoop* loop;
   LWSHandleFunction function;
 
+  struct LWSMessage* heap;
+  struct LWSMessage* head;
+  struct LWSMessage* tail;
+
   char* host;
   char* location;
   char* protocols;
   char address[INET6_ADDRSTRLEN + 1];
   struct lws_client_connect_info information;
-
-  struct LWSQueue* queue;
 };
 
 struct LWSMessage
 {
-  size_t size;                       // Size of buffer
+  struct LWSSession* session;        //
+  struct LWSMessage* next;           //
+  size_t size;                       // Size of allocation
+
+  enum lws_write_protocol protocol;  // Sub-protocol (LWS_WRITE_TEXT, LWS_WRITE_BINARY, LWS_WRITE_PING, LWS_WRITE_CONTINUATION, LWS_WRITE_NO_FIN)
   size_t length;                     // Length of data
   char* data;                        // Pointer to data (will be set to buffer[LWS_PRE] by default, use NULL to close connection)
-  char* buffer;                      // Pointer to allocated buffer
-  enum lws_write_protocol protocol;  // Sub-protocol (LWS_WRITE_TEXT, LWS_WRITE_BINARY, LWS_WRITE_PING, LWS_WRITE_CONTINUATION, LWS_WRITE_NO_FIN)
-};
 
-struct LWSQueue
-{
-  size_t count;
-  size_t length;
-  size_t writing;
-  size_t reading;
-  struct LWSMessage messages[0];
+  char buffer[0];                    //
 };
 
 void SetLWSReportHandler(int level, LWSReportFunction function);   // SetLWSReportHandler(LLL_ERR | LLL_WARN, report);
 
-struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, LWSCreateFunction function, void* closure);  // LWS_OPTION_IGNORE_CERTIFICATE | SSL3_VERSION
+struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, int depth, LWSCreateFunction function, void* closure);  // LWS_OPTION_IGNORE_CERTIFICATE | SSL3_VERSION
 void ReleaseLWSCore(struct LWSCore* core);
 
 struct LWSSession* CreateLWSSessionFromURL(struct LWSCore* core, const char* location, const char* protocols, LWSHandleFunction function, void* closure);
 struct LWSSession* CreateLWSSessionFromAddress(struct LWSCore* core, struct sockaddr* address, int secure, const char* host, const char* path, const char* protocols, LWSHandleFunction function, void* closure);
 void ReleaseLWSSession(struct LWSSession* session);
 
-void CreateLWSQueue(struct LWSSession* session, size_t length);
 struct LWSMessage* AllocateLWSMessage(struct LWSSession* session, size_t length, enum lws_write_protocol protocol);
-void TransmitLWSMessage(struct LWSSession* session);
+void TransmitLWSMessage(struct LWSMessage* message);
 
 #ifdef __cplusplus
 }
