@@ -357,8 +357,8 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
 ssize_t ReceiveFastSocketData(struct FastSocket* socket, void* data, size_t size, int flags)
 {
   struct FastBuffer* buffer;
-  ssize_t count;
-  ssize_t rest;
+  size_t count;
+  size_t rest;
 
   if (unlikely((socket == NULL) ||
                (data   == NULL) ||
@@ -393,7 +393,7 @@ ssize_t ReceiveFastSocketData(struct FastSocket* socket, void* data, size_t size
     }
 
     memcpy(data, buffer->data + socket->inbound.position, rest);
-    data  += rest;
+    data   = (uint8_t*)data + rest;
     count -= rest;
 
     socket->inbound.position  = 0;

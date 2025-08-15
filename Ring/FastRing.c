@@ -152,9 +152,9 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
 
 static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct FastRingDescriptor* descriptor, int option)
 {
-  descriptor->state                = RING_DESC_STATE_PENDING;
-  descriptor->identifier           = (uint64_t)descriptor | (uint64_t)(descriptor->tag & RING_DESC_INTEGRITY_MASK) | (uint64_t)RING_DESC_INTEGRITY_MARK;
-  descriptor->submission.user_data = (uint64_t)descriptor->identifier | (uint64_t)(option & RING_DESC_OPTION_MASK);
+  descriptor->state                 = RING_DESC_STATE_PENDING;
+  descriptor->identifier            = (uint64_t)descriptor | ((uint64_t)descriptor->tag | (uint64_t)descriptor->tag << 42) & RING_DESC_INTEGRITY_MASK;
+  descriptor->submission.user_data  = (uint64_t)descriptor->identifier | (uint64_t)(option & RING_DESC_OPTION_MASK);
 }
 
 static inline __attribute__((hot)) void HandleCompletedRingDescriptor(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)

@@ -38,21 +38,27 @@ struct FastRingBufferProvider;
 
 // FastRing
 
+/*
+  Layout (u64 user_data):
+  [63:60]  LA57 reserve (unused)
+  [59:48]  Tag MSB (12)
+  [47:09]  Pointer (39) <-- middle address field
+  [08:06]  Options (3)
+  [05:00]  Tag LSB (6)
+*/
+
 #define RING_DESC_STATE_FREE       0
 #define RING_DESC_STATE_ALLOCATED  1
 #define RING_DESC_STATE_PENDING    2
 #define RING_DESC_STATE_SUBMITTED  3
 
 #define RING_DESC_ALIGNMENT        512
-#define RING_DESC_INTEGRITY_MARK   0x20
-#define RING_DESC_INTEGRITY_MASK   0x3f
+#define RING_DESC_INTEGRITY_MASK   0x0fff00000000003fULL
 
-// Fortunately due to alignment the lower bits of SQE/CQE user_data can be used to pass CRC6 and an option
-
-#define RING_DESC_OPTION_MASK      (((uint64_t)RING_DESC_ALIGNMENT - 1ULL) ^ (uint64_t)RING_DESC_INTEGRITY_MASK)
 #define RING_DESC_OPTION_IGNORE    (RING_DESC_ALIGNMENT >> 1)
 #define RING_DESC_OPTION_USER1     (RING_DESC_ALIGNMENT >> 2)
 #define RING_DESC_OPTION_USER2     (RING_DESC_ALIGNMENT >> 3)
+#define RING_DESC_OPTION_MASK      (RING_DESC_OPTION_IGNORE | RING_DESC_OPTION_USER1 | RING_DESC_OPTION_USER2)
 
 #define RING_FLUSH_STATE_FREE      0
 #define RING_FLUSH_STATE_PENDING   1
@@ -61,7 +67,7 @@ struct FastRingBufferProvider;
 #define RING_FLUSH_ALIGNMENT       64
 
 #define RING_DATA_UNDEFINED        (LIBURING_UDATA_TIMEOUT - 1ULL)
-#define RING_DATA_ADDRESS_MASK     (UINT64_MAX ^ ((uint64_t)RING_DESC_ALIGNMENT - 1ULL))
+#define RING_DATA_ADDRESS_MASK     (UINT64_MAX ^ (RING_DESC_INTEGRITY_MASK | RING_DESC_OPTION_MASK))
 
 #define RING_REASON_COMPLETE       0
 #define RING_REASON_INCOMPLETE     1
