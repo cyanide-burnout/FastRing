@@ -39,10 +39,10 @@ struct FastRingBufferProvider;
 // FastRing
 
 /*
-  Layout (u64 user_data):
-  [63:60]  LA57 reserve (unused)
+  SQE/CQE user_data's bit layout:
+  [63:60]  LA57/PAC/TBI/MTE reserve (4)
   [59:48]  Tag MSB (12)
-  [47:09]  Pointer (39) <-- middle address field
+  [47:09]  Pointer (39) <-- middle address field, 512 bytes aligned
   [08:06]  Options (3)
   [05:00]  Tag LSB (6)
 */

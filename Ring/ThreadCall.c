@@ -81,11 +81,11 @@ static void MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallSta
       return;
     }
 
-    atomic_store_explicit(&state->result, TC_RESULT_PREPARED, memory_order_relaxed);
+    atomic_store_explicit(&state->result, TC_RESULT_PREPARED, memory_order_release);
 
     SubmitThreadCallState(call, state);
 
-    while ((atomic_load_explicit(&state->result, memory_order_relaxed) == TC_RESULT_PREPARED) &&
+    while ((atomic_load_explicit(&state->result, memory_order_acquire) == TC_RESULT_PREPARED) &&
            (futex((uint32_t*)&state->result, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, TC_RESULT_PREPARED, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
 
     atomic_fetch_add_explicit(&state->tag, 1, memory_order_relaxed);

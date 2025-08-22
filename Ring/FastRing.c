@@ -416,7 +416,7 @@ void __attribute__((hot)) ReleaseFastRingDescriptor(struct FastRingDescriptor* d
     descriptor->previous   = NULL;
     descriptor->closure    = NULL;
     descriptor->state      = RING_DESC_STATE_FREE;
-    descriptor->identifier = 0;
+    descriptor->identifier = 0ULL;
 
     atomic_thread_fence(memory_order_release);
     ReleaseRingDescriptor(&ring->descriptors, descriptor);

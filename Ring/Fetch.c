@@ -98,22 +98,6 @@ static void TouchTransmissionQueue(struct FetchContext* fetch)
   }
 }
 
-static void HandleSocketEvent(int handle, uint32_t flags, void* data, uint64_t options)
-{
-  struct FetchContext* fetch;
-  int count;
-  int mask;
-
-  fetch = (struct FetchContext*)data;
-  mask  =
-    (((flags & RING_POLL_READ ) != 0) * CURL_CSELECT_IN ) |
-    (((flags & RING_POLL_WRITE) != 0) * CURL_CSELECT_OUT) |
-    (((flags & RING_POLL_ERROR) != 0) * CURL_CSELECT_ERR);
-
-  curl_multi_socket_action(fetch->multi, handle, mask, &count);
-  TouchTransmissionQueue(fetch);
-}
-
 static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor)
 {
   struct FetchContext* fetch;
@@ -126,32 +110,95 @@ static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor)
   TouchTransmissionQueue(fetch);
 }
 
-static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation, void* data1, void* data2)
+static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct FetchContext* fetch;
+  int count;
+  int mask;
 
-  fetch = (struct FetchContext*)data1;
-
-  switch (operation)
+  if ((reason == RING_REASON_COMPLETE) &&
+      (fetch   = (struct FetchContext*)descriptor->closure))
   {
-    case CURL_POLL_IN:
-      ManageFastRingPoll(fetch->ring, handle, RING_POLL_READ | RING_POLL_ERROR, HandleSocketEvent, fetch);
-      break;
+    if (completion->res > 0)
+    {
+      mask =
+        (((completion->res & (POLLIN                       )) != 0) * (CURL_CSELECT_IN                    )) |
+        (((completion->res & (POLLOUT                      )) != 0) * (CURL_CSELECT_OUT                   )) |
+        (((completion->res & (POLLERR | POLLHUP | POLLRDHUP)) != 0) * (CURL_CSELECT_IN  | CURL_CSELECT_ERR));
 
-    case CURL_POLL_OUT:
-      ManageFastRingPoll(fetch->ring, handle, RING_POLL_WRITE | RING_POLL_ERROR, HandleSocketEvent, fetch);
-      break;
+      descriptor->data.number = CURL_CSELECT_IN;
 
-    case CURL_POLL_INOUT:
-      ManageFastRingPoll(fetch->ring, handle, RING_POLL_READ | RING_POLL_WRITE | RING_POLL_ERROR, HandleSocketEvent, fetch);
-      break;
+      curl_multi_socket_action(fetch->multi, descriptor->submission.fd, mask, &count);
+      TouchTransmissionQueue(fetch);
 
-    case CURL_POLL_REMOVE:
-      RemoveFastRingPoll(fetch->ring, handle);
-      break;
+      descriptor->data.number = 0;
+    }
+
+    if (descriptor->closure != NULL)
+    {
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
   }
 
   return 0;
+}
+
+static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation, void* data1, void* data2)
+{
+  struct FetchContext* fetch;
+  struct FastRingDescriptor* descriptor;
+
+  fetch      = (struct FetchContext*)data1;
+  descriptor = (struct FastRingDescriptor*)data2;
+
+  if (descriptor != NULL)
+  {
+    if (operation == CURL_POLL_REMOVE)
+    {
+      curl_multi_assign(fetch->multi, handle, NULL);
+      descriptor->closure = NULL;
+    }
+
+    if ((descriptor->data.number == CURL_CSELECT_IN) ||
+        (descriptor->state       == RING_DESC_STATE_PENDING))
+    {
+      switch (operation)
+      {
+        case CURL_POLL_IN:      descriptor->submission.poll32_events = __io_uring_prep_poll_mask(POLLIN  | POLLHUP | POLLRDHUP | POLLERR);              break;
+        case CURL_POLL_OUT:     descriptor->submission.poll32_events = __io_uring_prep_poll_mask(POLLOUT | POLLHUP | POLLRDHUP | POLLERR);              break;
+        case CURL_POLL_INOUT:   descriptor->submission.poll32_events = __io_uring_prep_poll_mask(POLLIN  | POLLOUT | POLLHUP   | POLLRDHUP | POLLERR);  break;
+        case CURL_POLL_REMOVE:  descriptor->submission.opcode        = IORING_OP_NOP;                                                                   break;
+      }
+
+      return 0;
+    }
+
+    if (operation == CURL_POLL_REMOVE)
+    {
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      return 0;
+    }
+  }
+
+  if ((operation  != CURL_POLL_REMOVE) &&
+      (descriptor  = AllocateFastRingDescriptor(fetch->ring, HandleSocketCompletion, fetch)))
+  {
+    switch (operation)
+    {
+      case CURL_POLL_IN:     io_uring_prep_poll_add(&descriptor->submission, handle, POLLIN  | POLLHUP | POLLRDHUP | POLLERR);              break;
+      case CURL_POLL_OUT:    io_uring_prep_poll_add(&descriptor->submission, handle, POLLOUT | POLLHUP | POLLRDHUP | POLLERR);              break;
+      case CURL_POLL_INOUT:  io_uring_prep_poll_add(&descriptor->submission, handle, POLLIN  | POLLOUT | POLLHUP   | POLLRDHUP | POLLERR);  break;
+    }
+
+    curl_multi_assign(fetch->multi, handle, descriptor);
+    SubmitFastRingDescriptor(descriptor, 0);
+    return 0;
+  }
+
+  return -1;
 }
 
 static int HandleTimerOperation(CURLM* multi, long timeout, void* data)
