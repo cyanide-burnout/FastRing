@@ -1,6 +1,4 @@
 #define _GNU_SOURCE
-#define Fetch              struct FetchContext
-#define FetchTransmission  struct TransmissionContext
 
 #include "Fetch.h"
 
@@ -13,56 +11,7 @@
 #include <stdarg.h>
 #include <alloca.h>
 
-#define FALSE  0
-#define TRUE   1
-
-// Structures
-
-typedef struct TransmissionContext* TransmissionReference;
-
-struct FetchContext
-{
-  CURLM* multi;
-  CURLSH* share;
-  struct FastRing* ring;
-  struct FastRingFlusher* flusher;
-  struct FastRingDescriptor* descriptor;
-  atomic_int count;
-
-#if (LIBCURL_VERSION_NUM < 0x082800)
-  TransmissionReference first;
-  TransmissionReference last;
-#endif
-};
-
-struct TransmissionContext
-{
-  struct FetchContext* fetch;
-
-  CURL* easy;
-  int state;
-
-  char* buffer;
-  size_t length;
-  size_t capacity;
-
-  HandleFetchData function;
-  void* parameter1;
-  void* parameter2;
-
-#if (LIBCURL_VERSION_NUM < 0x082800)
-  TransmissionReference previous;
-  TransmissionReference next;
-#endif
-};
-
-#ifdef BLOCK_SIZE
-#undef BLOCK_SIZE
-#endif
-
-#define BLOCK_SIZE  10240
-
-// Helpers
+#define ALLOCATION_SIZE  16384
 
 #define APPEND(list, record)                   \
   record->previous = list->last;               \
@@ -83,13 +32,57 @@ struct TransmissionContext
   else                                         \
     list->last = record->previous;
 
+struct ContentStorage
+{
+  char* buffer;
+  size_t length;
+  size_t capacity;
+};
+
+struct Fetch
+{
+  CURLM* multi;
+  CURLSH* share;
+  struct FastRing* ring;
+  struct FastRingFlusher* flusher;
+  struct FastRingDescriptor* descriptor;
+  atomic_int count;
+
+#if (LIBCURL_VERSION_NUM < 0x082800)
+  struct FetchTransmission* first;
+  struct FetchTransmission* last;
+#endif
+};
+
+struct FetchTransmission
+{
+  struct Fetch* fetch;
+
+  CURL* easy;
+  int state;
+
+  HandleFetchData function;
+  void* parameter1;
+  void* parameter2;
+  int option;
+
+#if (LIBCURL_VERSION_NUM < 0x082800)
+  struct FetchTransmission* previous;
+  struct FetchTransmission* next;
+#endif
+
+  union
+  {
+    struct ContentStorage storage;
+    uint8_t data[FETCH_STORAGE_SIZE];
+  };
+};
+
 static void HandleSocketEvent(int handle, uint32_t flags, void* data, uint64_t options);
 static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor);
 static void HandleFlushEvent(void* closure, int reason);
 
-// CURL I/O Functions
-
-static void TouchTransmissionQueue(struct FetchContext* fetch)
+static void TouchTransmissionQueue(struct Fetch* fetch)
 {
   if (fetch->flusher == NULL)
   {
@@ -100,10 +93,10 @@ static void TouchTransmissionQueue(struct FetchContext* fetch)
 
 static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor)
 {
-  struct FetchContext* fetch;
+  struct Fetch* fetch;
   int count;
 
-  fetch             = (struct FetchContext*)descriptor->closure;
+  fetch             = (struct Fetch*)descriptor->closure;
   fetch->descriptor = NULL;
 
   curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
@@ -112,12 +105,12 @@ static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor)
 
 static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  struct FetchContext* fetch;
+  struct Fetch* fetch;
   int count;
   int mask;
 
   if ((reason == RING_REASON_COMPLETE) &&
-      (fetch   = (struct FetchContext*)descriptor->closure))
+      (fetch   = (struct Fetch*)descriptor->closure))
   {
     if (completion->res > 0)
     {
@@ -146,10 +139,10 @@ static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct 
 
 static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation, void* data1, void* data2)
 {
-  struct FetchContext* fetch;
+  struct Fetch* fetch;
   struct FastRingDescriptor* descriptor;
 
-  fetch      = (struct FetchContext*)data1;
+  fetch      = (struct Fetch*)data1;
   descriptor = (struct FastRingDescriptor*)data2;
 
   if (descriptor != NULL)
@@ -203,9 +196,9 @@ static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation
 
 static int HandleTimerOperation(CURLM* multi, long timeout, void* data)
 {
-  struct FetchContext* fetch;
+  struct Fetch* fetch;
 
-  fetch             = (struct FetchContext*)data;
+  fetch             = (struct Fetch*)data;
   fetch->descriptor = SetFastRingTimeout(fetch->ring, fetch->descriptor, timeout, 0, HandleTimeoutEvent, fetch);
   
   return 0;
@@ -213,86 +206,87 @@ static int HandleTimerOperation(CURLM* multi, long timeout, void* data)
 
 static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
 {
-  struct TransmissionContext* transmission;
+  struct FetchTransmission* transmission;
+  struct ContentStorage* storage;
   curl_off_t capacity;
   size_t length;
   char* pointer;
 
-  transmission  = (struct TransmissionContext*)data;
+  transmission  = (struct FetchTransmission*)data;
+  storage       = &transmission->storage;
   size         *= count;
-  length        = transmission->length + size;
+  length        = storage->length + size;
 
-  if (transmission->buffer == NULL)
+  if (storage->buffer == NULL)
   {
     curl_easy_getinfo(transmission->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &capacity);
     if (capacity > 0)
     {
-      pointer                = NULL;
-      transmission->capacity = capacity + 1;
-      transmission->buffer   = (char*)malloc(transmission->capacity);
+      pointer           = NULL;
+      storage->capacity = capacity + 1;
+      storage->buffer   = (char*)malloc(storage->capacity);
     }
   }
 
-  if (length > transmission->capacity)
+  if (length > storage->capacity)
   {
-    pointer                = transmission->buffer;
-    transmission->capacity = length + BLOCK_SIZE + 1;
-    transmission->buffer   = (char*)realloc(transmission->buffer, transmission->capacity);
+    pointer           = storage->buffer;
+    storage->capacity = (length + ALLOCATION_SIZE) & ~(ALLOCATION_SIZE - 1);
+    storage->buffer   = (char*)realloc(storage->buffer, storage->capacity);
   }
 
-  if ((transmission->buffer   == NULL) &&
-      (transmission->capacity  > 0))
+  if ((storage->buffer   == NULL) &&
+      (storage->capacity  > 0))
   {
     free(pointer);
     return 0;
   }
 
-  if ((size                  > 0) &&
-      (transmission->buffer != NULL))
+  if ((size             > 0) &&
+      (storage->buffer != NULL))
   {
-    pointer               = transmission->buffer + transmission->length;
-    transmission->length  = length;
+    pointer         = storage->buffer + storage->length;
+    storage->length = length;
+    pointer[size]   = '\0';
     memcpy(pointer, buffer, size);
   }
 
   return size;
 }
 
-// Routines
-
-static void ReleaseTransmissionContext(struct TransmissionContext* transmission)
+static void ReleaseFetchTransmission(struct FetchTransmission* transmission)
 {
-  struct FetchContext* fetch;
-  char* location;
+  struct Fetch* fetch;
   char* error;
   long code;
 
   fetch = transmission->fetch;
+  code  = 0;
 
   if (transmission->function != NULL)
   {
-    code     = 0;
-    location = NULL;
-
     switch (transmission->state)
     {
       case CURLE_OK:
         curl_easy_getinfo(transmission->easy, CURLINFO_RESPONSE_CODE, &code);
-        if (transmission->buffer != NULL)  transmission->buffer[transmission->length] = '\0';
-        transmission->function(code, transmission->easy, transmission->buffer, transmission->length, transmission->parameter1, transmission->parameter2);
+        transmission->function(transmission, code, transmission->easy, transmission->storage.buffer, transmission->storage.length, transmission->parameter1, transmission->parameter2);
         break;
 
-      case TRANSMISSION_INCOMPLETE:
-        code = transmission->state;
-        transmission->function(code, transmission->easy, NULL, 0, transmission->parameter1, transmission->parameter2);
+      case FETCH_STATUS_INCOMPLETE:
+        transmission->function(transmission, FETCH_STATUS_INCOMPLETE, transmission->easy, NULL, 0, transmission->parameter1, transmission->parameter2);
         break;
 
       default:
-        code  = - transmission->state;
         error = (char*)curl_easy_strerror(transmission->state);
-        transmission->function(code, transmission->easy, error, 0, transmission->parameter1, transmission->parameter2);
+        transmission->function(transmission, - transmission->state, transmission->easy, error, 0, transmission->parameter1, transmission->parameter2);
         break;
     }
+  }
+
+  if (transmission->option & FETCH_OPTION_HANDLE_CONTENT)
+  {
+    // Storage area could be used for another purposes
+    free(transmission->storage.buffer);
   }
 
 #if (LIBCURL_VERSION_NUM < 0x082800)
@@ -302,15 +296,14 @@ static void ReleaseTransmissionContext(struct TransmissionContext* transmission)
   atomic_fetch_sub_explicit(&fetch->count, 1, memory_order_relaxed);
   curl_multi_remove_handle(fetch->multi, transmission->easy);
   curl_easy_cleanup(transmission->easy);
-  free(transmission->buffer);
   free(transmission);
 }
 
-static void ProceedTransmissionQueue(struct FetchContext* fetch)
+static void ProceedTransmissionQueue(struct Fetch* fetch)
 {
   int count;
   struct CURLMsg* message;
-  struct TransmissionContext* transmission;
+  struct FetchTransmission* transmission;
 
   count = 0;
 
@@ -319,32 +312,37 @@ static void ProceedTransmissionQueue(struct FetchContext* fetch)
     if (message->msg == CURLMSG_DONE)
     {
       curl_easy_getinfo(message->easy_handle, CURLINFO_PRIVATE, (char**)&transmission);
-      transmission->state = message->data.result;
-      ReleaseTransmissionContext(transmission);
+
+      if ((message->data.result != CURLE_OK) ||
+          (transmission->state  == FETCH_STATUS_INCOMPLETE))
+      {
+        //
+        transmission->state = message->data.result;
+      }
+
+      ReleaseFetchTransmission(transmission);
     }
   }
 }
 
 static void HandleFlushEvent(void* closure, int reason)
 {
-  struct FetchContext* fetch;
+  struct Fetch* fetch;
 
   if (reason == RING_REASON_COMPLETE)
   {
-    fetch          = (struct FetchContext*)closure;
+    fetch          = (struct Fetch*)closure;
     fetch->flusher = NULL;
 
     ProceedTransmissionQueue(fetch);
   }
 }
 
-// Public Functions
-
-struct FetchContext* CreateFetch(struct FastRing* ring)
+struct Fetch* CreateFetch(struct FastRing* ring)
 {
-  struct FetchContext* fetch;
+  struct Fetch* fetch;
 
-  fetch        = (struct FetchContext*)calloc(1, sizeof(struct FetchContext));
+  fetch        = (struct Fetch*)calloc(1, sizeof(struct Fetch));
   fetch->ring  = ring;
   fetch->multi = curl_multi_init();
   fetch->share = curl_share_init();
@@ -360,9 +358,9 @@ struct FetchContext* CreateFetch(struct FastRing* ring)
   return fetch;
 }
 
-void ReleaseFetch(struct FetchContext* fetch)
+void ReleaseFetch(struct Fetch* fetch)
 {
-  struct TransmissionContext* transmission;
+  struct FetchTransmission* transmission;
   CURL** handle;
   CURL** list;
 
@@ -377,7 +375,7 @@ void ReleaseFetch(struct FetchContext* fetch)
     while (*handle != NULL)
     {
       curl_easy_getinfo(*handle, CURLINFO_PRIVATE, (char**)&transmission);
-      ReleaseTransmissionContext(transmission);
+      ReleaseFetchTransmission(transmission);
       handle ++;
     }
 
@@ -387,7 +385,7 @@ void ReleaseFetch(struct FetchContext* fetch)
   while (fetch->first != NULL)
   {
     // libcurl doesn't release contexts automatically :/
-    ReleaseTransmissionContext(fetch->last);
+    ReleaseFetchTransmission(fetch->last);
   }
 #endif
 
@@ -397,16 +395,15 @@ void ReleaseFetch(struct FetchContext* fetch)
   free(fetch);
 }
 
-struct TransmissionContext* MakeExtendedFetchTransmission(struct FetchContext* fetch, CURL* easy, HandleFetchData function, void* parameter1, void* parameter2)
+struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, HandleFetchData function, int option, void* parameter1, void* parameter2)
 {
-  struct TransmissionContext* transmission;
+  struct FetchTransmission* transmission;
 
-
-  transmission        = (struct TransmissionContext*)calloc(1, sizeof(struct TransmissionContext));
-  transmission->fetch = fetch;
-  transmission->easy  = easy;
-
-  transmission->state  = TRANSMISSION_INCOMPLETE;
+  transmission         = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission));
+  transmission->fetch  = fetch;
+  transmission->easy   = easy;
+  transmission->state  = FETCH_STATUS_INCOMPLETE;
+  transmission->option = option;
 
   curl_easy_setopt(easy, CURLOPT_SHARE, fetch->share);
   curl_easy_setopt(easy, CURLOPT_PRIVATE, transmission);
@@ -419,8 +416,18 @@ struct TransmissionContext* MakeExtendedFetchTransmission(struct FetchContext* f
     transmission->parameter1 = parameter1;
     transmission->parameter2 = parameter2;
 
-    curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
-    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
+    if (option & FETCH_OPTION_HANDLE_CONTENT)
+    {
+      curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
+      curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
+    }
+
+    if (option & FETCH_OPTION_SET_HANDLER_DATA)
+    {
+      curl_easy_setopt(easy, CURLOPT_READDATA, transmission);
+      curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
+      curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);      
+    }
   }
 
 #if (LIBCURL_VERSION_NUM < 0x082800)
@@ -433,7 +440,7 @@ struct TransmissionContext* MakeExtendedFetchTransmission(struct FetchContext* f
   return transmission;
 }
 
-struct TransmissionContext* MakeSimpleFetchTransmission(struct FetchContext* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchData function, void* parameter1, void* parameter2)
+struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchData function, void* parameter1, void* parameter2)
 {
   CURL* easy;
 
@@ -462,16 +469,31 @@ struct TransmissionContext* MakeSimpleFetchTransmission(struct FetchContext* fet
     curl_easy_setopt(easy, CURLOPT_COPYPOSTFIELDS, data);
   }
 
-  return MakeExtendedFetchTransmission(fetch, easy, function, parameter1, parameter2);
+  return MakeExtendedFetchTransmission(fetch, easy, function, FETCH_OPTION_HANDLE_CONTENT, parameter1, parameter2);
 }
 
-void CancelFetchTransmission(struct TransmissionContext* transmission)
+void* GetFetchTransmissionParameter(struct FetchTransmission* transmission)
+{
+  return transmission->parameter1;
+}
+
+void* GetFetchTransmissionStorage(struct FetchTransmission* transmission)
+{
+  return transmission->data;
+}
+
+CURL* GetFetchTransmissionHandle(struct FetchTransmission* transmission)
+{
+  return transmission->easy;  
+}
+
+void CancelFetchTransmission(struct FetchTransmission* transmission)
 {
   transmission->function = NULL;
-  ReleaseTransmissionContext(transmission);
+  ReleaseFetchTransmission(transmission);
 }
 
-int GetFetchTransmissionCount(struct FetchContext* fetch)
+int GetFetchTransmissionCount(struct Fetch* fetch)
 {
   return atomic_load_explicit(&fetch->count, memory_order_relaxed);
 }
