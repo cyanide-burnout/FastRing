@@ -101,7 +101,8 @@ static inline __attribute__((always_inline)) void ReleaseRingDescriptorHeap(stru
   while (current = next)
   {
     next = current->heap;
-    if (current->function != NULL)
+    if ((current->state    != RING_DESC_STATE_FREE) &&
+        (current->function != NULL))
     {
       // Before freeing a descriptor call related handler to complete all incomplete submissions
       current->function(current, NULL, RING_REASON_RELEASED);

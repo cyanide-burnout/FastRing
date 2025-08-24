@@ -48,7 +48,7 @@ struct Fetch
   struct FastRingDescriptor* descriptor;
   atomic_int count;
 
-#if (LIBCURL_VERSION_NUM < 0x082800)
+#if (LIBCURL_VERSION_NUM < 0x080400)
   struct FetchTransmission* first;
   struct FetchTransmission* last;
 #endif
@@ -61,12 +61,12 @@ struct FetchTransmission
   CURL* easy;
   int state;
 
-  HandleFetchData function;
+  HandleFetchFunction function;
   void* parameter1;
   void* parameter2;
   int option;
 
-#if (LIBCURL_VERSION_NUM < 0x082800)
+#if (LIBCURL_VERSION_NUM < 0x080400)
   struct FetchTransmission* previous;
   struct FetchTransmission* next;
 #endif
@@ -78,7 +78,7 @@ struct FetchTransmission
   };
 };
 
-static void HandleSocketEvent(int handle, uint32_t flags, void* data, uint64_t options);
+static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor);
 static void HandleFlushEvent(void* closure, int reason);
 
@@ -150,7 +150,8 @@ static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation
     if (operation == CURL_POLL_REMOVE)
     {
       curl_multi_assign(fetch->multi, handle, NULL);
-      descriptor->closure = NULL;
+      descriptor->function = NULL;
+      descriptor->closure  = NULL;
     }
 
     if ((descriptor->data.number == CURL_CSELECT_IN) ||
@@ -269,16 +270,17 @@ static void ReleaseFetchTransmission(struct FetchTransmission* transmission)
     {
       case CURLE_OK:
         curl_easy_getinfo(transmission->easy, CURLINFO_RESPONSE_CODE, &code);
-        transmission->function(transmission, code, transmission->easy, transmission->storage.buffer, transmission->storage.length, transmission->parameter1, transmission->parameter2);
+        transmission->function(transmission, transmission->easy, code, transmission->storage.buffer, transmission->storage.length, transmission->parameter1, transmission->parameter2);
         break;
 
       case FETCH_STATUS_INCOMPLETE:
-        transmission->function(transmission, FETCH_STATUS_INCOMPLETE, transmission->easy, NULL, 0, transmission->parameter1, transmission->parameter2);
+      case FETCH_STATUS_CANCELLED:
+        transmission->function(transmission, transmission->easy, transmission->state, NULL, 0, transmission->parameter1, transmission->parameter2);
         break;
 
       default:
         error = (char*)curl_easy_strerror(transmission->state);
-        transmission->function(transmission, - transmission->state, transmission->easy, error, 0, transmission->parameter1, transmission->parameter2);
+        transmission->function(transmission, transmission->easy, -transmission->state, error, 0, transmission->parameter1, transmission->parameter2);
         break;
     }
   }
@@ -289,7 +291,7 @@ static void ReleaseFetchTransmission(struct FetchTransmission* transmission)
     free(transmission->storage.buffer);
   }
 
-#if (LIBCURL_VERSION_NUM < 0x082800)
+#if (LIBCURL_VERSION_NUM < 0x080400)
   REMOVE(fetch, transmission);
 #endif
 
@@ -347,13 +349,13 @@ struct Fetch* CreateFetch(struct FastRing* ring)
   fetch->multi = curl_multi_init();
   fetch->share = curl_share_init();
 
-  curl_multi_setopt(fetch->multi, CURLMOPT_TIMERDATA,      fetch);
-  curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETDATA,     fetch);
-  curl_multi_setopt(fetch->multi, CURLMOPT_TIMERFUNCTION,  HandleTimerOperation);
+  curl_multi_setopt(fetch->multi, CURLMOPT_TIMERDATA, fetch);
+  curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETDATA, fetch);
+  curl_multi_setopt(fetch->multi, CURLMOPT_TIMERFUNCTION, HandleTimerOperation);
   curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETFUNCTION, HandleSocketOperation);
-
   curl_multi_setopt(fetch->multi, CURLMOPT_PIPELINING, CURLPIPE_HTTP1 | CURLPIPE_MULTIPLEX);
-  curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE | CURL_LOCK_DATA_DNS | CURL_LOCK_DATA_SSL_SESSION | CURL_LOCK_DATA_CONNECT);
+  curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+  curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_HSTS);
 
   return fetch;
 }
@@ -367,7 +369,7 @@ void ReleaseFetch(struct Fetch* fetch)
   RemoveFastRingFlushHandler(fetch->ring, fetch->flusher);
   SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
 
-#if (LIBCURL_VERSION_NUM >= 0x082800)
+#if (LIBCURL_VERSION_NUM >= 0x080400)
   if (list = curl_multi_get_handles(fetch->multi))
   {
     handle = list;
@@ -389,58 +391,55 @@ void ReleaseFetch(struct Fetch* fetch)
   }
 #endif
 
-  curl_share_cleanup(fetch->share);
   curl_multi_cleanup(fetch->multi);
-
+  curl_share_cleanup(fetch->share);
   free(fetch);
 }
 
-struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, HandleFetchData function, int option, void* parameter1, void* parameter2)
+struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2)
 {
   struct FetchTransmission* transmission;
+  int count;
 
-  transmission         = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission));
-  transmission->fetch  = fetch;
-  transmission->easy   = easy;
-  transmission->state  = FETCH_STATUS_INCOMPLETE;
-  transmission->option = option;
+  transmission             = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission));
+  transmission->fetch      = fetch;
+  transmission->easy       = easy;
+  transmission->state      = FETCH_STATUS_INCOMPLETE;
+  transmission->option     = option;
+  transmission->function   = function;
+  transmission->parameter1 = parameter1;
+  transmission->parameter2 = parameter2;
 
   curl_easy_setopt(easy, CURLOPT_SHARE, fetch->share);
   curl_easy_setopt(easy, CURLOPT_PRIVATE, transmission);
   curl_easy_setopt(easy, CURLOPT_DNS_CACHE_TIMEOUT, 600);
   curl_easy_setopt(easy, CURLOPT_ALTSVC, "");
 
-  if (function != NULL)
+  if (option & FETCH_OPTION_HANDLE_CONTENT)
   {
-    transmission->function   = function;
-    transmission->parameter1 = parameter1;
-    transmission->parameter2 = parameter2;
-
-    if (option & FETCH_OPTION_HANDLE_CONTENT)
-    {
-      curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
-      curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
-    }
-
-    if (option & FETCH_OPTION_SET_HANDLER_DATA)
-    {
-      curl_easy_setopt(easy, CURLOPT_READDATA, transmission);
-      curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
-      curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);      
-    }
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
   }
 
-#if (LIBCURL_VERSION_NUM < 0x082800)
+  if (option & FETCH_OPTION_SET_HANDLER_DATA)
+  {
+    curl_easy_setopt(easy, CURLOPT_READDATA, transmission);
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
+    curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);      
+  }
+
+#if (LIBCURL_VERSION_NUM < 0x080400)
   APPEND(fetch, transmission);
 #endif
 
   atomic_fetch_add_explicit(&fetch->count, 1, memory_order_relaxed);
   curl_multi_add_handle(fetch->multi, transmission->easy);
+  curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
 
   return transmission;
 }
 
-struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchData function, void* parameter1, void* parameter2)
+struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchFunction function, void* parameter1, void* parameter2)
 {
   CURL* easy;
 
@@ -469,12 +468,22 @@ struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const
     curl_easy_setopt(easy, CURLOPT_COPYPOSTFIELDS, data);
   }
 
-  return MakeExtendedFetchTransmission(fetch, easy, function, FETCH_OPTION_HANDLE_CONTENT, parameter1, parameter2);
+  return MakeExtendedFetchTransmission(fetch, easy, FETCH_OPTION_HANDLE_CONTENT, function, parameter1, parameter2);
 }
 
-void* GetFetchTransmissionParameter(struct FetchTransmission* transmission)
+struct FastRing* GetFetchTransmissionRing(struct FetchTransmission* transmission)
+{
+  return transmission->fetch->ring;
+}
+
+void* GetFetchTransmissionParameter1(struct FetchTransmission* transmission)
 {
   return transmission->parameter1;
+}
+
+void* GetFetchTransmissionParameter2(struct FetchTransmission* transmission)
+{
+  return transmission->parameter2;
 }
 
 void* GetFetchTransmissionStorage(struct FetchTransmission* transmission)
@@ -489,8 +498,22 @@ CURL* GetFetchTransmissionHandle(struct FetchTransmission* transmission)
 
 void CancelFetchTransmission(struct FetchTransmission* transmission)
 {
-  transmission->function = NULL;
-  ReleaseFetchTransmission(transmission);
+  if (transmission != NULL)
+  {
+    transmission->state = FETCH_STATUS_CANCELLED;
+    ReleaseFetchTransmission(transmission);
+  }
+}
+
+void TouchFetchTransmission(struct FetchTransmission* transmission)
+{
+  struct Fetch* fetch;
+  int count;
+
+  fetch = transmission->fetch;
+
+  curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
+  TouchTransmissionQueue(fetch);
 }
 
 int GetFetchTransmissionCount(struct Fetch* fetch)

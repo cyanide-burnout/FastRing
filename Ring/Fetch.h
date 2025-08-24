@@ -19,19 +19,24 @@ struct FetchTransmission;
 #define FETCH_OPTION_SET_HANDLER_DATA  (1 << 1)
 
 #define FETCH_STATUS_INCOMPLETE  -1000
+#define FETCH_STATUS_CANCELLED   -1001
+
 #define TRANSMISSION_INCOMPLETE  FETCH_STATUS_INCOMPLETE
 
-typedef void (*HandleFetchData)(struct FetchTransmission* transmission, int code, CURL* easy, char* data, size_t length, void* parameter1, void* parameter2);
+typedef void (*HandleFetchFunction)(struct FetchTransmission* transmission, CURL* easy, int code, char* data, size_t length, void* parameter1, void* parameter2);
 
 struct Fetch* CreateFetch(struct FastRing* ring);
 void ReleaseFetch(struct Fetch* fetch);
 
-struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, HandleFetchData function, int option, void* parameter1, void* parameter2);
-struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchData function, void* parameter1, void* parameter2);
-void* GetFetchTransmissionParameter(struct FetchTransmission* transmission);
+struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2);
+struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchFunction function, void* parameter1, void* parameter2);
+struct FastRing* GetFetchTransmissionRing(struct FetchTransmission* transmission);
+void* GetFetchTransmissionParameter1(struct FetchTransmission* transmission);
+void* GetFetchTransmissionParameter2(struct FetchTransmission* transmission);
 void* GetFetchTransmissionStorage(struct FetchTransmission* transmission);
 CURL* GetFetchTransmissionHandle(struct FetchTransmission* transmission);
 void CancelFetchTransmission(struct FetchTransmission* transmission);
+void TouchFetchTransmission(struct FetchTransmission* transmission);
 int GetFetchTransmissionCount(struct Fetch* fetch);
 
 struct curl_slist* AppendFetchHeader(struct curl_slist* list, int size, const char* format, ...);
