@@ -3,6 +3,10 @@
 #include <malloc.h>
 #include <string.h>
 
+#define CWS_STATE_CONNECTING  0
+#define CWS_STATE_CONNECTED   1
+#define CWS_STATE_REJECTED    2
+
 struct CWSQueue
 {
   struct CWSMessage* head;
@@ -42,6 +46,7 @@ static void HandleFlushEvent(void* closure, int reason)
 
       if (function(closure, transmission, reason, message->type, message->buffer, message->length) < 0)
       {
+        context->state = CWS_STATE_REJECTED;
         CancelFetchTransmission(transmission);
         free(message);
         return;
@@ -91,28 +96,28 @@ static void HandleFetchEvent(struct FetchTransmission* transmission, CURL* easy,
   void* closure;
   int reason;
 
-  context  = (struct CWSContext*)GetFetchTransmissionStorage(transmission);
-  function = (HandleCWSEventFunction)GetFetchTransmissionParameter1(transmission);
-  closure  = GetFetchTransmissionParameter2(transmission);
-  ring     = GetFetchTransmissionRing(transmission);
-  code    *= (code < 0) || (context->state == 0);
+  context   = (struct CWSContext*)GetFetchTransmissionStorage(transmission);
+  function  = (HandleCWSEventFunction)GetFetchTransmissionParameter1(transmission);
+  closure   = GetFetchTransmissionParameter2(transmission);
+  ring      = GetFetchTransmissionRing(transmission);
+  code     *= (code < 0) || (context->state == CWS_STATE_CONNECTING);
 
   while (message = context->inbound.head)
   {
     context->inbound.head = message->next;
     reason                = CWS_REASON_CONNECTED + !!message->type;
 
-    if ((function != NULL) &&
+    if ((context->state == CWS_STATE_CONNECTED) &&
         (function(closure, transmission, reason, message->type, message->buffer, message->length) < 0))
     {
       // Handler may reject reception
-      function = NULL;
+      context->state = CWS_STATE_REJECTED;
     }
 
     free(message);
   }
 
-  if (function != NULL)
+  if (context->state != CWS_STATE_REJECTED)
   {
     // Handler may reject reception
     function(closure, transmission, CWS_REASON_CLOSED, code, data, length);
@@ -130,6 +135,7 @@ static void HandleFetchEvent(struct FetchTransmission* transmission, CURL* easy,
     free(message);
   }
 
+#if (LIBCURL_VERSION_NUM < 0x081000)
   if (descriptor = context->descriptor)
   {
     context->descriptor  = NULL;
@@ -139,6 +145,7 @@ static void HandleFetchEvent(struct FetchTransmission* transmission, CURL* easy,
     io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }
+#endif
 
   free(context->current);
   RemoveFastRingFlushHandler(ring, context->flusher);
@@ -171,7 +178,7 @@ static size_t HandleSocketHeader(void* buffer, size_t size, size_t count, void* 
       return CURL_WRITEFUNC_ERROR;
     }
 
-    context->state ++;
+    context->state = CWS_STATE_CONNECTED;
     SubmitInboundMessage(message);
   }
 
@@ -282,7 +289,7 @@ static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct 
     easy         = GetFetchTransmissionHandle(transmission);
     message      = NULL;
 
-    while ((context->state > 0) &&
+    while ((context->state == CWS_STATE_CONNECTED) &&
            (message = context->outbound.head) &&
            (message->data != NULL))
     {
