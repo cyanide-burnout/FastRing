@@ -13,7 +13,7 @@ extern "C"
 struct Fetch;
 struct FetchTransmission;
 
-#define FETCH_STORAGE_SIZE  256
+#define FETCH_STORAGE_SIZE  128
 
 #define FETCH_OPTION_HANDLE_CONTENT    (1 << 0)
 #define FETCH_OPTION_SET_HANDLER_DATA  (1 << 1)
@@ -30,13 +30,15 @@ void ReleaseFetch(struct Fetch* fetch);
 
 struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2);
 struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchFunction function, void* parameter1, void* parameter2);
+
 struct FastRing* GetFetchTransmissionRing(struct FetchTransmission* transmission);
 void* GetFetchTransmissionParameter1(struct FetchTransmission* transmission);
 void* GetFetchTransmissionParameter2(struct FetchTransmission* transmission);
 void* GetFetchTransmissionStorage(struct FetchTransmission* transmission);
 CURL* GetFetchTransmissionHandle(struct FetchTransmission* transmission);
-void CancelFetchTransmission(struct FetchTransmission* transmission);
 void TouchFetchTransmission(struct FetchTransmission* transmission);
+
+void CancelFetchTransmission(struct FetchTransmission* transmission);
 int GetFetchTransmissionCount(struct Fetch* fetch);
 
 struct curl_slist* AppendFetchHeader(struct curl_slist* list, int size, const char* format, ...);

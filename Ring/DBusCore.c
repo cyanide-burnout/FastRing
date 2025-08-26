@@ -1,13 +1,11 @@
 // http://lists.freedesktop.org/archives/dbus/2005-June/002764.html
 // http://illumination.svn.sourceforge.net/viewvc/illumination/trunk/Illumination/src/Lum/OS/X11/Display.cpp?revision=808&view=markup
 
-#define DBusCore  struct Context
-
 #include "DBusCore.h"
 
 #include <malloc.h>
 
-struct Context
+struct DBusCore
 {
   struct FastRing* ring;
   struct FastRingFlusher* flusher;
@@ -65,7 +63,7 @@ static int HandleWatchEvent(struct FastRingDescriptor* descriptor, struct io_uri
 static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
 {
   struct FastRingDescriptor* descriptor;
-  struct Context* context;
+  struct DBusCore* core;
   uint32_t flags;
   int handle;
 
@@ -75,10 +73,10 @@ static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
     return TRUE;
   }
 
-  context = (struct Context*)data;
-  handle  = dbus_watch_get_unix_fd(watch);
-  flags   = dbus_watch_get_flags(watch);
-  flags   =
+  core   = (struct DBusCore*)data;
+  handle = dbus_watch_get_unix_fd(watch);
+  flags  = dbus_watch_get_flags(watch);
+  flags  =
     (((flags & DBUS_WATCH_READABLE) != 0) * POLLIN)  |
     (((flags & DBUS_WATCH_WRITABLE) != 0) * POLLOUT) |
     (((flags & DBUS_WATCH_ERROR)    != 0) * POLLERR) |
@@ -102,7 +100,7 @@ static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
     return TRUE;
   }
 
-  if (descriptor = AllocateFastRingDescriptor(context->ring, HandleWatchEvent, watch))
+  if (descriptor = AllocateFastRingDescriptor(core->ring, HandleWatchEvent, watch))
   {
     dbus_watch_set_data(watch, descriptor, NULL);
     io_uring_prep_poll_add(&descriptor->submission, handle, flags);
@@ -164,14 +162,14 @@ static void HandleTimoutEvent(struct FastRingDescriptor* descriptor)
 static dbus_bool_t AddTimeout(DBusTimeout* timeout, void* data)
 {
   struct FastRingDescriptor* descriptor;
-  struct Context* context;
+  struct DBusCore* core;
   int interval;
 
   if (dbus_timeout_get_enabled(timeout))
   {
-    context    = (struct Context*)data;
+    core       = (struct DBusCore*)data;
     interval   = dbus_timeout_get_interval(timeout);
-    descriptor = SetFastRingTimeout(context->ring, NULL, interval, 0, HandleTimoutEvent, timeout);
+    descriptor = SetFastRingTimeout(core->ring, NULL, interval, 0, HandleTimoutEvent, timeout);
     dbus_timeout_set_data(timeout, descriptor, NULL);
   }
 
@@ -181,12 +179,12 @@ static dbus_bool_t AddTimeout(DBusTimeout* timeout, void* data)
 static void RemoveTimeout(DBusTimeout* timeout, void* data)
 {
   struct FastRingDescriptor* descriptor;
-  struct Context* context;
+  struct DBusCore* core;
 
   if (descriptor = (struct FastRingDescriptor*)dbus_timeout_get_data(timeout))
   {
-    context = (struct Context*)data;
-    SetFastRingTimeout(context->ring, descriptor, -1, 0, NULL, NULL);
+    core = (struct DBusCore*)data;
+    SetFastRingTimeout(core->ring, descriptor, -1, 0, NULL, NULL);
     dbus_timeout_set_data(timeout, NULL, NULL);
   }
 }
@@ -204,62 +202,62 @@ static void ToggleTimeout(DBusTimeout* timeout, void* data)
 
 static void HandleDispatchEvent(void* closure, int reason)
 {
-  struct Context* context;
+  struct DBusCore* core;
 
   if (reason == RING_REASON_COMPLETE)
   {
-    context          = (struct Context*)closure;
-    context->flusher = NULL;
+    core          = (struct DBusCore*)closure;
+    core->flusher = NULL;
 
-    if ((dbus_connection_dispatch(context->connection) != DBUS_DISPATCH_COMPLETE) &&
-        (context->flusher == NULL))
+    if ((dbus_connection_dispatch(core->connection) != DBUS_DISPATCH_COMPLETE) &&
+        (core->flusher == NULL))
     {
       // Schedule one-time call of dbus_connection_dispatch
-      context->flusher = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);
+      core->flusher = SetFastRingFlushHandler(core->ring, HandleDispatchEvent, core);
     }
   }
 }
 
 static void HandleDispatchStatus(DBusConnection* connection, DBusDispatchStatus status, void* data)
 {
-  struct Context* context;
+  struct DBusCore* core;
 
-  context = (struct Context*)data;
+  core = (struct DBusCore*)data;
 
   if ((status != DBUS_DISPATCH_COMPLETE) &&
-      (context->flusher == NULL))
+      (core->flusher == NULL))
   {
     // Schedule one-time call of dbus_connection_dispatch
-    context->flusher = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);
+    core->flusher = SetFastRingFlushHandler(core->ring, HandleDispatchEvent, core);
   }
 }
 
-struct Context* CreateDBusCore(DBusConnection* connection, struct FastRing* ring)
+struct DBusCore* CreateDBusCore(DBusConnection* connection, struct FastRing* ring)
 {
-  struct Context* context;
+  struct DBusCore* core;
 
-  context = (struct Context*)calloc(1, sizeof(struct Context));
+  core = (struct DBusCore*)calloc(1, sizeof(struct DBusCore));
 
-  context->ring       = ring;
-  context->connection = connection;
-  context->flusher    = SetFastRingFlushHandler(context->ring, HandleDispatchEvent, context);;
+  core->ring       = ring;
+  core->connection = connection;
+  core->flusher    = SetFastRingFlushHandler(core->ring, HandleDispatchEvent, core);;
 
   dbus_connection_ref(connection);
-  dbus_connection_set_dispatch_status_function(connection, HandleDispatchStatus, context, NULL);
-  dbus_connection_set_watch_functions(connection, AddWatch, RemoveWatch, ToggleWatch, context, NULL);
-  dbus_connection_set_timeout_functions(connection, AddTimeout, RemoveTimeout, ToggleTimeout, context, NULL);
+  dbus_connection_set_dispatch_status_function(connection, HandleDispatchStatus, core, NULL);
+  dbus_connection_set_watch_functions(connection, AddWatch, RemoveWatch, ToggleWatch, core, NULL);
+  dbus_connection_set_timeout_functions(connection, AddTimeout, RemoveTimeout, ToggleTimeout, core, NULL);
 
-  return context;
+  return core;
 }
 
-void ReleaseDBusCore(struct Context* context)
+void ReleaseDBusCore(struct DBusCore* core)
 {
-  RemoveFastRingFlushHandler(context->ring, context->flusher);
+  RemoveFastRingFlushHandler(core->ring, core->flusher);
 
-  dbus_connection_set_timeout_functions(context->connection, NULL, NULL, NULL, NULL, NULL);
-  dbus_connection_set_watch_functions(context->connection, NULL, NULL, NULL, NULL, NULL);
-  dbus_connection_set_dispatch_status_function(context->connection, NULL, NULL, NULL);
-  dbus_connection_unref(context->connection);
+  dbus_connection_set_timeout_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
+  dbus_connection_set_watch_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
+  dbus_connection_set_dispatch_status_function(core->connection, NULL, NULL, NULL);
+  dbus_connection_unref(core->connection);
 
-  free(context);
+  free(core);
 }

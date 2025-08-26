@@ -10,12 +10,10 @@ extern "C"
 {
 #endif
 
-#ifndef DBusCore
-typedef void DBusCore;
-#endif
+struct DBusCore;
 
-DBusCore* CreateDBusCore(DBusConnection* connection, struct FastRing* ring);
-void ReleaseDBusCore(DBusCore* context);
+struct DBusCore* CreateDBusCore(DBusConnection* connection, struct FastRing* ring);
+void ReleaseDBusCore(struct DBusCore* core);
 
 #ifdef __cplusplus
 }

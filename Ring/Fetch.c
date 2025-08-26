@@ -32,6 +32,8 @@
   else                                         \
     list->last = record->previous;
 
+_Static_assert((ALLOCATION_SIZE & (ALLOCATION_SIZE - 1)) == 0, "ALLOCATION_SIZE must be power of two");
+
 struct ContentStorage
 {
   char* buffer;
@@ -496,15 +498,6 @@ CURL* GetFetchTransmissionHandle(struct FetchTransmission* transmission)
   return transmission->easy;  
 }
 
-void CancelFetchTransmission(struct FetchTransmission* transmission)
-{
-  if (transmission != NULL)
-  {
-    transmission->state = FETCH_STATUS_CANCELLED;
-    ReleaseFetchTransmission(transmission);
-  }
-}
-
 void TouchFetchTransmission(struct FetchTransmission* transmission)
 {
   struct Fetch* fetch;
@@ -514,6 +507,15 @@ void TouchFetchTransmission(struct FetchTransmission* transmission)
 
   curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
   TouchTransmissionQueue(fetch);
+}
+
+void CancelFetchTransmission(struct FetchTransmission* transmission)
+{
+  if (transmission != NULL)
+  {
+    transmission->state = FETCH_STATUS_CANCELLED;
+    ReleaseFetchTransmission(transmission);
+  }
 }
 
 int GetFetchTransmissionCount(struct Fetch* fetch)

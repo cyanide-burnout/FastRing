@@ -24,6 +24,8 @@ struct CWSContext
   int state;
 };
 
+_Static_assert(FETCH_STORAGE_SIZE >= sizeof(struct CWSContext), "FETCH_STORAGE_SIZE too small for CWSContext");
+
 static void HandleFlushEvent(void* closure, int reason)
 {
   struct FetchTransmission* transmission;
