@@ -7,9 +7,11 @@
 #include <string.h>
 #include <stdatomic.h>
 
+#include <netdb.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <alloca.h>
+#include <arpa/inet.h>
 
 #define ALLOCATION_SIZE  16384
 
@@ -523,7 +525,21 @@ int GetFetchTransmissionCount(struct Fetch* fetch)
   return atomic_load_explicit(&fetch->count, memory_order_relaxed);
 }
 
-struct curl_slist* AppendFetchHeader(struct curl_slist* list, int size, const char* format, ...)
+int AppendFetchParameter(CURLU* location, int size, const char* format, ...)
+{
+  va_list arguments;
+  char* buffer;
+
+  buffer = (char*)alloca(size);
+
+  va_start(arguments, format);
+  vsnprintf(buffer, size, format, arguments);
+  va_end(arguments);
+
+  return curl_url_set(location, CURLUPART_QUERY, buffer, CURLU_APPENDQUERY | CURLU_URLENCODE);
+}
+
+struct curl_slist* AppendFetchList(struct curl_slist* list, int size, const char* format, ...)
 {
   va_list arguments;
   char* buffer;
@@ -537,16 +553,30 @@ struct curl_slist* AppendFetchHeader(struct curl_slist* list, int size, const ch
   return curl_slist_append(list, buffer);
 }
 
-int AppendFetchParameter(CURLU* location, int size, const char* format, ...)
+struct curl_slist* MakeFetchConnectAddress(const struct sockaddr* address)
 {
-  va_list arguments;
-  char* buffer;
+  const struct sockaddr_in6* version6;
+  const struct sockaddr_in* version4;
+  char connection[INET6_ADDRSTRLEN + 16];
+  char name[INET6_ADDRSTRLEN + 1];
+  int port;
 
-  buffer = (char*)alloca(size);
+  switch (address->sa_family)
+  {
+    case AF_INET:
+      version4 = (const struct sockaddr_in*)address;
+      port     = ntohs(version4->sin_port);
+      inet_ntop(AF_INET, &version4->sin_addr, name, INET_ADDRSTRLEN + 1);
+      sprintf(connection, "::%s:%d", name, port);
+      return curl_slist_append(NULL, connection);
 
-  va_start(arguments, format);
-  vsnprintf(buffer, size, format, arguments);
-  va_end(arguments);
+    case AF_INET6:
+      version6 = (const struct sockaddr_in6*)address;
+      port     = ntohs(version6->sin6_port);
+      inet_ntop(AF_INET6, &version6->sin6_addr, name, INET6_ADDRSTRLEN + 1);
+      sprintf(connection, "::[%s]:%d", name, port);
+      return curl_slist_append(NULL, connection);
+  }
 
-  return curl_url_set(location, CURLUPART_QUERY, buffer, CURLU_APPENDQUERY | CURLU_URLENCODE);
+  return NULL;
 }

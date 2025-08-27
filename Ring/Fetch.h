@@ -41,8 +41,9 @@ void TouchFetchTransmission(struct FetchTransmission* transmission);
 void CancelFetchTransmission(struct FetchTransmission* transmission);
 int GetFetchTransmissionCount(struct Fetch* fetch);
 
-struct curl_slist* AppendFetchHeader(struct curl_slist* list, int size, const char* format, ...);
 int AppendFetchParameter(CURLU* location, int size, const char* format, ...);
+struct curl_slist* AppendFetchList(struct curl_slist* list, int size, const char* format, ...);
+struct curl_slist* MakeFetchConnectAddress(const struct sockaddr* address);
 
 #ifdef __cplusplus
 }

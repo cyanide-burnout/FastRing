@@ -390,6 +390,12 @@ struct CWSMessage* AllocateCWSMessage(struct FetchTransmission* transmission, si
   struct CWSMessage* message;
   size_t size;
 
+  if (transmission == NULL)
+  {
+    //
+    return NULL;
+  }
+
   context = (struct CWSContext*)GetFetchTransmissionStorage(transmission);
   size    = sizeof(struct CWSMessage) + length + 1;
 
