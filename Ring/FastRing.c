@@ -200,7 +200,7 @@ static inline __attribute__((hot)) void HandleCompletedRingDescriptor(struct Fas
     descriptor->closure    = NULL;
     descriptor->function   = NULL;
     descriptor->previous   = NULL;
-    descriptor->identifier = 0;
+    descriptor->identifier = 0ULL;
 
     atomic_thread_fence(memory_order_release);
     ReleaseRingDescriptor(&ring->descriptors, descriptor);
@@ -393,10 +393,7 @@ struct FastRingDescriptor* __attribute__((hot)) AllocateFastRingDescriptor(struc
     descriptor->next     = NULL;
     descriptor->linked   = 0;
 
-#if (IO_URING_VERSION_MAJOR > 2) || (IO_URING_VERSION_MAJOR == 2) && (IO_URING_VERSION_MINOR >= 6)
     io_uring_initialize_sqe(&descriptor->submission);
-#endif
-
     io_uring_prep_nop(&descriptor->submission);
     atomic_store_explicit(&descriptor->references, 1, memory_order_release);
   }
@@ -413,10 +410,10 @@ void __attribute__((hot)) ReleaseFastRingDescriptor(struct FastRingDescriptor* d
   {
     ring = descriptor->ring;
 
+    descriptor->state      = RING_DESC_STATE_FREE;
+    descriptor->closure    = NULL;
     descriptor->function   = NULL;
     descriptor->previous   = NULL;
-    descriptor->closure    = NULL;
-    descriptor->state      = RING_DESC_STATE_FREE;
     descriptor->identifier = 0ULL;
 
     atomic_thread_fence(memory_order_release);
@@ -621,6 +618,7 @@ int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
       }
 
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_POLL_FLAGS(flags));
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       return 0;
@@ -651,6 +649,7 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle)
       if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
                    (descriptor->submission.opcode == IORING_OP_POLL_ADD)))
       {
+        io_uring_initialize_sqe(&descriptor->submission);
         io_uring_prep_nop(&descriptor->submission);
         descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
         return 0;
@@ -658,11 +657,13 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle)
 
       if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
       {
+        io_uring_initialize_sqe(&descriptor->submission);
         io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
         return 0;
       }
 
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       return 0;
@@ -766,6 +767,7 @@ static void UpdateTimeout(struct FastRingDescriptor* descriptor, HandleFastRingT
   if (likely(descriptor->state == RING_DESC_STATE_SUBMITTED))
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_timeout_update(&descriptor->submission, &descriptor->data.timeout.interval, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }
@@ -779,6 +781,7 @@ static void RemoveTimeout(struct FastRingDescriptor* descriptor)
   if (unlikely((descriptor->state == RING_DESC_STATE_PENDING) &&
                (descriptor->submission.opcode == IORING_OP_TIMEOUT)))
   {
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_nop(&descriptor->submission);
     descriptor->submission.user_data |= (uint64_t)RING_DESC_OPTION_IGNORE;
     return;
@@ -786,11 +789,13 @@ static void RemoveTimeout(struct FastRingDescriptor* descriptor)
 
   if (unlikely(descriptor->state == RING_DESC_STATE_PENDING))
   {
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
     return;
   }
 
   atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+  io_uring_initialize_sqe(&descriptor->submission);
   io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
   SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
 }

@@ -28,6 +28,12 @@ extern "C"
 {
 #endif
 
+#if (IO_URING_VERSION_MAJOR < 2) || (IO_URING_VERSION_MAJOR == 2) && (IO_URING_VERSION_MINOR < 6)
+// Since liburing 2.6 call to io_uring_initialize_sqe() is required to clean a submission up,
+// this makes migrations less painful and backward compatible
+#define io_uring_initialize_sqe(submission)
+#endif
+
 struct FastRing;
 struct FastRingEntry;
 struct FastRingDescriptor;
@@ -40,7 +46,7 @@ struct FastRingBufferProvider;
 
 /*
   SQE/CQE user_data's bit layout:
-  [63:60]  LA57/PAC/TBI/MTE reserve (4)
+  [63:60]  LA57/TBI/MTE reserve (4)
   [59:48]  Tag MSB (12)
   [47:09]  Pointer (39) <-- middle address field, 512 bytes aligned
   [08:06]  Options (3)

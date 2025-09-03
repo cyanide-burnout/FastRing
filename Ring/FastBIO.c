@@ -16,6 +16,18 @@
 
 // Supplementary
 
+static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+{
+  if ((completion == NULL) ||
+      (completion->res != 0))
+  {
+    // Error may occure during closing
+    close(descriptor->submission.fd);
+  }
+
+  return 0;
+}
+
 static void FreeEngine(struct FastBIO* engine, int reason)
 {
   struct FastBuffer* buffer;
@@ -27,17 +39,10 @@ static void FreeEngine(struct FastBIO* engine, int reason)
     ReleaseFastBuffer(buffer);
   }
 
-  if (((reason == RING_REASON_COMPLETE) ||
-       (reason == RING_REASON_INCOMPLETE)) &&
-      (descriptor = AllocateFastRingDescriptor(engine->ring, NULL, NULL)))
+  if (descriptor = AllocateFastRingDescriptor(engine->ring, HandleReleaseCompletion, NULL))
   {
     io_uring_prep_close(&descriptor->submission, engine->handle);
     SubmitFastRingDescriptor(descriptor, 0);
-  }
-  else
-  {
-    // FastRing might be under destruction, close socket synchronously
-    close(engine->handle);
   }
 
   free(engine);
@@ -112,9 +117,10 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     AdvanceFastRingBuffer(engine->inbound.provider, completion, AllocateRingFastBuffer, engine->inbound.pool);
 
-    buffer                  = FAST_BUFFER(data);
-    buffer->length          = completion->res;
-    engine->inbound.length += completion->res;
+    buffer                     = FAST_BUFFER(data);
+    buffer->length             =  completion->res;
+    engine->inbound.length    +=  completion->res;
+    engine->inbound.condition  = ~completion->flags & IORING_CQE_F_MORE;
 
     if (engine->inbound.tail == NULL)
     {
@@ -128,6 +134,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     }
 
     CallHandlerFunction(engine, POLLIN, engine->inbound.length);
+
+    engine->inbound.condition = 0;
   }
 
   if (unlikely(~completion->flags & IORING_CQE_F_MORE))
@@ -216,7 +224,7 @@ static void FlushOutboundQueue(void* closure, int reason)
 // OpenSSL BIO
 
 static BIO_METHOD* method = NULL;
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; 
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int HandleBIORead(BIO* handle, char* data, int length)
 {
@@ -359,6 +367,7 @@ static long HandleBIOControl(BIO* handle, int command, long argument1, void* arg
         io_uring_prep_nop(&descriptor->submission);
         SubmitFastRingDescriptor(descriptor, 0);
       }
+      return 0;
   }
 
   return 0;
@@ -379,9 +388,17 @@ static int HandleBIODestroy(BIO* handle)
 
   engine = (struct FastBIO*)BIO_get_data(handle);
 
+  if (engine->inbound.condition & IORING_CQE_F_MORE)
+  {
+    // Preventing leakage in destruction inside a call HandleInboundCompletion() when last FastBuffer has been received
+    engine->inbound.descriptor = NULL;
+  }
+
   if ((descriptor = engine->inbound.descriptor) &&
       (descriptor->state == RING_DESC_STATE_PENDING))
   {
+    // io_uring_prep_recv_multishot() is waiting for submission
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_nop(&descriptor->submission);
     descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
     engine->inbound.descriptor        = NULL;
@@ -390,7 +407,9 @@ static int HandleBIODestroy(BIO* handle)
 
   if (descriptor = engine->inbound.descriptor)
   {
+    // io_uring_prep_recv_multishot() is already in the io_uring
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     engine->inbound.descriptor = NULL;

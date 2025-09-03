@@ -24,6 +24,7 @@ struct FastBIOInboundQueue
   struct FastBufferPool* pool;
   struct FastBuffer* head;
   struct FastBuffer* tail;
+  uint32_t condition;
   size_t position;
   size_t length;
 };

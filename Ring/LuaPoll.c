@@ -106,6 +106,7 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
   if (descriptor = context->poll)
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     context->poll        = NULL;
@@ -116,6 +117,7 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
   if (descriptor = context->timeout)
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     context->timeout     = NULL;
@@ -342,6 +344,7 @@ static int ReleaseLuaWorker(lua_State* state)
   if (descriptor = context->poll)
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     context->poll        = NULL;
@@ -352,6 +355,7 @@ static int ReleaseLuaWorker(lua_State* state)
   if (descriptor = context->timeout)
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     context->timeout     = NULL;
@@ -386,6 +390,7 @@ static int ReleaseLuaHandler(lua_State* state)
   if (descriptor = context->poll)
   {
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     context->poll        = NULL;

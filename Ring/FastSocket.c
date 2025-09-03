@@ -10,6 +10,18 @@
 #define likely(condition)     __builtin_expect(!!(condition), 1)
 #define unlikely(condition)   __builtin_expect(!!(condition), 0)
 
+static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+{
+  if ((completion == NULL) ||
+      (completion->res != 0))
+  {
+    // Error may occure during closing
+    close(descriptor->submission.fd);
+  }
+
+  return 0;
+}
+
 static void FreeSocketInstance(struct FastSocket* socket, int reason)
 {
   struct FastBuffer* buffer;
@@ -28,17 +40,10 @@ static void FreeSocketInstance(struct FastSocket* socket, int reason)
     free(batch);
   }
 
-  if (((reason == RING_REASON_COMPLETE) ||
-       (reason == RING_REASON_INCOMPLETE)) &&
-      (descriptor = AllocateFastRingDescriptor(socket->ring, NULL, NULL)))
+  if (descriptor = AllocateFastRingDescriptor(socket->ring, HandleReleaseCompletion, NULL))
   {
     io_uring_prep_close(&descriptor->submission, socket->handle);
     SubmitFastRingDescriptor(descriptor, 0);
-  }
-  else
-  {
-    // FastRing might be under destruction, close socket synchronously
-    close(socket->handle);
   }
 
   free(socket);
@@ -152,9 +157,10 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     AdvanceFastRingBuffer(socket->inbound.provider, completion, AllocateRingFastBuffer, socket->inbound.pool);
 
-    buffer                  = FAST_BUFFER(data);
-    buffer->length          = completion->res;
-    socket->inbound.length += completion->res;
+    buffer                     = FAST_BUFFER(data);
+    buffer->length             =  completion->res;
+    socket->inbound.length    +=  completion->res;
+    socket->inbound.condition  = ~completion->flags & IORING_CQE_F_MORE;
 
     if (unlikely(socket->inbound.tail == NULL))
     {
@@ -168,6 +174,8 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     }
 
     CallHandlerFunction(socket, POLLIN, socket->inbound.length);
+
+    socket->inbound.condition = 0;
   }
 
   if (unlikely(~completion->flags & IORING_CQE_F_MORE))
@@ -608,9 +616,16 @@ void ReleaseFastSocket(struct FastSocket* socket)
   {
     socket->outbound.condition |= POLLHUP;
 
+    if (socket->inbound.condition & IORING_CQE_F_MORE)
+    {
+      // Preventing leakage in destruction inside a call HandleInboundCompletion() when last FastBuffer has been received
+      socket->inbound.descriptor = NULL;
+    }
+
     if ((descriptor = socket->inbound.descriptor) &&
         (descriptor->state == RING_DESC_STATE_PENDING))
     {
+      io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_nop(&descriptor->submission);
       descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
       socket->inbound.descriptor        = NULL;
@@ -620,6 +635,7 @@ void ReleaseFastSocket(struct FastSocket* socket)
     if (descriptor = socket->inbound.descriptor)
     {
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       socket->inbound.descriptor = NULL;

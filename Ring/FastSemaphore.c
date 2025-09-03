@@ -135,6 +135,7 @@ void CancelFastSemaphore(struct FastRingDescriptor* descriptor)
     atomic_fetch_sub_explicit(&primitive->data, (1ULL << SEM_NWAITERS_SHIFT), memory_order_relaxed);
 
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
     SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
   }

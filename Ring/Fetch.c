@@ -175,6 +175,7 @@ static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation
     if (operation == CURL_POLL_REMOVE)
     {
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
       return 0;
