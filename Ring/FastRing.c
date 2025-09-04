@@ -97,7 +97,8 @@ static inline __attribute__((always_inline)) void ReleaseRingDescriptorHeap(stru
   struct FastRingDescriptor* current;
   struct FastRingDescriptor* next;
 
-  next = atomic_load_explicit(&set->heap, memory_order_acquire);
+  next = atomic_exchange_explicit(&set->heap, NULL, memory_order_acquire);
+
   while (current = next)
   {
     next = current->heap;
@@ -382,6 +383,7 @@ struct FastRingDescriptor* __attribute__((hot)) AllocateFastRingDescriptor(struc
   descriptor = NULL;
 
   if (likely((ring != NULL) &&
+             (atomic_load_explicit(&ring->descriptors.heap, memory_order_relaxed)) &&
              (descriptor = AllocateRingDescriptor(&ring->descriptors))))
   {
     descriptor->ring     = ring;

@@ -13,7 +13,8 @@
 static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   if ((completion == NULL) ||
-      (completion->res != 0))
+      (completion->res != 0) &&
+      (completion->res != -EBADF))
   {
     // Error may occure during closing
     close(descriptor->submission.fd);
@@ -44,6 +45,11 @@ static void FreeSocketInstance(struct FastSocket* socket, int reason)
   {
     io_uring_prep_close(&descriptor->submission, socket->handle);
     SubmitFastRingDescriptor(descriptor, 0);
+  }
+  else
+  {
+    // Error may occure during allocation
+    close(socket->handle);
   }
 
   free(socket);
