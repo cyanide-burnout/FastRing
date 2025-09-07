@@ -166,7 +166,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     buffer                     = FAST_BUFFER(data);
     buffer->length             =  completion->res;
     socket->inbound.length    +=  completion->res;
-    socket->inbound.condition  = ~completion->flags & IORING_CQE_F_MORE;
+    socket->inbound.condition  = ~completion->flags;
 
     if (unlikely(socket->inbound.tail == NULL))
     {

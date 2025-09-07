@@ -92,12 +92,14 @@ struct FastRingPollData
 {
   int handle;
   uint64_t flags;
+  uint32_t condition;
   HandleFastRingPollFunction function;
 };
 
 struct FastRingTimeoutData
 {
   uint64_t flags;
+  uint32_t condition;
   struct __kernel_timespec interval;
   HandleFastRingTimeoutFunction function;
 };
@@ -228,7 +230,7 @@ void SubmitFastRingDescriptorRange(struct FastRingDescriptor* first, struct Fast
 struct FastRingDescriptor* AllocateFastRingDescriptor(struct FastRing* ring, HandleFastRingCompletionFunction function, void* closure);
 
 // Note: ReleaseFastRingDescriptor has to be used only in special cases, normally release will be done automatically by result of HandleFastRingCompletionFunction
-void ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor);
+int ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor);
 
 struct FastRingFlusher* SetFastRingFlushHandler(struct FastRing* ring, HandleFastRingFlushFunction function, void* closure);
 int RemoveFastRingFlushHandler(struct FastRing* ring, struct FastRingFlusher* flusher);
@@ -265,7 +267,7 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle);
 void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction function, void* closure);
 
 int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
-void* GetFastRingPollData(struct FastRing* ring, int handle);
+struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int handle);
 
 // Timeout
 

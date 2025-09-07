@@ -126,7 +126,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     buffer                     = FAST_BUFFER(data);
     buffer->length             =  completion->res;
     engine->inbound.length    +=  completion->res;
-    engine->inbound.condition  = ~completion->flags & IORING_CQE_F_MORE;
+    engine->inbound.condition  = ~completion->flags;
 
     if (engine->inbound.tail == NULL)
     {
