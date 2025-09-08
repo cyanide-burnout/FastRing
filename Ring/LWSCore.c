@@ -1,6 +1,5 @@
 #include "LWSCore.h"
 
-#include <glib.h>
 #include <malloc.h>
 #include <string.h>
 #include <syslog.h>
@@ -121,7 +120,7 @@ void TransmitLWSMessage(struct LWSMessage* message)
   session->head = message;
   session->tail = message;
   lws_callback_on_writable(session->instance);
-  TouchFastGLoop(session->loop);
+  TouchLWSLoop(session->loop);
 }
 
 // Core
@@ -181,7 +180,7 @@ static int HandleServiceEvent(struct lws* instance, enum lws_callback_reasons re
   return -1;
 }
 
-struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, int depth, LWSCreateFunction function, void* closure)
+struct LWSCore* CreateLWSCore(struct LWSLoop* loop, int option, int depth, LWSCreateFunction function, void* closure)
 {
   struct LWSCore* core;
   struct lws_protocols* protocol;
@@ -193,7 +192,7 @@ struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, int depth, LWS
   core->protocols[0].user     = core;
 
   core->information.port          = CONTEXT_PORT_NO_LISTEN;
-  core->information.options       = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT | LWS_SERVER_OPTION_SSL_ECDH | LWS_SERVER_OPTION_GLIB;
+  core->information.options       = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT | LWS_SERVER_OPTION_SSL_ECDH | USE_LWS_EVENTLOOP;
   core->information.protocols     = core->protocols;
   core->information.gid           = -1;
   core->information.uid           = -1;
@@ -216,10 +215,17 @@ struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, int depth, LWS
 
 void ReleaseLWSCore(struct LWSCore* core)
 {
+#if USE_LWS_EVENTLOOP == LWS_SERVER_OPTION_LIBUV
+  // LWS at least of version 4.3.5 has a serious bug during destruction when using libuv's external loop:
+  // it tries to make cyclic asynchronous call to uv_close() in __lws_close_free_wsi() without entering a loop;
+  // the only way to prevent a stuck is to allow a leakage
+  lws_cancel_service(core->context);
+#else
 #if (LWS_LIBRARY_VERSION_MAJOR < 4) || (LWS_LIBRARY_VERSION_MAJOR == 4) && (LWS_LIBRARY_VERSION_MINOR < 3)
   lws_context_destroy2(core->context);
 #else
   lws_context_destroy(core->context);
+#endif
 #endif
   free(core);
 }
@@ -271,7 +277,7 @@ struct LWSSession* CreateLWSSessionFromURL(struct LWSCore* core, const char* loc
 
   session->instance = lws_client_connect_via_info(&session->information);
 
-  TouchFastGLoop(core->loop);
+  TouchLWSLoop(core->loop);
 
   return session;
 }
@@ -334,7 +340,7 @@ struct LWSSession* CreateLWSSessionFromAddress(struct LWSCore* core, struct sock
 
   session->instance = lws_client_connect_via_info(&session->information);
 
-  TouchFastGLoop(core->loop);
+  TouchLWSLoop(core->loop);
 
   return session;
 }

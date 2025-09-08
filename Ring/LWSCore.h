@@ -8,7 +8,6 @@
 
 // DEPENDENCIES += libwebsockets glib-2.0
 
-#include <glib.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/socket.h>
@@ -19,7 +18,35 @@
 #include <libwebsockets.h>
 #endif
 
+#ifndef USE_LWS_EVENTLOOP
+#define USE_LWS_EVENTLOOP  LWS_SERVER_OPTION_GLIB
+#endif
+
+#if USE_LWS_EVENTLOOP == LWS_SERVER_OPTION_GLIB
+
 #include "FastGLoop.h"
+
+#define LWSLoop       FastGLoop
+#define TouchLWSLoop  TouchFastGLoop
+
+#define CreateLWSLoop(ring)  CreateFastGLoop(ring, 200)
+#define ReleaseLWSLoop       ReleaseFastGLoop
+#define StopLWSLoop          StopFastGLoop
+
+#endif
+
+#if USE_LWS_EVENTLOOP == LWS_SERVER_OPTION_LIBUV
+
+#include "FastUVLoop.h"
+
+#define LWSLoop       FastUVLoop
+#define TouchLWSLoop  TouchFastUVLoop
+
+#define CreateLWSLoop      CreateFastUVLoop
+#define ReleaseLWSLoop     ReleaseFastUVLoop
+#define StopLWSLoop(loop)  
+
+#endif
 
 #ifdef __cplusplus
 extern "C"
@@ -40,7 +67,7 @@ struct LWSCore
 {
   int option;
   void* closure;
-  struct FastGLoop* loop;
+  struct LWSLoop* loop;
   LWSCreateFunction function;
 
   struct lws_context* context;
@@ -52,7 +79,7 @@ struct LWSSession
 {
   void* closure;
   struct lws* instance;
-  struct FastGLoop* loop;
+  struct LWSLoop* loop;
   LWSHandleFunction function;
 
   struct LWSMessage* heap;
@@ -81,7 +108,7 @@ struct LWSMessage
 
 void SetLWSReportHandler(int level, LWSReportFunction function);   // SetLWSReportHandler(LLL_ERR | LLL_WARN, report);
 
-struct LWSCore* CreateLWSCore(struct FastGLoop* loop, int option, int depth, LWSCreateFunction function, void* closure);  // LWS_OPTION_IGNORE_CERTIFICATE | SSL3_VERSION
+struct LWSCore* CreateLWSCore(struct LWSLoop* loop, int option, int depth, LWSCreateFunction function, void* closure);  // LWS_OPTION_IGNORE_CERTIFICATE | SSL3_VERSION
 void ReleaseLWSCore(struct LWSCore* core);
 
 struct LWSSession* CreateLWSSessionFromURL(struct LWSCore* core, const char* location, const char* protocols, LWSHandleFunction function, void* closure);
