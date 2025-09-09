@@ -97,10 +97,8 @@ static void HandleRequest(struct FastGLoop* loop)
         (descriptor      = AllocateFastRingDescriptor(loop->ring, HandleResponse, loop)))
     {
       io_uring_prep_poll_remove(&descriptor->submission, other->identifier);
-      descriptor->submission.flags |= IOSQE_IO_HARDLINK;
-      descriptor->linked            = 2;
-      data->descriptor              = NULL;
       SubmitFastRingDescriptor(descriptor, 0);
+      data->descriptor = NULL;
     }
 
     if ((data->descriptor == NULL) &&

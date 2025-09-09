@@ -6,13 +6,14 @@ static int HandlePollCompletion(struct FastRingDescriptor* descriptor, struct io
 {
   struct FastUVLoop* loop;
 
-  loop = (struct FastUVLoop*)descriptor->closure;
-
   if ((completion != NULL) &&
       (~completion->flags & RING_DESC_OPTION_IGNORE))
   {
+    loop = (struct FastUVLoop*)descriptor->closure;
+
     TouchFastUVLoop(loop);
     SubmitFastRingDescriptor(descriptor, 0);
+
     return 1;
   }
 
@@ -36,13 +37,13 @@ static void HandleFlushEvent(void* closure, int reason)
 
   if (reason == RING_REASON_COMPLETE)
   {
-    loop        = (struct FastUVLoop*)closure;
-    loop->flush = NULL;
+    loop = (struct FastUVLoop*)closure;
 
     uv_run(loop->loop, UV_RUN_NOWAIT);
 
     timeout       = uv_backend_timeout(loop->loop);
     loop->timeout = SetFastRingTimeout(loop->ring, loop->timeout, timeout, 0, HandleTimeoutEvent, loop);
+    loop->flush   = NULL;
   }
 }
 
