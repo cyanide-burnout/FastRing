@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <zlib.h>
 
+// Transport
+
 #define GRPC_STRING_BUFFER_LENGTH    2048
 #define GRPC_ALLOCATION_GRANULARITY  (1 << 12)
 #define GRPC_FRAME_SIZE_LIMIT        (1 << 20)
@@ -455,6 +457,8 @@ void TransmitGRPCFrame(struct GRPCFrame* frame)
   }
 }
 
+// Helpers
+
 int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCMessage* message, int final)
 {
   struct GRPCFrame* frame;
@@ -481,4 +485,163 @@ int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCM
   }
 
   return result;
+}
+
+// Service
+
+struct GRPCService
+{
+  ProtobufCService service;
+
+  int count;
+  void* closure;
+  HandleGRPCErrorFunction function;
+
+  struct Fetch* fetch;
+  struct GRPCMethod* methods[0];
+};
+
+struct GRPCCall
+{
+  struct GRPCService* private;
+  const ProtobufCMessageDescriptor* descriptor;
+  ProtobufCClosure function;
+  void* closure;
+};
+
+static int HandleCall(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
+{
+  struct GRPCCall* call;
+  ProtobufCMessage* message;
+  struct GRPCService* private;
+
+  call    = (struct GRPCCall*)closure;
+  private = call->private;
+
+  switch (reason)
+  {
+    case GRPCCLIENT_REASON_FRAME:
+      if ((call->function != NULL) && 
+          (message         = protobuf_c_message_unpack(call->descriptor, NULL, length, (uint8_t*)data)))
+      {
+        call->function(message, call->closure);
+        call->function = NULL;
+        protobuf_c_message_free_unpacked(message, NULL);
+      }
+      break;
+
+    case GRPCCLIENT_REASON_STATUS:
+      if (call->function != NULL)
+      {
+        // Call handler has to be notified anyway
+        call->function(NULL, call->closure);
+      }
+
+      if ((parameter         != GRPC_STATUS_OK) &&
+          (private->function != NULL))
+      {
+        // Error handler can observe an detailed error state
+        private->function(private->closure, (ProtobufCService*)private, parameter, data);
+      }
+
+      private->service.destroy((ProtobufCService*)private);
+      free(call);
+      break;
+  }
+
+  return 0;
+}
+
+static void InvokeService(ProtobufCService* service, unsigned index, const ProtobufCMessage* input, ProtobufCClosure closure, void* data)
+{
+  struct GRPCCall* call;
+  struct GRPCService* private;
+  struct FetchTransmission* transmission;
+  const ProtobufCServiceDescriptor* descriptor;
+
+  private      = (struct GRPCService*)service;
+  call         = (struct GRPCCall*)calloc(1, sizeof(struct GRPCCall));
+  transmission = NULL;
+
+  if (call != NULL)
+  {
+    descriptor       = service->descriptor;
+    call->private    = private;
+    call->descriptor = descriptor->methods[index].output;
+    call->function   = closure;
+    call->closure    = data;
+    transmission     = MakeGRPCCall(private->fetch, private->methods[index], HandleCall, call);
+  }
+
+  if ((call         == NULL) ||
+      (transmission == NULL) ||
+      (TransmitGRPCMessage(transmission, input, 1) != 2))
+  {
+    CancelFetchTransmission(transmission);
+    free(call);
+
+    if (closure != NULL)
+    {
+      // Call handler has to be notified about error
+      closure(NULL, data);
+    }
+
+    if (private->function != NULL)
+    {
+      // Error handler can observe an detailed error state
+      private->function(private->closure, service, -CURLE_OUT_OF_MEMORY, NULL);
+    }
+
+    return;
+  }
+
+  private->count ++;
+}
+
+static void DestroyService(ProtobufCService* service)
+{
+  long index;
+  struct GRPCService* private;
+  const ProtobufCServiceDescriptor* descriptor;
+
+  private         = (struct GRPCService*)service;
+  descriptor      = service->descriptor;
+  private->count --;
+
+  if (private->count == 0)
+  {
+    for (index = 0; index < descriptor->n_methods; index ++)
+    {
+      // Release all cached gRPC method descriptors
+      ReleaseGRPCMethod(private->methods[index]);
+    }
+
+    free(private);
+  }
+}
+
+ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceDescriptor* descriptor, const char* location, const char* token, long timeout, char resolution, HandleGRPCErrorFunction function, void* closure)
+{
+  long index;
+  struct GRPCService* private;
+  const ProtobufCMethodDescriptor* method;
+
+  if (private = (struct GRPCService*)calloc(1, sizeof(struct GRPCService) + sizeof(struct GRPCMethod*) * descriptor->n_methods))
+  {
+    private->service.descriptor = descriptor;
+    private->service.invoke     = InvokeService;
+    private->service.destroy    = DestroyService;
+    private->function           = function;
+    private->closure            = closure;
+    private->fetch              = fetch;
+    private->count              = 1;
+
+    for (index = 0; index < descriptor->n_methods; index ++)
+    {
+      method                  = descriptor->methods + index;
+      private->methods[index] = CreateGRPCMethod(location, NULL, descriptor->name, method->name, token, timeout, resolution);
+    }
+  }
+
+  return (ProtobufCService*)private;
 }

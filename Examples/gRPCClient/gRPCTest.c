@@ -6,15 +6,15 @@
 #include "gRPCClient.h"
 #include "gRPCTest.pb-c.h"
 
-#define STATE_RUNNING  -1
-
-atomic_int state = { STATE_RUNNING };
+atomic_int state = { 0 };
 
 static void HandleSignal(int signal)
 {
   // Interrupt main loop in case of interruption signal
   atomic_store_explicit(&state, 0, memory_order_relaxed);
 }
+
+// Example 1 - Direct gRP C handling
 
 int HandleEvent(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
 {
@@ -26,13 +26,13 @@ int HandleEvent(void* closure, struct FetchTransmission* transmission, int reaso
     case GRPCCLIENT_REASON_FRAME:
       arena = CreateProtoBufArena(length + 1024);
       reply = demo__echo_reply__unpack(arena, length, (uint8_t*)data);
-      printf("Message: %s\n", reply->text);
+      printf("Example 1 - message: %s\n", reply->text);
       demo__echo_reply__free_unpacked(reply, arena);
       break;
 
     case GRPCCLIENT_REASON_STATUS:
-      printf("Status: %d / %s\n", parameter, data);
-      atomic_store_explicit(&state, 0, memory_order_relaxed);
+      printf("Example 1 - status: %d / %s\n", parameter, data);
+      atomic_fetch_add_explicit(&state, 1, memory_order_relaxed);
       *(void**)closure = NULL;
       break;
   }
@@ -40,14 +40,33 @@ int HandleEvent(void* closure, struct FetchTransmission* transmission, int reaso
   return 0;
 }
 
+// Example 2 - Using protobuf-c's service
+
+void HandleError(void* closure, ProtobufCService* service, int status, const char* message)
+{
+  printf("Example 2 - status: %d / %s\n", status, message);
+}
+
+void HandleEchoReply(const Demo__EchoReply* reply, void* data)
+{
+  atomic_fetch_add_explicit(&state, 1, memory_order_relaxed);
+
+  if (reply == NULL)
+  {
+    printf("Example 2 - an error occured\n");
+    return;
+  }
+
+  printf("Example 2 - message: %s\n", reply->text);
+}
+
 int main()
 {
   struct sigaction action;
   struct FastRing* ring;
   struct Fetch* fetch;
-  struct GRPCMethod* method;
-  struct Demo__EchoRequest request;
-  struct FetchTransmission* transmission;
+
+  struct Demo__EchoRequest request = DEMO__ECHO_REQUEST__INIT;
 
   action.sa_handler = HandleSignal;
   action.sa_flags   = SA_NODEFER | SA_RESTART;
@@ -61,21 +80,38 @@ int main()
 
   printf("Started\n");
 
-  ring         = CreateFastRing(0);
-  fetch        = CreateFetch(ring);
-  method       = CreateGRPCMethod("http://localhost:50051", "demo", "Echoer", "UnaryEcho", NULL, 0, 0);
-  transmission = MakeGRPCCall(fetch, method, HandleEvent, &transmission);
+  ring  = CreateFastRing(0);
+  fetch = CreateFetch(ring);
 
-  demo__echo_request__init(&request);
   request.text = (char*)"Hello World!";
+
+  // Example 1
+
+  struct GRPCMethod* method              = CreateGRPCMethod("http://localhost:50051", "demo", "Echoer", "UnaryEcho", NULL, 0, 0);
+  struct FetchTransmission* transmission = MakeGRPCCall(fetch, method, HandleEvent, &transmission);
   TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 1);
 
-  while ((atomic_load_explicit(&state, memory_order_relaxed) == STATE_RUNNING) &&
+  // Example 2
+
+  ProtobufCService* service = CreateGRPCService(fetch, &demo__echoer__descriptor, "http://localhost:50051", NULL, 0, 0, HandleError, NULL);
+  demo__echoer__unary_echo(service, &request, HandleEchoReply, NULL);
+
+  //
+
+  while ((atomic_load_explicit(&state, memory_order_relaxed) < 2) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
+  // Example 1
 
   CancelFetchTransmission(transmission);
   ReleaseGRPCMethod(method);
+
+  // Example 2
+
+  protobuf_c_service_destroy(service);
+
+  //
+
   ReleaseFetch(fetch);
   ReleaseFastRing(ring);
 

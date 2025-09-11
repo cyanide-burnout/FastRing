@@ -15,6 +15,7 @@ extern "C"
 #define GRPCCLIENT_REASON_STATUS  1
 
 typedef int (*HandleGRPCEventFunction)(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length);
+typedef void (*HandleGRPCErrorFunction)(void* closure, ProtobufCService* service, int status, const char* message);
 
 struct GRPCMethod
 {
@@ -42,11 +43,11 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
 void ReleaseGRPCMethod(struct GRPCMethod* method);
 
 struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* method, HandleGRPCEventFunction function, void* closure);
-
 struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size_t length);
 void TransmitGRPCFrame(struct GRPCFrame* frame);
 
 int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCMessage* message, int final);
+ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceDescriptor* descriptor, const char* location, const char* token, long timeout, char resolution, HandleGRPCErrorFunction function, void* closure);
 
 #ifdef __cplusplus
 }
