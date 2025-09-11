@@ -41,7 +41,7 @@ extern "C"
 struct gRPC
 {
   uint8_t flags;    // GRPC_FLAG_*
-  uint32_t length;  // Length of (big endian)
+  uint32_t length;  // Length of data (big endian)
   uint8_t data[0];  // Data of ProtoBuf message
 
 } __attribute__((packed));

@@ -454,3 +454,31 @@ void TransmitGRPCFrame(struct GRPCFrame* frame)
     TouchFetchTransmission(frame->transmission);
   }
 }
+
+int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCMessage* message, int final)
+{
+  struct GRPCFrame* frame;
+  size_t length;
+  int result;
+
+  result = 0;
+
+  if ((message != NULL) &&
+      (length   = protobuf_c_message_get_packed_size(message)) &&
+      (frame    = AllocateGRPCFrame(transmission, length)))
+  {
+    frame->length = protobuf_c_message_pack(message, frame->data);
+    TransmitGRPCFrame(frame);
+    result ++;
+  }
+
+  if ((final != 0) &&
+      (frame  = AllocateGRPCFrame(transmission, 0)))
+  {
+    frame->data = NULL;
+    TransmitGRPCFrame(frame);
+    result ++;
+  }
+
+  return result;
+}

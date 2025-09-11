@@ -1,6 +1,8 @@
 #ifndef GRPCCLIENT_H
 #define GRPCCLIENT_H
 
+#include <protobuf-c/protobuf-c.h>
+
 #include "Fetch.h"
 #include "gRPC.h"
 
@@ -43,6 +45,8 @@ struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* m
 
 struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size_t length);
 void TransmitGRPCFrame(struct GRPCFrame* frame);
+
+int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCMessage* message, int final);
 
 #ifdef __cplusplus
 }

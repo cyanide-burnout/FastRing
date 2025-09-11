@@ -38,7 +38,7 @@ LIBS := \
 all: build
 
 %.pb-c.c: %.proto
-	cd $(dir $<) && protoc --c_out=. $(notdir $<)
+	protoc --c_out=. $<
 
 build: $(PREREQUISITES) $(OBJECTS)
 	$(CC) $(OBJECTS) $(FLAGS) $(LIBS) -o $(EXECUTABLE)

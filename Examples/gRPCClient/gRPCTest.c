@@ -45,7 +45,6 @@ int main()
   struct sigaction action;
   struct FastRing* ring;
   struct Fetch* fetch;
-  struct GRPCFrame* frame;
   struct GRPCMethod* method;
   struct Demo__EchoRequest request;
   struct FetchTransmission* transmission;
@@ -68,14 +67,8 @@ int main()
   transmission = MakeGRPCCall(fetch, method, HandleEvent, &transmission);
 
   demo__echo_request__init(&request);
-  request.text  = (char*)"Hello World!";
-  frame         = AllocateGRPCFrame(transmission, demo__echo_request__get_packed_size(&request));
-  frame->length = demo__echo_request__pack(&request, frame->data);
-  TransmitGRPCFrame(frame);
-
-  frame       = AllocateGRPCFrame(transmission, 0);
-  frame->data = NULL;  // End of stream
-  TransmitGRPCFrame(frame);
+  request.text = (char*)"Hello World!";
+  TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 1);
 
   while ((atomic_load_explicit(&state, memory_order_relaxed) == STATE_RUNNING) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
