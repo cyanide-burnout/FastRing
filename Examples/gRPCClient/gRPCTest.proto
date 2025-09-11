@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package demo;
+
+service Echoer
+{
+  rpc UnaryEcho (EchoRequest) returns (EchoReply);
+  rpc StreamingEcho (stream EchoRequest) returns (stream EchoReply);
+}
+
+message EchoRequest
+{
+  string text = 1;
+}
+
+message EchoReply
+{
+  string text = 1;
+}

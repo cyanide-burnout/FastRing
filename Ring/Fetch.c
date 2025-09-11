@@ -349,18 +349,20 @@ struct Fetch* CreateFetch(struct FastRing* ring)
 {
   struct Fetch* fetch;
 
-  fetch        = (struct Fetch*)calloc(1, sizeof(struct Fetch));
-  fetch->ring  = ring;
-  fetch->multi = curl_multi_init();
-  fetch->share = curl_share_init();
+  if (fetch = (struct Fetch*)calloc(1, sizeof(struct Fetch)))
+  {
+    fetch->ring  = ring;
+    fetch->multi = curl_multi_init();
+    fetch->share = curl_share_init();
 
-  curl_multi_setopt(fetch->multi, CURLMOPT_TIMERDATA, fetch);
-  curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETDATA, fetch);
-  curl_multi_setopt(fetch->multi, CURLMOPT_TIMERFUNCTION, HandleTimerOperation);
-  curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETFUNCTION, HandleSocketOperation);
-  curl_multi_setopt(fetch->multi, CURLMOPT_PIPELINING, CURLPIPE_HTTP1 | CURLPIPE_MULTIPLEX);
-  curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
-  curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_HSTS);
+    curl_multi_setopt(fetch->multi, CURLMOPT_TIMERDATA, fetch);
+    curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETDATA, fetch);
+    curl_multi_setopt(fetch->multi, CURLMOPT_TIMERFUNCTION, HandleTimerOperation);
+    curl_multi_setopt(fetch->multi, CURLMOPT_SOCKETFUNCTION, HandleSocketOperation);
+    curl_multi_setopt(fetch->multi, CURLMOPT_PIPELINING, CURLPIPE_HTTP1 | CURLPIPE_MULTIPLEX);
+    curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+    curl_share_setopt(fetch->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_HSTS);
+  }
 
   return fetch;
 }
@@ -406,7 +408,14 @@ struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CUR
   struct FetchTransmission* transmission;
   int count;
 
-  transmission             = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission));
+  transmission = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission));
+
+  if (transmission == NULL)
+  {
+    curl_easy_cleanup(easy);
+    return NULL;
+  }
+
   transmission->fetch      = fetch;
   transmission->easy       = easy;
   transmission->state      = FETCH_STATUS_INCOMPLETE;
