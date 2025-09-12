@@ -19,12 +19,14 @@ typedef void (*HandleGRPCErrorFunction)(void* closure, ProtobufCService* service
 
 struct GRPCMethod
 {
-  CURLU* location;
-  struct curl_slist* headers;
+  CURLU* location;             //
+  struct curl_slist* headers;  // HTTP headers
 
-  long type;
-  long timeout;
-  char resolution;
+  long type;                   // CURLOPT_HTTP_VERSION
+  long timeout;                //
+  char resolution;             // 'S' for seconds, 'm' for milliseconds, 0 for undefined
+
+  int count;                   // Reference count
 };
 
 struct GRPCFrame
@@ -33,7 +35,7 @@ struct GRPCFrame
   struct GRPCFrame* next;                  //
   size_t size;                             // Size of allocation
 
-  char* data;                              // Pointer to data (will be set to buffer by default, use NULL to indicate end of stream)
+  char* data;                              // Pointer to data (set to buffer by default, use NULL to indicate end of stream)
   size_t length;                           // Length of data
 
   char buffer[0];                          //
@@ -41,6 +43,7 @@ struct GRPCFrame
 
 struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, const char* service, const char* name, const char* token, long timeout, char resolution);
 void ReleaseGRPCMethod(struct GRPCMethod* method);
+void HoldGRPCMethod(struct GRPCMethod* method);
 
 struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* method, HandleGRPCEventFunction function, void* closure);
 struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size_t length);

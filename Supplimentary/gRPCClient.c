@@ -289,6 +289,7 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
   if (method = (struct GRPCMethod*)calloc(1, sizeof(struct GRPCMethod)))
   {
     method->location = curl_url();
+    method->count    = 1;
     method->type     = CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE;
 
     if (package != NULL)  snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, "/%s.%s/%s", package, service, name);
@@ -341,11 +342,21 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
 
 void ReleaseGRPCMethod(struct GRPCMethod* method)
 {
-  if (method != NULL)
+  if ((method != NULL) &&
+      !(-- method->count))
   {
     curl_slist_free_all(method->headers);
     curl_url_cleanup(method->location);
     free(method);
+  }
+}
+
+void HoldGRPCMethod(struct GRPCMethod* method)
+{
+  if (method != NULL)
+  {
+    //
+    method->count ++;
   }
 }
 
@@ -604,11 +615,10 @@ static void DestroyService(ProtobufCService* service)
   struct GRPCService* private;
   const ProtobufCServiceDescriptor* descriptor;
 
-  private         = (struct GRPCService*)service;
-  descriptor      = service->descriptor;
-  private->count --;
+  private    = (struct GRPCService*)service;
+  descriptor = service->descriptor;
 
-  if (private->count == 0)
+  if (!(-- private->count))
   {
     for (index = 0; index < descriptor->n_methods; index ++)
     {
