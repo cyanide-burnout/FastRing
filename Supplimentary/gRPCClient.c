@@ -312,6 +312,12 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
 
     curl_free(scheme);
 
+    curl_url_set(method->location, CURLUPART_USER,     NULL, 0);
+    curl_url_set(method->location, CURLUPART_PASSWORD, NULL, 0);
+    curl_url_set(method->location, CURLUPART_OPTIONS,  NULL, 0);
+    curl_url_set(method->location, CURLUPART_QUERY,    NULL, 0);
+    curl_url_set(method->location, CURLUPART_FRAGMENT, NULL, 0);
+
     method->headers = curl_slist_append(method->headers, GRPC_HEADER_TRAILERS);
     method->headers = curl_slist_append(method->headers, GRPC_HEADER_CONTENT_TYPE);
     method->headers = curl_slist_append(method->headers, GRPC_HEADER_ACCEPT_ENCODING);
@@ -365,11 +371,11 @@ struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* m
   if ((method != NULL) &&
       (easy    = curl_easy_init()))
   {
-    curl_easy_setopt(easy, CURLOPT_UPLOAD, 1L);
+    curl_easy_setopt(easy, CURLOPT_UPLOAD,        1L);
     curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_easy_setopt(easy, CURLOPT_CURLU, method->location);
-    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, method->headers);
-    curl_easy_setopt(easy, CURLOPT_HTTP_VERSION, method->type);
+    curl_easy_setopt(easy, CURLOPT_CURLU,         method->location);
+    curl_easy_setopt(easy, CURLOPT_HTTPHEADER,    method->headers);
+    curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,  method->type);
 
     switch (method->resolution)
     {
@@ -377,8 +383,8 @@ struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* m
       case 'S':  curl_easy_setopt(easy, CURLOPT_TIMEOUT,    method->timeout);  break;
     }
 
-    curl_easy_setopt(easy, CURLOPT_READFUNCTION, HandleRead);
-    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
+    curl_easy_setopt(easy, CURLOPT_READFUNCTION,   HandleRead);
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,  HandleWrite);
     curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, HandleHeader);
 
     return MakeExtendedFetchTransmission(fetch, easy, FETCH_OPTION_SET_HANDLER_DATA, HandleFetch, function, closure);
@@ -694,6 +700,12 @@ ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceD
     }
 
     curl_free(scheme);
+
+    curl_url_set(private->location, CURLUPART_USER,     NULL, 0);
+    curl_url_set(private->location, CURLUPART_PASSWORD, NULL, 0);
+    curl_url_set(private->location, CURLUPART_OPTIONS,  NULL, 0);
+    curl_url_set(private->location, CURLUPART_QUERY,    NULL, 0);
+    curl_url_set(private->location, CURLUPART_FRAGMENT, NULL, 0);
 
     private->headers = curl_slist_append(private->headers, GRPC_HEADER_TRAILERS);
     private->headers = curl_slist_append(private->headers, GRPC_HEADER_CONTENT_TYPE);

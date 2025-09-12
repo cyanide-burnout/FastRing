@@ -14,7 +14,7 @@ static void HandleSignal(int signal)
   atomic_store_explicit(&state, 0, memory_order_relaxed);
 }
 
-// Example 1 - Direct gRP C handling
+// Example 1 - Direct gRPC handling (suitable for streaming)
 
 int HandleEvent(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
 {
@@ -40,7 +40,7 @@ int HandleEvent(void* closure, struct FetchTransmission* transmission, int reaso
   return 0;
 }
 
-// Example 2 - Using protobuf-c's service
+// Example 2 - Using protobuf-c's service wrapper (no streaming support)
 
 void HandleError(void* closure, ProtobufCService* service, const char* method, int status, const char* message)
 {
@@ -87,14 +87,17 @@ int main()
 
   // Example 1
 
-  struct GRPCMethod* method              = CreateGRPCMethod("http://localhost:50051", "demo", "Echoer", "UnaryEcho", NULL, 0, 0);
+  struct GRPCMethod* method              = CreateGRPCMethod("http://localhost:50051", "demo", "Echoer", "StreamingEcho", NULL, 0, 0);
   struct FetchTransmission* transmission = MakeGRPCCall(fetch, method, HandleEvent, &transmission);
+
+  TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 0);
   TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 1);
 
   // Example 2
 
   ProtobufCService* service = CreateGRPCService(fetch, &demo__echoer__descriptor, "http://localhost:50051", NULL, 0, 0, HandleError, NULL);
-  demo__echoer__unary_echo(service, &request, HandleEchoReply, NULL);
+
+  demo__echoer__unary_echo(service, &request, HandleEchoReply, NULL);  // demo.Echoer/UnaryEcho
 
   //
 
