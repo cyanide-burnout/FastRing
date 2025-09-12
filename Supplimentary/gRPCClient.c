@@ -330,9 +330,10 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
     }
 
     if ((token    != NULL) &&
-        (token[0] != '\0'))
+        (token[0] != '\0') &&
+        (snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, GRPC_HEADER_AUTHORIZATION, token) > 0))
     {
-      snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, GRPC_HEADER_AUTHORIZATION, token);
+      //
       method->headers = curl_slist_append(method->headers, buffer);
     }
   }
@@ -504,21 +505,31 @@ struct GRPCService
 {
   ProtobufCService service;
 
+  struct Fetch* fetch;
+  CURLU* location;
+
+  long type;
+  long timeout;
+  char resolution;
+  struct curl_slist* headers;
+
   int count;
   void* closure;
   HandleGRPCErrorFunction function;
 
-  struct Fetch* fetch;
-  struct GRPCMethod* methods[0];
+  struct GRPCMethod methods[0];
 };
 
 struct GRPCCall
 {
-  struct GRPCService* private;
+  struct GRPCContext context;
+
   const ProtobufCMessageDescriptor* descriptor;
   ProtobufCClosure function;
   void* closure;
 };
+
+_Static_assert(FETCH_STORAGE_SIZE >= sizeof(struct GRPCCall), "FETCH_STORAGE_SIZE too small for GRPCCall");
 
 static int HandleCall(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
 {
@@ -526,8 +537,8 @@ static int HandleCall(void* closure, struct FetchTransmission* transmission, int
   ProtobufCMessage* message;
   struct GRPCService* private;
 
-  call    = (struct GRPCCall*)closure;
-  private = call->private;
+  call    = (struct GRPCCall*)GetFetchTransmissionStorage(transmission);
+  private = (struct GRPCService*)closure;
 
   switch (reason)
   {
@@ -556,7 +567,6 @@ static int HandleCall(void* closure, struct FetchTransmission* transmission, int
       }
 
       private->service.destroy((ProtobufCService*)private);
-      free(call);
       break;
   }
 
@@ -566,30 +576,40 @@ static int HandleCall(void* closure, struct FetchTransmission* transmission, int
 static void InvokeService(ProtobufCService* service, unsigned index, const ProtobufCMessage* input, ProtobufCClosure closure, void* data)
 {
   struct GRPCCall* call;
+  struct GRPCMethod* method;
   struct GRPCService* private;
   struct FetchTransmission* transmission;
-  const ProtobufCServiceDescriptor* descriptor;
+  const ProtobufCServiceDescriptor* descriptor1;
+  const ProtobufCMethodDescriptor* descriptor2;
+  char buffer[GRPC_STRING_BUFFER_LENGTH];
 
   private      = (struct GRPCService*)service;
-  call         = (struct GRPCCall*)calloc(1, sizeof(struct GRPCCall));
-  transmission = NULL;
+  descriptor1  = service->descriptor;
+  descriptor2  = descriptor1->methods + index;
+  method       = private->methods     + index;
 
-  if (call != NULL)
+  if (method->location == NULL)
   {
-    descriptor       = service->descriptor;
-    call->private    = private;
-    call->descriptor = descriptor->methods[index].output;
-    call->function   = closure;
-    call->closure    = data;
-    transmission     = MakeGRPCCall(private->fetch, private->methods[index], HandleCall, call);
+    method->location   = curl_url_dup(private->location);
+    method->headers    = private->headers;
+    method->type       = private->type;
+    method->timeout    = private->timeout;
+    method->resolution = private->resolution;
+
+    if ((snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, "/%s/%s", descriptor1->name, descriptor2->name) < 0) ||
+        (curl_url_set(method->location, CURLUPART_PATH, buffer, 0) != CURLE_OK))
+    {
+      curl_url_cleanup(method->location);
+      method->location = NULL;
+    }
   }
 
-  if ((call         == NULL) ||
-      (transmission == NULL) ||
+  transmission = MakeGRPCCall(private->fetch, method, HandleCall, private);
+
+  if ((transmission == NULL) ||
       (TransmitGRPCMessage(transmission, input, 1) != 2))
   {
     CancelFetchTransmission(transmission);
-    free(call);
 
     if (closure != NULL)
     {
@@ -606,7 +626,11 @@ static void InvokeService(ProtobufCService* service, unsigned index, const Proto
     return;
   }
 
-  private->count ++;
+  call              = (struct GRPCCall*)GetFetchTransmissionStorage(transmission);
+  call->descriptor  = descriptor2->output;
+  call->function    = closure;
+  call->closure     = data;
+  private->count   ++;
 }
 
 static void DestroyService(ProtobufCService* service)
@@ -622,34 +646,73 @@ static void DestroyService(ProtobufCService* service)
   {
     for (index = 0; index < descriptor->n_methods; index ++)
     {
-      // Release all cached gRPC method descriptors
-      ReleaseGRPCMethod(private->methods[index]);
+      // Release all cached gRPC method locations
+      curl_url_cleanup(private->methods[index].location);
     }
 
+    curl_slist_free_all(private->headers);
+    curl_url_cleanup(private->location);
     free(private);
   }
 }
 
 ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceDescriptor* descriptor, const char* location, const char* token, long timeout, char resolution, HandleGRPCErrorFunction function, void* closure)
 {
-  long index;
+  char* scheme;
   struct GRPCService* private;
-  const ProtobufCMethodDescriptor* method;
+  char buffer[GRPC_STRING_BUFFER_LENGTH];
 
-  if (private = (struct GRPCService*)calloc(1, sizeof(struct GRPCService) + sizeof(struct GRPCMethod*) * descriptor->n_methods))
+  if (private = (struct GRPCService*)calloc(1, sizeof(struct GRPCService) + sizeof(struct GRPCMethod) * descriptor->n_methods))
   {
     private->service.descriptor = descriptor;
     private->service.invoke     = InvokeService;
     private->service.destroy    = DestroyService;
+    private->location           = curl_url();
     private->function           = function;
     private->closure            = closure;
     private->fetch              = fetch;
     private->count              = 1;
+    private->type               = CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE;
 
-    for (index = 0; index < descriptor->n_methods; index ++)
+    if ((private->location == NULL) ||
+        (curl_url_set(private->location, CURLUPART_URL, location, 0) != CURLE_OK))
     {
-      method                  = descriptor->methods + index;
-      private->methods[index] = CreateGRPCMethod(location, NULL, descriptor->name, method->name, token, timeout, resolution);
+      free(private);
+      return NULL;
+    }
+
+    scheme = NULL;
+
+    if ((curl_url_get(private->location, CURLUPART_SCHEME, &scheme, 0) == CURLE_OK) &&
+        (scheme != NULL) &&
+        (strcmp(scheme, "https") == 0))
+    {
+      //
+      private->type = CURL_HTTP_VERSION_2TLS;
+    }
+
+    curl_free(scheme);
+
+    private->headers = curl_slist_append(private->headers, GRPC_HEADER_TRAILERS);
+    private->headers = curl_slist_append(private->headers, GRPC_HEADER_CONTENT_TYPE);
+    private->headers = curl_slist_append(private->headers, GRPC_HEADER_ACCEPT_ENCODING);
+
+    if ((timeout > 0) &&
+        ((resolution == 'n') ||
+         (resolution == 'S')))
+    {
+      snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, GRPC_HEADER_TIMEOUT, timeout, resolution);
+      private->headers    = curl_slist_append(private->headers, buffer);
+      private->timeout    = timeout;
+      private->resolution = resolution;
+    }
+
+    if ((token    != NULL) &&
+        (token[0] != '\0') &&
+        (snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, GRPC_HEADER_AUTHORIZATION, token) > 0))
+    {
+      //
+      private->headers = curl_slist_append(private->headers, buffer);
     }
   }
 
