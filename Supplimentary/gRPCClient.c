@@ -34,14 +34,28 @@ struct GRPCContext
 
 _Static_assert(FETCH_STORAGE_SIZE >= sizeof(struct GRPCContext), "FETCH_STORAGE_SIZE too small for GRPCContext");
 
+static void* ExpandBuffer(struct GRPCBuffer* buffer, size_t size)
+{
+  uint8_t* pointer;
+
+  size    = (size + GRPC_ALLOCATION_GRANULARITY - 1) & ~(GRPC_ALLOCATION_GRANULARITY - 1);
+  pointer = (uint8_t*)realloc(buffer->buffer, size);
+
+  if (pointer != NULL)
+  {
+    buffer->buffer = pointer;
+    buffer->size   = size;
+  }
+
+  return pointer;
+}
+
 static int HandleFrame(struct FetchTransmission* transmission, uint8_t flags, uint8_t* data, size_t length)
 {
   HandleGRPCEventFunction function;
   struct GRPCContext* context;
-  uint8_t* pointer;
   z_stream stream;
   void* closure;
-  size_t size;
   int result;
 
   context  = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
@@ -50,21 +64,11 @@ static int HandleFrame(struct FetchTransmission* transmission, uint8_t flags, ui
 
   if (flags & GRPC_FLAG_COMPRESSED)
   {
-    size = length << 1;
-    size = (size + GRPC_ALLOCATION_GRANULARITY - 1) & ~(GRPC_ALLOCATION_GRANULARITY - 1);
-
-    if (size > context->scratch.size)
+    if ((length > context->scratch.size) &&
+        (ExpandBuffer(&context->scratch, length) == NULL))
     {
-      pointer = (uint8_t*)realloc(context->scratch.buffer, size);
-
-      if (pointer == NULL)
-      {
-        // Allocation error
-        return -1;
-      }
-
-      context->scratch.buffer = pointer;
-      context->scratch.size   = size;
+      // Allocation error
+      return -1;
     }
 
     memset(&stream, 0, sizeof(z_stream));
@@ -82,22 +86,15 @@ static int HandleFrame(struct FetchTransmission* transmission, uint8_t flags, ui
       result                  = inflate(&stream, Z_NO_FLUSH);
       context->scratch.length = (uint8_t*)stream.next_out - context->scratch.buffer;
 
-      if (stream.avail_out == 0)
+      if ((stream.avail_out == 0) &&
+          (ExpandBuffer(&context->scratch, context->scratch.size << 1) == NULL))
       {
-        size    <<= 1;
-        pointer   = (uint8_t*)realloc(context->scratch.buffer, size);
-
-        if (pointer == NULL)
-        {
-          inflateEnd(&stream);
-          return -1;
-        }
-
-        context->scratch.buffer = pointer;
-        context->scratch.size   = size;
-        stream.next_out         = context->scratch.buffer + context->scratch.length;
-        stream.avail_out        = context->scratch.size   - context->scratch.length;
+        inflateEnd(&stream);
+        return -1;
       }
+
+      stream.next_out  = context->scratch.buffer + context->scratch.length;
+      stream.avail_out = context->scratch.size   - context->scratch.length;
     }
 
     inflateEnd(&stream);
@@ -156,19 +153,11 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
   size         *= count;
   length        = context->inbound.length + size;
 
-  if (context->inbound.size < length)
+  if ((context->inbound.size < length) &&
+      (ExpandBuffer(&context->inbound, length) == NULL))
   {
-    length  = (length + GRPC_ALLOCATION_GRANULARITY - 1) & ~(GRPC_ALLOCATION_GRANULARITY - 1);
-    pointer = (uint8_t*)realloc(context->inbound.buffer, length);
-
-    if (pointer == NULL)
-    {
-      // Cannot proceed chunk
-      return CURL_WRITEFUNC_ERROR;
-    }
-
-    context->inbound.buffer = pointer;
-    context->inbound.size   = length;
+    // Cannot proceed chunk
+    return CURL_WRITEFUNC_ERROR;
   }
 
   memcpy(context->inbound.buffer + context->inbound.length, buffer, size);
@@ -196,6 +185,13 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
       memmove(context->inbound.buffer, context->inbound.buffer + length, context->inbound.length - length);
       context->inbound.length -= length;
       continue;
+    }
+
+    if ((context->inbound.size < length) &&
+        (ExpandBuffer(&context->inbound, length) == NULL))
+    {
+      // Cannot proceed frame
+      return CURL_WRITEFUNC_ERROR;
     }
 
     break;
@@ -299,7 +295,8 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
         (curl_url_set(method->location, CURLUPART_URL, location, 0) != CURLE_OK) ||
         (curl_url_set(method->location, CURLUPART_PATH, buffer, 0)  != CURLE_OK))
     {
-      ReleaseGRPCMethod(method);
+      curl_url_cleanup(method->location);
+      free(method);
       return NULL;
     }
 
@@ -524,7 +521,9 @@ struct GRPCCall
 {
   struct GRPCContext context;
 
+  const char* method;
   const ProtobufCMessageDescriptor* descriptor;
+
   ProtobufCClosure function;
   void* closure;
 };
@@ -559,11 +558,12 @@ static int HandleCall(void* closure, struct FetchTransmission* transmission, int
         call->function(NULL, call->closure);
       }
 
-      if ((parameter         != GRPC_STATUS_OK) &&
+      if (((parameter        != GRPC_STATUS_OK) ||
+           (call->function   != NULL))          &&
           (private->function != NULL))
       {
         // Error handler can observe an detailed error state
-        private->function(private->closure, (ProtobufCService*)private, parameter, data);
+        private->function(private->closure, (ProtobufCService*)private, call->method, parameter, data);
       }
 
       private->service.destroy((ProtobufCService*)private);
@@ -620,13 +620,14 @@ static void InvokeService(ProtobufCService* service, unsigned index, const Proto
     if (private->function != NULL)
     {
       // Error handler can observe an detailed error state
-      private->function(private->closure, service, -CURLE_OUT_OF_MEMORY, NULL);
+      private->function(private->closure, service, descriptor2->name, -CURLE_OUT_OF_MEMORY, NULL);
     }
 
     return;
   }
 
   call              = (struct GRPCCall*)GetFetchTransmissionStorage(transmission);
+  call->method      = descriptor2->name;
   call->descriptor  = descriptor2->output;
   call->function    = closure;
   call->closure     = data;
@@ -677,6 +678,7 @@ ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceD
     if ((private->location == NULL) ||
         (curl_url_set(private->location, CURLUPART_URL, location, 0) != CURLE_OK))
     {
+      curl_url_cleanup(private->location);
       free(private);
       return NULL;
     }

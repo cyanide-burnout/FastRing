@@ -15,7 +15,7 @@ extern "C"
 #define GRPCCLIENT_REASON_STATUS  1
 
 typedef int (*HandleGRPCEventFunction)(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length);
-typedef void (*HandleGRPCErrorFunction)(void* closure, ProtobufCService* service, int status, const char* message);
+typedef void (*HandleGRPCErrorFunction)(void* closure, ProtobufCService* service, const char* method, int status, const char* message);
 
 struct GRPCMethod
 {

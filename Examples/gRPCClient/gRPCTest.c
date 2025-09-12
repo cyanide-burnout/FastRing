@@ -42,7 +42,7 @@ int HandleEvent(void* closure, struct FetchTransmission* transmission, int reaso
 
 // Example 2 - Using protobuf-c's service
 
-void HandleError(void* closure, ProtobufCService* service, int status, const char* message)
+void HandleError(void* closure, ProtobufCService* service, const char* method, int status, const char* message)
 {
   printf("Example 2 - status: %d / %s\n", status, message);
 }
