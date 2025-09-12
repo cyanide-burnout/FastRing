@@ -320,7 +320,7 @@ struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, c
     method->headers = curl_slist_append(method->headers, GRPC_HEADER_ACCEPT_ENCODING);
 
     if ((timeout > 0) &&
-        ((resolution == 'n') ||
+        ((resolution == 'm') ||
          (resolution == 'S')))
     {
       snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, GRPC_HEADER_TIMEOUT, timeout, resolution);
@@ -376,8 +376,8 @@ struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* m
 
     switch (method->resolution)
     {
+      case 'm':  curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, method->timeout);  break;
       case 'S':  curl_easy_setopt(easy, CURLOPT_TIMEOUT,    method->timeout);  break;
-      case 'n':  curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, method->timeout);  break;
     }
 
     curl_easy_setopt(easy, CURLOPT_READFUNCTION, HandleRead);
@@ -698,7 +698,7 @@ ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceD
     private->headers = curl_slist_append(private->headers, GRPC_HEADER_ACCEPT_ENCODING);
 
     if ((timeout > 0) &&
-        ((resolution == 'n') ||
+        ((resolution == 'm') ||
          (resolution == 'S')))
     {
       snprintf(buffer, GRPC_STRING_BUFFER_LENGTH, GRPC_HEADER_TIMEOUT, timeout, resolution);

@@ -16,7 +16,7 @@ extern "C"
 #define GRPC_HEADER_AUTHORIZATION    "authorization: Bearer %s"             // Optional
 #define GRPC_TRAILER_STATUS          "grpc-status: "                        // Mandatory, for example: grpc-status: 0 = GRPC_STATUS_OK
 #define GRPC_TRAILER_MESSAGE         "grpc-message: "                       // Optional, for example: grpc-message: permission denied
-#define GRPC_TRAILER_STATUS_DETAILS  "grpc-status-details-bin"              // Optional (google/rpc/status.proto), for example: grpc-status-details-bin: <base64-protobuf>
+#define GRPC_TRAILER_STATUS_DETAILS  "grpc-status-details-bin: "            // Optional (google/rpc/status.proto), for example: grpc-status-details-bin: <base64-protobuf>
 
 #define GRPC_STATUS_OK                   0
 #define GRPC_STATUS_CANCELLED            1
@@ -43,7 +43,6 @@ struct gRPC
   uint8_t flags;    // GRPC_FLAG_*
   uint32_t length;  // Length of data (big endian)
   uint8_t data[0];  // Data of ProtoBuf message
-
 } __attribute__((packed));
 
 #ifdef __cplusplus
