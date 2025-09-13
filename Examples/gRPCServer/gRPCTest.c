@@ -1,0 +1,128 @@
+#include <signal.h>
+#include <string.h>
+#include <malloc.h>
+#include <stdio.h>
+
+#include "ProtoBuf.h"
+#include "FastUVLoop.h"
+#include "gRPCServer.h"
+#include "gRPCTest.pb-c.h"
+
+atomic_int state = { 0 };
+
+static void HandleSignal(int signal)
+{
+  // Interrupt main loop in case of interruption signal
+  atomic_store_explicit(&state, 1, memory_order_relaxed);
+}
+
+static int HandlePageRequest(h2o_handler_t* handler, h2o_req_t* request)
+{
+  if (h2o_memis(request->method.base, request->method.len, H2O_STRLIT("GET")))
+  {
+    request->res.status = 200;
+    request->res.reason = "OK";
+
+    h2o_add_header(&request->pool, &request->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
+    h2o_send_inline(request, H2O_STRLIT("Test\n"));
+
+    return 0;
+  }
+
+  return -1;
+}
+
+static void HandleGRPCRequest(struct GRPCInvocation* invocation, int reason, uint8_t* data, size_t length)
+{
+  ProtobufCAllocator* arena;
+  Demo__EchoRequest* request;
+  Demo__EchoReply reply;
+  char buffer[2048];
+
+  printf("HandleGRPCRequest %s (%d)\n", invocation->descriptor->name, reason);
+
+  switch (reason)
+  {
+    case GRPC_IV_REASON_RECEIVED:
+      arena   = CreateProtoBufArena(4096);
+      request = demo__echo_request__unpack(arena, length, data);
+      sprintf(buffer, "%s: %s", invocation->descriptor->name, request->text);
+      demo__echo_request__free_unpacked(request, arena);
+
+      printf(": %s\n", buffer);
+
+      demo__echo_reply__init(&reply);
+      reply.text = buffer;
+      TransmitGRPCReply(invocation, (ProtobufCMessage*)&reply, 0 * GRPC_FLAG_COMPRESSED, H2O_SEND_STATE_IN_PROGRESS);
+      break;
+
+    case GRPC_IV_REASON_FINISHED:
+      TransmitGRPCReply(invocation, NULL, 0, H2O_SEND_STATE_FINAL);
+      break;
+  }
+}
+
+int main()
+{
+  struct sigaction action;
+
+  struct FastRing* ring;
+  struct FastUVLoop* loop;
+  struct H2OCore* core;
+
+  struct sockaddr_in address;
+
+  action.sa_handler = HandleSignal;
+  action.sa_flags   = SA_NODEFER | SA_RESTART;
+
+  sigemptyset(&action.sa_mask);
+
+  sigaction(SIGHUP,  &action, NULL);
+  sigaction(SIGINT,  &action, NULL);
+  sigaction(SIGTERM, &action, NULL);
+  sigaction(SIGQUIT, &action, NULL);
+
+  uv_ip4_addr("0.0.0.0", 8080, &address);
+
+  struct GRPCDispatch dispatch =
+  {
+    &demo__echoer__descriptor,  // ProtoBuf's service descriptor
+    NULL,                       // Authorize() - don't care about it in demo
+    HandleGRPCRequest,          // Handle()
+    NULL                        // No closure context
+  };
+
+  struct H2ORoute routes[] =
+  {
+    { "/",             0, 0,                              HandlePageRequest,         NULL      },
+    { "/demo.Echoer/", 0, H2OCORE_ROUTE_OPTION_STREAMING, HandleGRPCDispatchRequest, &dispatch },
+    { 0 }
+  };
+
+  printf("Started\n");
+
+  ring = CreateFastRing(0);
+  loop = CreateFastUVLoop(ring);
+  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, NULL, routes, 0);
+
+  TouchFastUVLoop(loop);
+
+  while ((atomic_load_explicit(&state, memory_order_relaxed) == 0) &&
+         (WaitForFastRing(ring, 200, NULL) >= 0));
+
+  StopH2OCore(core);
+
+  while (uv_loop_alive(loop->loop))
+  {
+    // Finalize all handlers first
+    uv_run(loop->loop, UV_RUN_ONCE);
+  }
+
+  ReleaseH2OCore(core);
+  ReleaseFastUVLoop(loop);
+  ReleaseFastRing(ring);
+
+  printf("Stopped\n");
+
+  return 0;
+}

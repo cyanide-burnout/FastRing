@@ -11,7 +11,7 @@ atomic_int state = { 0 };
 static void HandleSignal(int signal)
 {
   // Interrupt main loop in case of interruption signal
-  atomic_store_explicit(&state, 0, memory_order_relaxed);
+  atomic_store_explicit(&state, 16, memory_order_relaxed);
 }
 
 // Example 1 - Direct gRPC handling (suitable for streaming)
@@ -24,7 +24,7 @@ int HandleEvent(void* closure, struct FetchTransmission* transmission, int reaso
   switch (reason)
   {
     case GRPCCLIENT_REASON_FRAME:
-      arena = CreateProtoBufArena(length + 1024);
+      arena = CreateProtoBufArena(4096);
       reply = demo__echo_reply__unpack(arena, length, (uint8_t*)data);
       printf("Example 1 - message: %s\n", reply->text);
       demo__echo_reply__free_unpacked(reply, arena);

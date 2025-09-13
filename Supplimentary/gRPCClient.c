@@ -10,7 +10,7 @@
 
 #define GRPC_STRING_BUFFER_LENGTH    2048
 #define GRPC_ALLOCATION_GRANULARITY  (1 << 12)
-#define GRPC_FRAME_SIZE_LIMIT        (1 << 20)
+#define GRPC_FRAME_SIZE_LIMIT        (1 << 24)
 
 struct GRPCBuffer
 {
@@ -407,6 +407,7 @@ struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size
 
   context = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
   size    = sizeof(struct GRPCFrame) + sizeof(struct gRPC) + length;
+  size    = (size + GRPC_ALLOCATION_GRANULARITY - 1) & ~(GRPC_ALLOCATION_GRANULARITY - 1);
 
   if (context->heap != NULL)
   {
