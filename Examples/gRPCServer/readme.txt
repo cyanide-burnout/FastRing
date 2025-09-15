@@ -6,7 +6,10 @@ git submodule update --init --recursive
 
 * Check service
 
-grpcurl -v -plaintext \
+grpcurl -vv -plaintext \
   -proto gRPCTest.proto -import-path . \
   -d '{"text":"one"}' \
+  -rpc-header "grpc-encoding: gzip" \
+  -rpc-header "grpc-accept-encoding: gzip" \
+  -rpc-header "authorization: Bearer token" \
   10.211.55.9:8080 demo.Echoer/UnaryEcho

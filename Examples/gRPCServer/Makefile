@@ -1,4 +1,4 @@
-LOCAL_LIBH2O_PATH := ../../../h2o
+LOCAL_LIBH2O_PATH ?= ../../../h2o
 
 EXECUTABLE := grpctest
 
@@ -62,7 +62,7 @@ build: $(PREREQUISITES) $(OBJECTS)
 	$(CC) $(OBJECTS) $(FLAGS) $(LIBS) -o $(EXECUTABLE)
 
 clean:
-	rm -f $(EXECUTABLE) $(OBJECTS) $(wildcard $(filter %.d,$(OBJECTS:.o=.d)))
+	rm -f $(EXECUTABLE) $(filter %.o,$(OBJECTS)) $(wildcard $(filter %.d,$(OBJECTS:.o=.d)))
 	find . -name "*.pb-c.?" | xargs rm -f
 
 -include $(wildcard $(filter %.d,$(OBJECTS:.o=.d)))

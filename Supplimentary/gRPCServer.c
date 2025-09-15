@@ -7,8 +7,6 @@
 #include <errno.h>
 #include <zlib.h>
 
-#include <stdio.h>
-
 #include "gRPCServer.h"
 
 static const h2o_iovec_t codes[] =
@@ -184,8 +182,6 @@ static void HandleFrame(struct GRPCInvocation* invocation, uint8_t flags, uint8_
   dispatch->handle(invocation, GRPC_IV_REASON_RECEIVED, data, length);
 }
 
-// H2O bindings
-
 static void HandleStreamChunk(struct GRPCInvocation* invocation, uint8_t* data, size_t length, int final)
 {
   struct GRPCDispatch* dispatch;
@@ -293,7 +289,7 @@ static void HandleStreamChunk(struct GRPCInvocation* invocation, uint8_t* data, 
       if (size > GRPC_FRAME_SIZE_LIMIT)
       {
         HandleError(invocation, GRPC_STATUS_RESOURCE_EXHAUSTED);
-        return;        
+        return;
       }
 
       if ((invocation->inbound.size < size) &&
@@ -310,13 +306,15 @@ static void HandleStreamChunk(struct GRPCInvocation* invocation, uint8_t* data, 
     if (invocation->inbound.length != 0)
     {
       HandleError(invocation, GRPC_STATUS_DATA_LOSS);
-      return;      
+      return;
     }
 
     dispatch = invocation->dispatch;
     dispatch->handle(invocation, GRPC_IV_REASON_FINISHED, NULL, 0);
   }
 }
+
+// H2O bindings
 
 static int HandleStreamWrite(void* context, int final)
 {
@@ -369,8 +367,6 @@ static void HandleGeneratorProceed(h2o_generator_t* generator, h2o_req_t* reques
       h2o_add_header_by_str(&request->pool, storage, H2O_STRLIT("grpc-message"), 0, NULL, invocation->message.base, invocation->message.len);
     }
 
-    printf("HandleGeneratorProceed 367 %p %d %d\n", reply->vector.base, reply->vector.len, reply->state);
-
     h2o_send(request, &reply->vector, 1, reply->state);
   }
 }
@@ -391,7 +387,7 @@ static void HandleRequestDispose(void* pointer)
 {
   struct GRPCInvocation* invocation;
   struct GRPCDispatch* dispatch;
- 
+
   invocation         = *(struct GRPCInvocation**)pointer;
   dispatch           = invocation->dispatch;
   invocation->flags &= ~GRPC_IV_FLAG_ACTIVE;
@@ -438,13 +434,13 @@ int HandleGRPCDispatchRequest(h2o_handler_t* handler, h2o_req_t* request)
 
       if (strcmp(parts[0], dispatch->descriptor->name) == 0)
       {
-        //
+        // Short path: protobuf-c's optimized search
         descriptor = protobuf_c_service_descriptor_get_method_by_name(dispatch->descriptor, parts[1]);
       }
     }
 
     // Initial condition checks
- 
+
     if (descriptor == NULL)
     {
       h2o_add_header_by_str(&request->pool, &request->res.trailers, H2O_STRLIT("grpc-status"), 0, NULL, GRPC_STATUS_CODE(GRPC_STATUS_UNIMPLEMENTED));
@@ -558,7 +554,28 @@ void ReleaseGRPCInvocation(struct GRPCInvocation* invocation)
   }
 }
 
-int TransmitGRPCReply(struct GRPCInvocation* invocation, const ProtobufCMessage* message, uint8_t flags, h2o_send_state_t state)
+int TransmitGRPCPing(struct GRPCInvocation* invocation)
+{
+  struct GRPCReply* reply;
+
+  if ((invocation != NULL) &&
+      (invocation->flags & GRPC_IV_FLAG_ACTIVE))
+  {
+    if (reply = AllocateReply(invocation, sizeof(struct gRPC)))
+    {
+      reply->state = H2O_SEND_STATE_IN_PROGRESS;
+      memset(reply->data, 0, sizeof(struct gRPC));
+      PushReply(invocation, reply);
+      return 0;
+    }
+
+    return -ENOMEM;
+  }
+
+  return -EINVAL;
+}
+
+int TransmitGRPCReply(struct GRPCInvocation* invocation, const ProtobufCMessage* message, uint8_t flags)
 {
   struct GRPCReply* reply;
   struct gRPC* frame;
@@ -567,98 +584,93 @@ int TransmitGRPCReply(struct GRPCInvocation* invocation, const ProtobufCMessage*
   size_t size;
   int result;
 
-  if ((invocation != NULL) &&
+  if ((message    != NULL) &&
+      (invocation != NULL) &&
       (invocation->flags & GRPC_IV_FLAG_ACTIVE))
   {
-    if ((message == NULL) &&
-        (state != H2O_SEND_STATE_IN_PROGRESS) &&
-        (reply  = AllocateReply(invocation, 0)))
-    {
-      reply->vector.len = 0;
-      reply->state      = state;
-      PushReply(invocation, reply);
-      return 0;
-    }
+    length  = protobuf_c_message_get_packed_size(message);
+    flags  &= ~(GRPC_FLAG_COMPRESSED * !(invocation->flags & GRPC_IV_FLAG_OUTPUT_GZIP));
 
-    if ((message != NULL) &&
-        (length   = protobuf_c_message_get_packed_size(message)))
+    if (flags & GRPC_FLAG_COMPRESSED)
     {
-      flags &= ~(GRPC_FLAG_COMPRESSED * !(invocation->flags & GRPC_IV_FLAG_OUTPUT_GZIP));
-
-      if ((flags & GRPC_FLAG_COMPRESSED) &&
-          (size  = compressBound(length)))
+      if ((invocation->scratch.size < length) &&
+          (ExpandBuffer(&invocation->scratch, length) == NULL))
       {
-        if ((invocation->scratch.size < length) &&
-            (ExpandBuffer(&invocation->scratch, length) == NULL))
-        {
-          //
-          return -ENOMEM;
-        }
-
-        if (reply = AllocateReply(invocation, size + sizeof(struct gRPC)))
-        {
-          memset(&stream, 0, sizeof(z_stream));
-
-          if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 31, 8, Z_DEFAULT_STRATEGY) != Z_OK)
-          {
-            free(reply);
-            return -EINVAL;
-          }
-
-          reply->state = state;
-          frame        = (struct gRPC*)reply->vector.base;
-          frame->flags = flags;
-
-          stream.next_in   = invocation->scratch.buffer;
-          stream.avail_in  = protobuf_c_message_pack(message, stream.next_in);
-          stream.next_out  = frame->data;
-          stream.avail_out = reply->vector.len - sizeof(struct gRPC);
-
-          result = deflate(&stream, Z_FINISH);
-
-          frame->length     = htobe32(stream.total_out);
-          reply->vector.len = stream.total_out + sizeof(struct gRPC);
-
-          deflateEnd(&stream);
-
-          if (result != Z_STREAM_END)
-          {
-            free(reply);
-            return -EIO;            
-          }
-
-          PushReply(invocation, reply);
-          return 0;
-        }
-
-        flags &= ~GRPC_FLAG_COMPRESSED;
+        //
+        return -ENOMEM;
       }
 
-      if (reply = AllocateReply(invocation, length + sizeof(struct gRPC)))
+      // Expected size and extra space for gzip's header and trailer
+      size = compressBound(length) + 24;
+
+      if (reply = AllocateReply(invocation, size + sizeof(struct gRPC)))
       {
-        reply->state  = state;
-        frame         = (struct gRPC*)reply->data;
-        frame->flags  = flags;
-        frame->length = htobe32(length);
-        protobuf_c_message_pack(message, frame->data);
+        memset(&stream, 0, sizeof(z_stream));
+
+        if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        {
+          free(reply);
+          return -EINVAL;
+        }
+
+        reply->state = H2O_SEND_STATE_IN_PROGRESS;
+        frame        = (struct gRPC*)reply->data;
+        frame->flags = flags;
+
+        stream.next_in   = invocation->scratch.buffer;
+        stream.avail_in  = protobuf_c_message_pack(message, stream.next_in);
+        stream.next_out  = frame->data;
+        stream.avail_out = size;
+
+        result = deflate(&stream, Z_FINISH);
+
+        frame->length     = htobe32(stream.total_out);
+        reply->vector.len = stream.total_out + sizeof(struct gRPC);
+
+        deflateEnd(&stream);
+
+        if (result != Z_STREAM_END)
+        {
+          free(reply);
+          return -EIO;
+        }
+
         PushReply(invocation, reply);
         return 0;
       }
     }
+
+    flags &= ~GRPC_FLAG_COMPRESSED;
+
+    if (reply = AllocateReply(invocation, length + sizeof(struct gRPC)))
+    {
+      reply->state  = H2O_SEND_STATE_IN_PROGRESS;
+      frame         = (struct gRPC*)reply->data;
+      frame->flags  = flags;
+      frame->length = htobe32(length);
+      protobuf_c_message_pack(message, frame->data);
+      PushReply(invocation, reply);
+      return 0;
+    }
+
+    return -ENOMEM;
   }
 
   return -EINVAL;
 }
 
-void TransmitGRPCError(struct GRPCInvocation* invocation, int status, const char* message)
+int TransmitGRPCStatus(struct GRPCInvocation* invocation, int status, const char* message)
 {
+  struct GRPCReply* reply;
   size_t length;
 
   if ((invocation != NULL) &&
-      (status >= GRPC_STATUS_CANCELLED) &&
+      (status >= GRPC_STATUS_OK) &&
       (status <= GRPC_STATUS_UNAUTHENTICATED) &&
       (invocation->flags & GRPC_IV_FLAG_ACTIVE))
   {
+    invocation->status = status;
+
     if ((message    != NULL) &&
         (message[0] != '\0'))
     {
@@ -666,6 +678,16 @@ void TransmitGRPCError(struct GRPCInvocation* invocation, int status, const char
       MakeH2OPercentEncodedString(&invocation->message, &invocation->request->pool, message, length);
     }
 
-    HandleError(invocation, status);
+    if (reply = AllocateReply(invocation, 0))
+    {
+      reply->vector.len = 0;
+      reply->state      = H2O_SEND_STATE_FINAL;
+      PushReply(invocation, reply);
+      return 0;
+    }
+
+    return -ENOMEM;
   }
+
+  return -EINVAL;
 }

@@ -106,6 +106,40 @@ void ReleaseH2OCore(struct H2OCore* core)
   }
 }
 
+const char* GetH2OHeaderByIndex(const h2o_headers_t* headers, const h2o_token_t* token, size_t* size)
+{
+  ssize_t index;
+  h2o_header_t* header;
+
+  index = h2o_find_header(headers, token, -1);
+
+  if (index >= 0)
+  {
+    header = headers->entries + index;
+    *size  = header->value.len;
+    return (char*)header->value.base;
+  }
+
+  return NULL;
+}
+
+const char* GetH2OHeaderByName(const h2o_headers_t* headers, const char* name, size_t length, size_t* size)
+{
+  ssize_t index;
+  h2o_header_t* header;
+
+  index = h2o_find_header_by_str(headers, name, length, -1);
+
+  if (index >= 0)
+  {
+    header = headers->entries + index;
+    *size  = header->value.len;
+    return (char*)header->value.base;
+  }
+
+  return NULL;
+}
+
 int CompareH2OHeaderByIndex(const h2o_headers_t* headers, const h2o_token_t* token, const void* sample, size_t size)
 {
   ssize_t index;

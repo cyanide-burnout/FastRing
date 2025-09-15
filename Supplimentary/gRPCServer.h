@@ -35,7 +35,7 @@ struct GRPCBuffer
 {
   uint8_t* buffer;
   size_t length;
-  size_t size; 
+  size_t size;
 };
 
 struct GRPCReply
@@ -87,8 +87,9 @@ int HandleGRPCDispatchRequest(h2o_handler_t* handler, h2o_req_t* request);
 void HoldGRPCInvocation(struct GRPCInvocation* invocation);
 void ReleaseGRPCInvocation(struct GRPCInvocation* invocation);
 
-int TransmitGRPCReply(struct GRPCInvocation* invocation, const ProtobufCMessage* message, uint8_t flags, h2o_send_state_t state);
-void TransmitGRPCError(struct GRPCInvocation* invocation, int status, const char* message);
+int TransmitGRPCPing(struct GRPCInvocation* invocation);
+int TransmitGRPCReply(struct GRPCInvocation* invocation, const ProtobufCMessage* message, uint8_t flags);
+int TransmitGRPCStatus(struct GRPCInvocation* invocation, int status, const char* message);
 
 #ifdef __cplusplus
 }

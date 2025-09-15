@@ -32,6 +32,20 @@ static int HandlePageRequest(h2o_handler_t* handler, h2o_req_t* request)
   return -1;
 }
 
+static int AuthorizeGRPCRequest(struct GRPCDispatch* dispatch, const ProtobufCMethodDescriptor* descriptor, h2o_req_t* request)
+{
+  const char* authorization;
+  size_t length;
+
+  if (authorization = GetH2OHeaderByIndex(&request->headers, H2O_TOKEN_AUTHORIZATION, &length))
+  {
+    printf("Authorization: %.*s\n", (int)length, authorization);
+    return GRPC_STATUS_OK;
+  }
+
+  return GRPC_STATUS_PERMISSION_DENIED;
+}
+
 static void HandleGRPCRequest(struct GRPCInvocation* invocation, int reason, uint8_t* data, size_t length)
 {
   ProtobufCAllocator* arena;
@@ -39,25 +53,27 @@ static void HandleGRPCRequest(struct GRPCInvocation* invocation, int reason, uin
   Demo__EchoReply reply;
   char buffer[2048];
 
-  printf("HandleGRPCRequest %s (%d)\n", invocation->descriptor->name, reason);
-
   switch (reason)
   {
+    case GRPC_IV_REASON_CREATED:
+      printf("New requset (HTTP version %x)\n", invocation->request->version);
+      break;
+
     case GRPC_IV_REASON_RECEIVED:
       arena   = CreateProtoBufArena(4096);
       request = demo__echo_request__unpack(arena, length, data);
       sprintf(buffer, "%s: %s", invocation->descriptor->name, request->text);
       demo__echo_request__free_unpacked(request, arena);
 
-      printf(": %s\n", buffer);
+      printf("Prepared response: %s\n", buffer);
 
       demo__echo_reply__init(&reply);
       reply.text = buffer;
-      TransmitGRPCReply(invocation, (ProtobufCMessage*)&reply, 0 * GRPC_FLAG_COMPRESSED, H2O_SEND_STATE_IN_PROGRESS);
+      TransmitGRPCReply(invocation, (ProtobufCMessage*)&reply, GRPC_FLAG_COMPRESSED);
       break;
 
     case GRPC_IV_REASON_FINISHED:
-      TransmitGRPCReply(invocation, NULL, 0, H2O_SEND_STATE_FINAL);
+      TransmitGRPCStatus(invocation, GRPC_STATUS_OK, "Success");
       break;
   }
 }
@@ -87,9 +103,9 @@ int main()
   struct GRPCDispatch dispatch =
   {
     &demo__echoer__descriptor,  // ProtoBuf's service descriptor
-    NULL,                       // Authorize() - don't care about it in demo
-    HandleGRPCRequest,          // Handle()
-    NULL                        // No closure context
+    AuthorizeGRPCRequest,       // Optional
+    HandleGRPCRequest,          // Mandatory
+    NULL                        // Closure context
   };
 
   struct H2ORoute routes[] =
