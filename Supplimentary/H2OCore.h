@@ -5,8 +5,10 @@
 
 #ifndef DUSE_LOCAL_H2O
 #include <h2o.h>
+#include <h2o/http3_server.h>
 #else
 #include "h2o.h"
+#include "h2o/http3_server.h"
 #endif
 
 #ifdef __cplusplus
@@ -16,9 +18,13 @@ extern "C"
 
 #define H2OCORE_ROUTE_CLOSURE(type, handler)  ((type)((struct H2OHandler*)handler)->closure)
 
-#define H2OCORE_ROUTE_OPTION_APLN_BOTH        1
-#define H2OCORE_ROUTE_OPTION_APLN_H2_ONLY     2
-#define H2OCORE_ROUTE_OPTION_APLN_HTTP1_ONLY  3
+#define H2OCORE_STATE_TCP_FAILED  (1 << 0)
+#define H2OCORE_STATE_UDP_FAILED  (1 << 1)
+
+#define H2OCORE_OPTION_APLN_BOTH        1
+#define H2OCORE_OPTION_APLN_H2_ONLY     2
+#define H2OCORE_OPTION_APLN_HTTP1_ONLY  3
+#define H2OCORE_OPTION_H3_SEND_RETRY    (1 << 2)
 
 #define H2OCORE_ROUTE_OPTION_STREAMING  (1 << 0)
 
@@ -39,15 +45,21 @@ struct H2OHandler
 
 struct H2OCore
 {
-  uv_tcp_t server;  // Should be first to make free() work
-  uv_loop_t* loop;
+  uv_tcp_t tcp;
+  uv_udp_t udp;
 
   h2o_globalconf_t global;
   h2o_context_t context;
   h2o_accept_ctx_t accept;
+
+  quicly_context_t quicly;
+  quicly_cid_plaintext_t identifier;
+  h2o_http3_server_ctx_t server;
+
+  int state;
 };
 
-struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, SSL_CTX* context, struct H2ORoute* route, int options);
+struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, SSL_CTX* context1, ptls_context_t* context2, struct H2ORoute* route, int options);
 void StopH2OCore(struct H2OCore* core);
 void ReleaseH2OCore(struct H2OCore* core);
 

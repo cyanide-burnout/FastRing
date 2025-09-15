@@ -1,6 +1,5 @@
 #include <signal.h>
 #include <string.h>
-#include <malloc.h>
 #include <stdio.h>
 
 #include "ProtoBuf.h"
@@ -119,7 +118,7 @@ int main()
 
   ring = CreateFastRing(0);
   loop = CreateFastUVLoop(ring);
-  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, NULL, routes, 0);
+  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, NULL, NULL, routes, 0);
 
   TouchFastUVLoop(loop);
 

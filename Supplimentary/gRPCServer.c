@@ -669,7 +669,8 @@ int TransmitGRPCStatus(struct GRPCInvocation* invocation, int status, const char
       (status <= GRPC_STATUS_UNAUTHENTICATED) &&
       (invocation->flags & GRPC_IV_FLAG_ACTIVE))
   {
-    invocation->status = status;
+    invocation->flags  |= GRPC_IV_FLAG_IGNORING;
+    invocation->status  = status;
 
     if ((message    != NULL) &&
         (message[0] != '\0'))

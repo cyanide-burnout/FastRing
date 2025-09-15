@@ -1,33 +1,54 @@
-#include "H2OCore.h"
+#define _GNU_SOURCE
 
+#include <unistd.h>
 #include <malloc.h>
 #include <bsd/string.h>
 
-static void HandleNewConnection(uv_stream_t* server, int status)
+#include "H2OCore.h"
+
+static uint32_t GenerateMasterID(const ptls_iovec_t* certificate)
 {
-  uv_tcp_t* client;
+  // TODO
+
+  return 1;
+}
+
+static void HandleTCPConnection(uv_stream_t* tcp, int status)
+{
+  uv_tcp_t* connection;
   h2o_socket_t* socket;
   struct H2OCore* core;
 
   if (status == 0)
   {
-    core   = (struct H2OCore*)server->data;
-    client = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
+    core       = (struct H2OCore*)tcp->data;
+    connection = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
 
-    uv_tcp_init(core->loop, client);
+    uv_tcp_init(tcp->loop, connection);
 
-    if (uv_accept(server, (uv_stream_t*)client) == 0)
+    if (uv_accept(tcp, (uv_stream_t*)connection) == 0)
     {
-      socket = h2o_uv_socket_create((uv_handle_t*)client, (uv_close_cb)free);
+      socket = h2o_uv_socket_create((uv_handle_t*)connection, (uv_close_cb)free);
       h2o_accept(&core->accept, socket);
       return;
     }
 
-    uv_close((uv_handle_t*)client, (uv_close_cb)free);
+    uv_close((uv_handle_t*)connection, (uv_close_cb)free);
   }
 }
 
-struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, SSL_CTX* context, struct H2ORoute* route, int options)
+static h2o_quic_conn_t* HandleQUICConnection(h2o_quic_ctx_t* quic, quicly_address_t* destination, quicly_address_t* source, quicly_decoded_packet_t* packet)
+{
+  struct H2OCore* core;
+  h2o_http3_conn_t* connection;
+
+  core       = (struct H2OCore*)((uint8_t*)quic - offsetof(struct H2OCore, server.super));
+  connection = h2o_http3_server_accept(&core->server, destination, source, packet, NULL, &H2O_HTTP3_CONN_CALLBACKS);
+
+  return (h2o_quic_conn_t*)connection;
+}
+
+struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, SSL_CTX* context1, ptls_context_t* context2, struct H2ORoute* route, int options)
 {
   static const h2o_iovec_t both[]       = { H2O_STRLIT("h2"), H2O_STRLIT("http/1.1"), { NULL, 0 } };
   static const h2o_iovec_t h2[]         = { H2O_STRLIT("h2"),                         { NULL, 0 } };
@@ -37,28 +58,31 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
   struct H2OCore* core;
   h2o_hostconf_t* host;
   h2o_pathconf_t* path;
+  h2o_socket_t* socket;
   struct H2OHandler* handler;
 
   if (core = (struct H2OCore*)calloc(1, sizeof(struct H2OCore)))
   {
-    uv_tcp_init(loop, &core->server);
+    // Initialize UV layer
 
-    core->loop        = loop;
-    core->server.data = core;
+    uv_tcp_init(loop, &core->tcp);
+    uv_udp_init(loop, &core->udp);
 
-    if (uv_tcp_nodelay(&core->server, 1)       ||
-        uv_tcp_bind(&core->server, address, 0) ||
-        uv_listen((uv_stream_t*)&core->server, 128, HandleNewConnection))
+    core->tcp.data = core;
+
+    if (uv_tcp_nodelay(&core->tcp, 1)       ||
+        uv_tcp_bind(&core->tcp, address, 0) ||
+        uv_listen((uv_stream_t*)&core->tcp, 128, HandleTCPConnection))
     {
-      uv_close((uv_handle_t*)&core->server, (uv_close_cb)free);
-      return NULL;
+      uv_close((uv_handle_t*)&core->tcp, NULL);
+      core->state |= H2OCORE_STATE_TCP_FAILED;
     }
 
-    if ((context != NULL) &&
+    if ((context1) &&
         (options & 3))
     {
       // Set H2OCORE_ROUTE_OPTION_APLN_*
-      h2o_ssl_register_alpn_protocols(context, protocols[options & 3]);
+      h2o_ssl_register_alpn_protocols(context1, protocols[options & 3]);
     }
 
     h2o_config_init(&core->global);
@@ -81,7 +105,38 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
 
     core->accept.ctx     = &core->context;
     core->accept.hosts   = core->global.hosts;
-    core->accept.ssl_ctx = context;
+    core->accept.ssl_ctx = context1;
+
+    if (context2 != NULL)
+    {
+      if (uv_udp_bind(&core->udp, address, UV_UDP_REUSEADDR))
+      {
+        uv_close((uv_handle_t*)&core->udp, NULL);
+        core->state |= H2OCORE_STATE_UDP_FAILED;
+      }
+
+      socket = h2o_uv_socket_create((uv_handle_t*)&core->udp, NULL);
+
+      memcpy(&core->quicly, &quicly_spec_context, sizeof(quicly_context_t));
+
+      core->identifier.master_id = 1;
+      core->identifier.node_id   = gethostid();
+      core->identifier.thread_id = gettid();
+      core->quicly.tls           = context2;
+
+      if ((context2->certificates.count != 0) &&
+          (context2->certificates.list  == NULL))
+      {
+        //
+        core->identifier.master_id = GenerateMasterID(context2->certificates.list);
+      }
+
+      h2o_http3_server_amend_quicly_context(&core->global, &core->quicly);
+      h2o_http3_server_init_context(&core->context, &core->server.super, loop, socket, &core->quicly, &core->identifier, HandleQUICConnection, NULL, 0);
+
+      core->server.accept_ctx = &core->accept;
+      core->server.send_retry = !!(options & H2OCORE_OPTION_H3_SEND_RETRY);
+    }
   }
 
   return core;
@@ -93,7 +148,7 @@ void StopH2OCore(struct H2OCore* core)
   {
     h2o_context_dispose(&core->context);
     h2o_config_dispose(&core->global);
-    uv_close((uv_handle_t*)&core->server, NULL);
+    uv_close((uv_handle_t*)&core->tcp, NULL);
   }
 }
 
