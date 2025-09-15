@@ -1,89 +1,65 @@
 # FastRing
 
-Event multiplexing library for io_uring
+FastRing is an efficient event multiplexing library built upon `io_uring`, designed to provide high-performance asynchronous I/O operations. It offers a comprehensive set of components for various functionalities, including network communication, buffer management, and integration with popular frameworks.
 
-This is extract of my libraries I am using in my projects https://brandmeister.network and https://tetrapack.online
+## Features
 
-The library solves following problems:
-- Submission/complition multiplexing
-- Submission queue boundary control
-- Events and handlers tracking, submission ordering
-- Emulation of classic poll-based approach including handle watch and timers
+* **FastRing Core:** Provides core functionalities for submission/completion multiplexing using `io_uring`.
+* **FastBuffer:** Implements a fast buffer pool for efficient memory management during I/O operations.
+* **CoRing:** Offers C++ coroutine adaptation for writing asynchronous code in a sequential style.
 
-## FastRing
+## API Description
 
-TBD
+### Core Components
 
-## FastBuffer
+* **Event Multiplexing:**
+    * **Description:** Manages and multiplexes I/O events using `io_uring` for high-throughput asynchronous operations.
+    * **Usage:** Facilitates non-blocking I/O by efficiently handling submission and completion of I/O requests.
 
-Fast buffer pool implementation, specifically designed for use with FastRing.
-See usage examples in FastBIO and FastSocket.
+* **Buffer Management:**
+    * **Description:** Provides `FastBuffer`, a specialized buffer pool for rapid allocation and deallocation of memory buffers, reducing overhead in I/O-intensive applications.
+    * **Usage:** Optimizes data transfer operations by providing pre-allocated and reusable buffers.
 
-## CoRing
+* **Coroutine Adaptation:**
+    * **Description:** `CoRing` integrates C++20 coroutines with `io_uring`, enabling the development of highly concurrent and readable asynchronous code.
+    * **Usage:** Allows developers to write asynchronous code that appears synchronous, improving code clarity and maintainability.
 
-That is a small adapter to use in C++ coroutines with my Compromise library (https://github.com/cyanide-burnout/Compromise)
+### Integration & Utilities
 
-## FastGLoop
+* **FastGLoop:**
+    * **Description:** An adapter for integrating `FastRing` with the Glib 2.0 main loop, allowing seamless interoperability with Glib-based applications.
+    * **Usage:** Enables the use of `FastRing`'s asynchronous capabilities within a Glib event loop environment.
 
-Adapter to incorporate Glib 2.0 main loop into FastRing. It creates green-thread / fiber for GLib by using ucontext.h.
+* **DBusCore:**
+    * **Description:** Provides an adapter for D-BUS integration, facilitating inter-process communication within a `FastRing` context.
+    * **Usage:** Allows applications to send and receive messages over D-BUS using `FastRing`'s asynchronous model.
 
-- *CreateFastGLoop* - creates a new instance of FastGLoop
-- *ReleaseFastGLoop* - destroys FastGLoop
-- *StopFastGLoop* - you optionally can call it before ReleaseFastGLoop when you need to make extra actions before destruction of GMainLoop.
+* **ThreadCall:**
+    * **Description:** A utility for making thread calls, enabling the execution of operations on different threads safely and efficiently.
+    * **Usage:** Simplifies managing multi-threaded operations and synchronizing data between threads.
 
-`struct FastGLoop` provides two attributes for be used in user code:
-- `GMainLoop* loop`
-- `GMainContext* context`
+* **FastSemaphore:**
+    * **Description:** Implements reactive semaphores for synchronization between concurrent operations.
+    * **Usage:** Manages access to shared resources and coordinates the execution of tasks.
 
-## ThreadCall
+* **FastSocket:**
+    * **Description:** A generic socket I/O component providing a unified interface for network communication.
+    * **Usage:** Supports various socket operations, including TCP/IP and UDP, with `io_uring` support.
 
-Make a call to a handler running FastRing from any other thread
+* **FastBIO/SSLSocket:**
+    * **Description:** Provides TLS/BIO over OpenSSL, enabling secure communication channels.
+    * **Usage:** Facilitates encrypted network connections using standard SSL/TLS protocols.
 
-- *CreateThreadCall* - creates a new ThreadCall
-- *HoldThreadCall* - should be used by caller to increment weight (kind of reference counter) to hold the object
-- *ReleaseThreadCall* - decrements weight, releases ThreadCall
-- *FreeThreadCall* - simplified form of ReleaseThreadCall for caller, useful for callbacks
-- *MakeVariadicThreadCall* / *MakeThreadCall* - makes a call
+* **Systemd Watchdog:**
+    * **Description:** Includes implementation for systemd watchdog, ensuring application stability and responsiveness.
+    * **Usage:** Integrates with systemd to signal application liveness, preventing service restarts due to unresponsiveness.
 
-## FastSemaphore
+### Additional Features
 
-Reactive backend for glibc's sem_t
+* **Lua Bindings:** Allows `FastRing` functionalities to be accessed and controlled from Lua scripts.
+* **DNS Resolution:** Provides capabilities for asynchronous DNS queries.
+* **WebSocket Client Library:** Includes a client-side library for establishing and managing WebSocket connections.
+* **CURL Wrapper:** Offers a wrapper for the `libcurl` library, enabling HTTP/HTTPS requests with `io_uring` integration.
 
-- *SubmitFastSemaphoreWait* - registers an asynchronous handler to be called when a token becomes available, replaces sem_wait()
-- *CancelFastSemaphoreWait* - cancels a previously registered asynchronous handler
-- *SubmitFastSemaphorePost* - posts token to the semaphore, can be used instead of sem_post() to avoid a synchronous syscall futex_wake()
-
-*FastSemaphoreFunction* can return 1 to continue receiving tokens or 0 to stop receiving tokens
-
-## FastSocket
-
-Generic socket I/O through FastRing
-
-## FastBIO / SSLSocket
-
-Asynchronous TLS and BIO on top of OpenSSL
-
-## DBusCore
-
-D-BUS adapter for FastRing
-
-## WatchDog
-
-Watchdog implementation for systemd
-
-## LuaPoll
-
-Bindings to liblua / luajit. Please read LuaPoll.txt
-
-## Resolver
-
-Bindings to DNS resolution library C-ARES
-
-## LWSCore
-
-WebSocket client library on top of libwebsockets, it uses main loop integration over Glib 2.0
-
-## Fetch
-
-CURL wrapper with asynchronous fetch using CURL's multi interface.
+For more detailed information, please refer to the source code and examples within the [FastRing GitHub repository](https://github.com/cyanide-burnout/FastRing).
 
