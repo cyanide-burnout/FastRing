@@ -21,12 +21,12 @@ extern "C"
 #define H2OCORE_STATE_TCP_FAILED  (1 << 0)
 #define H2OCORE_STATE_UDP_FAILED  (1 << 1)
 
-#define H2OCORE_OPTION_APLN_BOTH        1
-#define H2OCORE_OPTION_APLN_H2_ONLY     2
-#define H2OCORE_OPTION_APLN_HTTP1_ONLY  3
-#define H2OCORE_OPTION_H3_SEND_RETRY    (1 << 2)
+#define H2OCORE_OPTION_APLN_BOTH         1
+#define H2OCORE_OPTION_APLN_H2_ONLY      2
+#define H2OCORE_OPTION_APLN_HTTP1_ONLY   3
+#define H2OCORE_OPTION_H3_DISABLE_RETRY  (1 << 2)
 
-#define H2OCORE_ROUTE_OPTION_STREAMING  (1 << 0)
+#define H2OCORE_ROUTE_OPTION_STREAMING   (1 << 0)
 
 struct H2ORoute
 {
@@ -46,15 +46,21 @@ struct H2OHandler
 struct H2OCore
 {
   uv_tcp_t tcp;
-  uv_udp_t udp;
+  h2o_socket_t* udp;
 
   h2o_globalconf_t global;
   h2o_context_t context;
   h2o_accept_ctx_t accept;
 
   quicly_context_t quicly;
+  ptls_aead_context_t* encryptor;
+  ptls_aead_context_t* decryptor;
+  ptls_on_client_hello_t handler;
   quicly_cid_plaintext_t identifier;
   h2o_http3_server_ctx_t server;
+
+  uint8_t secret[PTLS_SHA256_DIGEST_SIZE];
+  ptls_aead_context_t* cache[3];
 
   int state;
 };
@@ -62,6 +68,7 @@ struct H2OCore
 struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, SSL_CTX* context1, ptls_context_t* context2, struct H2ORoute* route, int options);
 void StopH2OCore(struct H2OCore* core);
 void ReleaseH2OCore(struct H2OCore* core);
+void UpdateH2OCoreSecurity(struct H2OCore* core, SSL_CTX* context1, ptls_context_t* context2, int options);
 
 const char* GetH2OHeaderByIndex(const h2o_headers_t* headers, const h2o_token_t* token, size_t* size);
 const char* GetH2OHeaderByName(const h2o_headers_t* headers, const char* name, size_t length, size_t* size);

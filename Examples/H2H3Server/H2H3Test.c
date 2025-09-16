@@ -11,16 +11,19 @@ atomic_int state = { 0 };
 static void HandleSignal(int signal)
 {
   // Interrupt main loop in case of interruption signal
-  atomic_store_explicit(&state, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&state, 1, memory_order_relaxed);
 }
 
 static int HandlePageRequest(h2o_handler_t* handler, h2o_req_t* request)
 {
+  printf("HTTP %x request %.*s\n", request->version, (int)request->pathconf->path.len, request->pathconf->path.base);
+
   if (h2o_memis(request->method.base, request->method.len, H2O_STRLIT("GET")))
   {
     request->res.status = 200;
     request->res.reason = "OK";
 
+    h2o_add_header_by_str(&request->pool, &request->res.headers, H2O_STRLIT("alt-svc"), 0, NULL, H2O_STRLIT("h3=\":8443\"; ma=86400"));
     h2o_add_header(&request->pool, &request->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
     h2o_send_inline(request, H2O_STRLIT("Test\n"));
 
@@ -75,22 +78,23 @@ int main()
     return 0;
   }
 
-  bundle = CreatePicoBundleFromFile("bundle.pem");
+  bundle = CreatePicoBundleFromSSLContext(context);
 
   printf("Started\n");
 
   ring = CreateFastRing(0);
   loop = CreateFastUVLoop(ring);
-  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, context, &bundle->context, routes, 0);
+  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, context, (ptls_context_t*)bundle, routes, 0);
 
   TouchFastUVLoop(loop);
 
-  while ((atomic_load_explicit(&state, memory_order_relaxed) == 0) &&
+  while ((atomic_load_explicit(&state, memory_order_relaxed) < 1) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
   StopH2OCore(core);
 
-  while (uv_loop_alive(loop->loop))
+  while ((atomic_load_explicit(&state, memory_order_relaxed) < 2) &&
+         (uv_loop_alive(loop->loop)))
   {
     // Finalize all handlers first
     uv_run(loop->loop, UV_RUN_ONCE);

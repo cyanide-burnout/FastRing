@@ -1,0 +1,27 @@
+diff --git a/lib/common/socket/uv-binding.c.h b/lib/common/socket/uv-binding.c.h
+index e53741f81..5186fbcc9 100644
+--- a/lib/common/socket/uv-binding.c.h
++++ b/lib/common/socket/uv-binding.c.h
+@@ -419,11 +419,19 @@ h2o_socket_t *h2o_socket_connect(h2o_loop_t *loop, struct sockaddr *addr, sockle
+ socklen_t get_sockname_uncached(h2o_socket_t *_sock, struct sockaddr *sa)
+ {
+     struct st_h2o_uv_socket_t *sock = (void *)_sock;
+-    assert(sock->handle->type == UV_TCP);
++    assert((sock->handle->type == UV_TCP) || (sock->handle->type == UV_POLL));
+ 
+     int len = sizeof(struct sockaddr_storage);
+-    if (uv_tcp_getsockname((void *)sock->handle, sa, &len) != 0)
+-        return 0;
++    if (sock->handle->type == UV_TCP) {
++        if (uv_tcp_getsockname((void *)sock->handle, sa, &len) != 0) return 0;
++        return (socklen_t)len;
++    } else { /* UV_POLL */
++        uv_os_fd_t osfd;
++        if (uv_fileno(sock->handle, &osfd) != 0) return 0;
++        socklen_t slen = (socklen_t)len;
++        if (getsockname((int)osfd, sa, &slen) != 0) return 0;
++        return slen;
++    }
+     return (socklen_t)len;
+ }
+ 

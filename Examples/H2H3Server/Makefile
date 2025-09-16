@@ -16,7 +16,9 @@ DEPENDENCIES := \
 	jemalloc \
 	libuv \
 	zlib \
-	openssl
+	openssl \
+	libbrotlienc \
+	libbrotlidec
 
 OBJECTS := \
 	../../Ring/FastRing.o \
@@ -60,7 +62,7 @@ bundle.pem:
 
 $(LOCAL_LIBH2O_PATH)/build/libh2o.a:
 	mkdir -p $(LOCAL_LIBH2O_PATH)/build
-	cmake -S $(LOCAL_LIBH2O_PATH) -B $(LOCAL_LIBH2O_PATH)/build -D CMAKE_VERBOSE_MAKEFILE:BOOL=ON -D CMAKE_BUILD_TYPE=Release -D WITH_LIBUV=ON -D WITH_MRUBY=OFF
+	cmake -S $(LOCAL_LIBH2O_PATH) -B $(LOCAL_LIBH2O_PATH)/build -D CMAKE_VERBOSE_MAKEFILE:BOOL=ON -D CMAKE_BUILD_TYPE=Release -D WITH_LIBUV=ON -D WITH_MRUBY=OFF -D WITH_H2OLOG=ON
 	+make -C $(LOCAL_LIBH2O_PATH)/build
 
 build: $(PREREQUISITES) $(OBJECTS)
