@@ -63,8 +63,6 @@ struct PicoBundle* CreatePicoBundleFromSSLContext(SSL_CTX* context)
     bundle->handler.cb                = HandleReferenceCountUpdate;
 
     atomic_store_explicit(&bundle->count, 1, memory_order_release);
-
-    printf("certificates %d\n", bundle->context.certificates.count);
   }
 
   return bundle;
@@ -83,8 +81,15 @@ void ReleasePicoBundle(struct PicoBundle* bundle)
   {
     ptls_openssl_dispose_sign_certificate(&bundle->signer);
     ptls_dispose_compressed_certificate(&bundle->emitter);
-    // FreeCertificateChain(&bundle->context);
     EVP_PKEY_free(bundle->key);
+
+    while (bundle->context.certificates.count != 0)
+    {
+      // No built-in method found to free certificates
+      free(bundle->context.certificates.list[-- bundle->context.certificates.count].base);
+    }
+
+    free(bundle->context.certificates.list);
     free(bundle);
   }
 }
