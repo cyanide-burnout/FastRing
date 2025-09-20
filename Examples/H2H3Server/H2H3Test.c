@@ -84,7 +84,7 @@ int main()
 
   ring = CreateFastRing(0);
   loop = CreateFastUVLoop(ring);
-  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, context, (ptls_context_t*)bundle, routes, H2OCORE_OPTION_H3_ENABLE_RETRY);
+  core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, context, (ptls_context_t*)bundle, routes, 0);
 
   TouchFastUVLoop(loop);
 

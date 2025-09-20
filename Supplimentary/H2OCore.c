@@ -10,17 +10,15 @@
 
 // Helpers
 
-#define H2OCORE_QUIC_TOKEN_PREFIX  0
-#define H2OCORE_QUIC_SCID_LENGTH   16
-
 static void TransmitQUICToken(struct H2OCore* core, quicly_address_t* destination, quicly_address_t* source, quicly_decoded_packet_t* packet)
 {
   uint8_t prefix;
+  uint32_t length;
   struct iovec vector;
+  quicly_cid_t identifier;
   ptls_aead_context_t** cache;
-  uint8_t identifier[H2OCORE_QUIC_SCID_LENGTH];
 
-  ptls_openssl_random_bytes(identifier, H2OCORE_QUIC_SCID_LENGTH);
+  core->quicly.cid_encryptor->encrypt_cid(core->quicly.cid_encryptor, &identifier, NULL, &core->identifier);
 
   switch (packet->version)
   {
@@ -30,12 +28,10 @@ static void TransmitQUICToken(struct H2OCore* core, quicly_address_t* destinatio
     default:                               cache = NULL;             break;
   }
 
-  core->server.super.quic_stats->packet_processed += (core->server.super.quic_stats != NULL);
-
-  prefix          = H2OCORE_QUIC_TOKEN_PREFIX;
+  prefix          = 0;
   vector.iov_base = (uint8_t*)alloca(QUICLY_MIN_CLIENT_INITIAL_SIZE);
   vector.iov_len  = quicly_send_retry(core->server.super.quic, core->encryptor, packet->version,
-    &source->sa, packet->cid.src, &destination->sa, ptls_iovec_init(identifier, H2OCORE_QUIC_SCID_LENGTH),
+    &source->sa, packet->cid.src, &destination->sa, ptls_iovec_init(identifier.cid, identifier.len),
     packet->cid.dest.encrypted, ptls_iovec_init(&prefix, 1), ptls_iovec_init(NULL, 0), cache, vector.iov_base);
 
   h2o_quic_send_datagrams(&core->server.super, source, destination, &vector, 1);
@@ -92,8 +88,6 @@ static h2o_quic_conn_t* HandleQUICConnection(h2o_quic_ctx_t* quic, quicly_addres
     token = NULL;
   }
 
-  printf("quicly_decrypt_address_token token=%p error=%s\n", token, error);
-
   if ((core->server.send_retry) &&
       ((token       == NULL)    ||
        (token->type != QUICLY_ADDRESS_TOKEN_TYPE_RETRY)))
@@ -104,12 +98,15 @@ static h2o_quic_conn_t* HandleQUICConnection(h2o_quic_ctx_t* quic, quicly_addres
 
   connection = h2o_http3_server_accept(&core->server, destination, source, packet, token, &H2O_HTTP3_CONN_CALLBACKS);
 
-  printf("h2o_http3_server_accept token=%p connection=%p\n", token, connection);
-
   if ((connection         != NULL) &&
+      (connection         != &h2o_http3_accept_conn_closed) &&
       (&connection->super != &h2o_quic_accept_conn_decryption_failed))
   {
-    //
+    /* cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="-DQUICLY_USE_TRACER=1" ..
+    struct _st_quicly_conn_public_t* public = (struct _st_quicly_conn_public_t*)connection->super.quic;
+    public->tracer.cb  = (quicly_trace_cb)fprintf;
+    public->tracer.ctx = stderr;
+    */
     return &connection->super;
   }
 
@@ -234,12 +231,11 @@ void ReleaseH2OCore(struct H2OCore* core)
   if (core != NULL)
   {
     quicly_free_default_cid_encryptor(core->quicly.cid_encryptor);
-    ptls_aead_free(core->cache[0]);
-    ptls_aead_free(core->encryptor);
-    ptls_aead_free(core->decryptor);
-    ptls_aead_free(core->cache[0]);
-    ptls_aead_free(core->cache[1]);
-    ptls_aead_free(core->cache[2]);
+    if (core->encryptor != NULL)  ptls_aead_free(core->encryptor);
+    if (core->decryptor != NULL)  ptls_aead_free(core->decryptor);
+    if (core->cache[0]  != NULL)  ptls_aead_free(core->cache[0]);
+    if (core->cache[1]  != NULL)  ptls_aead_free(core->cache[1]);
+    if (core->cache[2]  != NULL)  ptls_aead_free(core->cache[2]);
     free(core);
   }
 }
