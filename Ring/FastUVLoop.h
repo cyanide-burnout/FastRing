@@ -18,9 +18,10 @@ struct FastUVLoop
   struct FastRingDescriptor* poll;
   struct FastRingDescriptor* timeout;
   uv_loop_t context;
+  int interval;
 };
 
-struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring);
+struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring, int interval);
 void ReleaseFastUVLoop(struct FastUVLoop* loop);
 void TouchFastUVLoop(struct FastUVLoop* loop);
 

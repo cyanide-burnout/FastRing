@@ -42,13 +42,22 @@ static void HandleFlushEvent(void* closure, int reason)
     uv_update_time(loop->loop);
     uv_run(loop->loop, UV_RUN_NOWAIT);
 
-    timeout       = uv_backend_timeout(loop->loop);
+    timeout = uv_backend_timeout(loop->loop);
+
+    if ((loop->interval > 0) &&
+        ((timeout < 0) ||
+         (timeout > loop->interval)))
+    {
+      //
+      timeout = loop->interval;
+    }
+
     loop->timeout = SetFastRingTimeout(loop->ring, loop->timeout, timeout, 0, HandleTimeoutEvent, loop);
     loop->flush   = NULL;
   }
 }
 
-struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring)
+struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring, int interval)
 {
   struct FastRingDescriptor* descriptor;
   struct FastUVLoop* loop;
@@ -58,17 +67,20 @@ struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring)
   {
     uv_loop_init(&loop->context);
 
-    handle     = uv_backend_fd(&loop->context);
-    descriptor = AllocateFastRingDescriptor(ring, HandlePollCompletion, loop);
-    loop->ring = ring;
-    loop->poll = descriptor;
-    loop->loop = &loop->context;
+    handle         = uv_backend_fd(&loop->context);
+    descriptor     = AllocateFastRingDescriptor(ring, HandlePollCompletion, loop);
+    loop->ring     = ring;
+    loop->poll     = descriptor;
+    loop->loop     = &loop->context;
+    loop->interval = interval;
 
     if (descriptor != NULL)
     {
       io_uring_prep_poll_add(&descriptor->submission, handle, POLLIN);
       SubmitFastRingDescriptor(descriptor, 0);
     }
+
+    TouchFastUVLoop(loop);
   }
 
   return loop;

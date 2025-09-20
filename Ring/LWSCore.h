@@ -29,9 +29,9 @@
 #define LWSLoop       FastGLoop
 #define TouchLWSLoop  TouchFastGLoop
 
-#define CreateLWSLoop(ring)  CreateFastGLoop(ring, 200)
-#define ReleaseLWSLoop       ReleaseFastGLoop
-#define StopLWSLoop          StopFastGLoop
+#define CreateLWSLoop   CreateFastGLoop
+#define ReleaseLWSLoop  ReleaseFastGLoop
+#define StopLWSLoop     StopFastGLoop
 
 #endif
 

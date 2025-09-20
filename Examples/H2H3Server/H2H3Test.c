@@ -83,10 +83,8 @@ int main()
   printf("Started\n");
 
   ring = CreateFastRing(0);
-  loop = CreateFastUVLoop(ring);
+  loop = CreateFastUVLoop(ring, 200);
   core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, context, (ptls_context_t*)bundle, routes, 0);
-
-  TouchFastUVLoop(loop);
 
   while ((atomic_load_explicit(&state, memory_order_relaxed) < 1) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
