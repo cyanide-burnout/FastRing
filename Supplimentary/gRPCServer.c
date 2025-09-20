@@ -498,8 +498,8 @@ int HandleGRPCDispatchRequest(h2o_handler_t* handler, h2o_req_t* request)
     {
       // See h2o_handler_t::supports_request_streaming for details
 
-      request->write_req.ctx  = invocation;
-      request->write_req.cb   = HandleStreamWrite;
+      request->write_req.ctx = invocation;
+      request->write_req.cb  = HandleStreamWrite;
 
       HandleStreamChunk(invocation, request->entity.base, request->entity.len, 0);
 

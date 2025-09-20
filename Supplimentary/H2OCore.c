@@ -188,8 +188,6 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
         core->state |= H2OCORE_STATE_UDP_FAILED;
       }
 
-      context2->on_client_hello = &core->handler;
-
       ptls_openssl_random_bytes(core->secret, PTLS_SHA256_DIGEST_SIZE);
 
       core->encryptor = ptls_aead_new(ptls_openssl_cipher_suites[0]->aead, ptls_openssl_cipher_suites[0]->hash, 1, core->secret, NULL);
@@ -209,6 +207,8 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
 
       core->server.accept_ctx = &core->accept;
       core->server.send_retry = !!(options & H2OCORE_OPTION_H3_ENABLE_RETRY);
+
+      context2->on_client_hello = &core->handler;
     }
   }
 

@@ -39,6 +39,7 @@ static void HandleFlushEvent(void* closure, int reason)
   {
     loop = (struct FastUVLoop*)closure;
 
+    uv_update_time(loop->loop);
     uv_run(loop->loop, UV_RUN_NOWAIT);
 
     timeout       = uv_backend_timeout(loop->loop);
