@@ -53,15 +53,15 @@ struct H2OCore
   h2o_accept_ctx_t accept;
 
   quicly_context_t quicly;
+  ptls_aead_context_t* cache[3];
   ptls_aead_context_t* encryptor;
   ptls_aead_context_t* decryptor;
   ptls_on_client_hello_t handler;
   quicly_cid_plaintext_t identifier;
+
   h2o_http3_server_ctx_t server;
 
   uint8_t secret[PTLS_SHA256_DIGEST_SIZE];
-  ptls_aead_context_t* cache[3];
-
   int state;
 };
 
