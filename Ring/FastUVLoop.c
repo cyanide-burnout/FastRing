@@ -118,3 +118,35 @@ void TouchFastUVLoop(struct FastUVLoop* loop)
     loop->flush = SetFastRingFlushHandler(loop->ring, HandleFlushEvent, loop);
   }
 }
+
+static void HandleWalk(uv_handle_t* handle, void* argument)
+{
+  if (!uv_is_closing(handle) &&
+      ((*(uint64_t*)argument) & (1ULL << handle->type)))
+  {
+    // Remove handle from the queue
+    uv_unref(handle);
+  }
+}
+
+void StopFastUVLoop(struct FastUVLoop* loop, uint64_t timeout, uint64_t force)
+{
+  if (loop != NULL)
+  {
+    if (force != 0ULL)
+    {
+      // Kick everything that might stuck
+      uv_walk(loop->loop, HandleWalk, &force);
+    }
+
+    uv_update_time(loop->loop);
+    timeout += uv_now(loop->loop);
+
+    while ((uv_loop_alive(loop->loop)) &&
+           (timeout > uv_now(loop->loop)))
+    {
+      // Finalize everything that might be alive
+      uv_run(loop->loop, UV_RUN_NOWAIT);
+    }
+  }
+}

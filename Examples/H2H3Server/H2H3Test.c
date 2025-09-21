@@ -90,13 +90,7 @@ int main()
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
   StopH2OCore(core);
-
-  while ((atomic_load_explicit(&state, memory_order_relaxed) < 2) &&
-         (uv_loop_alive(loop->loop)))
-  {
-    // Finalize all handlers first
-    uv_run(loop->loop, UV_RUN_NOWAIT);
-  }
+  StopFastUVLoop(loop, 2000, 1ULL << UV_TIMER);
 
   ReleaseH2OCore(core);
   ReleaseFastUVLoop(loop);
