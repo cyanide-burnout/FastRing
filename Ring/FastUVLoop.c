@@ -129,24 +129,39 @@ static void HandleWalk(uv_handle_t* handle, void* argument)
   }
 }
 
-void StopFastUVLoop(struct FastUVLoop* loop, uint64_t timeout, uint64_t force)
+void StopFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick)
 {
+  int64_t limit;
+  int64_t remain;
+  struct pollfd event;
+
   if (loop != NULL)
   {
-    if (force != 0ULL)
+    if (kick != 0ULL)
     {
       // Kick everything that might stuck
-      uv_walk(loop->loop, HandleWalk, &force);
+      uv_walk(loop->loop, HandleWalk, &kick);
     }
 
     uv_update_time(loop->loop);
-    timeout += uv_now(loop->loop);
 
-    while ((uv_loop_alive(loop->loop)) &&
-           (timeout > uv_now(loop->loop)))
+    limit        = uv_now(loop->loop) + (int64_t)timeout;
+    event.fd     = uv_backend_fd(loop->loop);
+    event.events = POLLIN;
+
+    while ((uv_run(loop->loop, UV_RUN_NOWAIT)) &&
+           ((remain = limit - (int64_t)uv_now(loop->loop)) > 0))
     {
-      // Finalize everything that might be alive
-      uv_run(loop->loop, UV_RUN_NOWAIT);
+      timeout = uv_backend_timeout(loop->loop);
+
+      if ((timeout < 0) ||
+          (timeout > remain))
+      {
+        //
+        timeout = remain;
+      }
+
+      poll(&event, 1, timeout);
     }
   }
 }

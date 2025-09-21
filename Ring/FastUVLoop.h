@@ -24,7 +24,7 @@ struct FastUVLoop
 struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring, int interval);
 void ReleaseFastUVLoop(struct FastUVLoop* loop);
 void TouchFastUVLoop(struct FastUVLoop* loop);
-void StopFastUVLoop(struct FastUVLoop* loop, uint64_t timeout, uint64_t force);
+void StopFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick);
 
 #ifdef __cplusplus
 }
