@@ -120,15 +120,16 @@ int main()
   loop = CreateFastUVLoop(ring, 200);
   core = CreateH2OCore(loop->loop, (struct sockaddr*)&address, NULL, NULL, routes, 0);
 
-  while ((atomic_load_explicit(&state, memory_order_relaxed) == 0) &&
+  while ((atomic_load_explicit(&state, memory_order_relaxed) < 1) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
   StopH2OCore(core);
 
-  while (uv_loop_alive(loop->loop))
+  while ((atomic_load_explicit(&state, memory_order_relaxed) < 2) &&
+         (uv_loop_alive(loop->loop)))
   {
     // Finalize all handlers first
-    uv_run(loop->loop, UV_RUN_ONCE);
+    uv_run(loop->loop, UV_RUN_NOWAIT);
   }
 
   ReleaseH2OCore(core);

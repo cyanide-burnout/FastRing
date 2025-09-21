@@ -95,7 +95,7 @@ int main()
          (uv_loop_alive(loop->loop)))
   {
     // Finalize all handlers first
-    uv_run(loop->loop, UV_RUN_ONCE);
+    uv_run(loop->loop, UV_RUN_NOWAIT);
   }
 
   ReleaseH2OCore(core);

@@ -44,7 +44,7 @@
 
 #define CreateLWSLoop      CreateFastUVLoop
 #define ReleaseLWSLoop     ReleaseFastUVLoop
-#define StopLWSLoop(loop)  
+#define StopLWSLoop(loop)
 
 #endif
 

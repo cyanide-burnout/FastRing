@@ -58,10 +58,9 @@ struct H2OCore
   ptls_aead_context_t* decryptor;
   ptls_on_client_hello_t handler;
   quicly_cid_plaintext_t identifier;
-
   h2o_http3_server_ctx_t server;
 
-  uint8_t secret[PTLS_SHA256_DIGEST_SIZE];
+  uint8_t secret[PTLS_MAX_SECRET_SIZE];
   int state;
 };
 

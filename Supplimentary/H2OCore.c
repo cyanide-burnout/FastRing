@@ -188,10 +188,7 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
         core->state |= H2OCORE_STATE_UDP_FAILED;
       }
 
-      ptls_openssl_random_bytes(core->secret, PTLS_SHA256_DIGEST_SIZE);
-
-      core->encryptor = ptls_aead_new(ptls_openssl_cipher_suites[0]->aead, ptls_openssl_cipher_suites[0]->hash, 1, core->secret, NULL);
-      core->decryptor = ptls_aead_new(ptls_openssl_cipher_suites[0]->aead, ptls_openssl_cipher_suites[0]->hash, 0, core->secret, NULL);
+      ptls_openssl_random_bytes(core->secret, PTLS_MAX_SECRET_SIZE);
 
       core->udp                  = h2o_uv__poll_create(loop, handle, HandleClose);
       core->quicly               = quicly_spec_context;
@@ -205,10 +202,14 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
       h2o_http3_server_amend_quicly_context(&core->global, &core->quicly);
       h2o_http3_server_init_context(&core->context, &core->server.super, loop, core->udp, &core->quicly, &core->identifier, HandleQUICConnection, NULL, 0);
 
-      core->server.accept_ctx = &core->accept;
-      core->server.send_retry = !!(options & H2OCORE_OPTION_H3_ENABLE_RETRY);
-
       context2->on_client_hello = &core->handler;
+      core->server.accept_ctx   = &core->accept;
+
+      if (core->server.send_retry = !!(options & H2OCORE_OPTION_H3_ENABLE_RETRY))
+      {
+        core->encryptor = ptls_aead_new(ptls_openssl_cipher_suites[0]->aead, ptls_openssl_cipher_suites[0]->hash, 1, core->secret, NULL);
+        core->decryptor = ptls_aead_new(ptls_openssl_cipher_suites[0]->aead, ptls_openssl_cipher_suites[0]->hash, 0, core->secret, NULL);
+      }
     }
   }
 
@@ -219,10 +220,11 @@ void StopH2OCore(struct H2OCore* core)
 {
   if (core != NULL)
   {
+    if (core->udp               != NULL)  h2o_quic_dispose_context(&core->server.super);
+    if (core->tcp.io_watcher.fd != -1)    uv_close((uv_handle_t*)&core->tcp, NULL);
+
     h2o_context_dispose(&core->context);
     h2o_config_dispose(&core->global);
-    uv_close((uv_handle_t*)&core->tcp, NULL);
-    h2o_socket_close(core->udp);
   }
 }
 
@@ -230,12 +232,12 @@ void ReleaseH2OCore(struct H2OCore* core)
 {
   if (core != NULL)
   {
-    quicly_free_default_cid_encryptor(core->quicly.cid_encryptor);
-    if (core->encryptor != NULL)  ptls_aead_free(core->encryptor);
-    if (core->decryptor != NULL)  ptls_aead_free(core->decryptor);
-    if (core->cache[0]  != NULL)  ptls_aead_free(core->cache[0]);
-    if (core->cache[1]  != NULL)  ptls_aead_free(core->cache[1]);
-    if (core->cache[2]  != NULL)  ptls_aead_free(core->cache[2]);
+    if (core->quicly.cid_encryptor != NULL)  quicly_free_default_cid_encryptor(core->quicly.cid_encryptor);
+    if (core->encryptor            != NULL)  ptls_aead_free(core->encryptor);
+    if (core->decryptor            != NULL)  ptls_aead_free(core->decryptor);
+    if (core->cache[0]             != NULL)  ptls_aead_free(core->cache[0]);
+    if (core->cache[1]             != NULL)  ptls_aead_free(core->cache[1]);
+    if (core->cache[2]             != NULL)  ptls_aead_free(core->cache[2]);
     free(core);
   }
 }
