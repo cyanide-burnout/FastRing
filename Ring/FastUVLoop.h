@@ -13,6 +13,8 @@ extern "C"
 #define UVLOOP_KICK_UNREF(type)  (1ULL << type)
 #define UVLOOP_KICK_POKE_TIMER   (1ULL << 60)
 
+typedef int (*CheckUVLoopDepletion)(void* closure);
+
 struct FastUVLoop
 {
   uv_loop_t* loop;
@@ -27,7 +29,7 @@ struct FastUVLoop
 struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring, int interval);
 void ReleaseFastUVLoop(struct FastUVLoop* loop);
 void TouchFastUVLoop(struct FastUVLoop* loop);
-void StopFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick);
+void DepleteFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick, CheckUVLoopDepletion function, void* closure);
 
 #ifdef __cplusplus
 }

@@ -124,7 +124,7 @@ int main()
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
   StopH2OCore(core);
-  StopFastUVLoop(loop, 2000, 0);
+  DepleteFastUVLoop(loop, 2000, 0, NULL, NULL);
 
   ReleaseH2OCore(core);
   ReleaseFastUVLoop(loop);

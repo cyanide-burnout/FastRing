@@ -92,7 +92,7 @@ int main()
   printf("Shutting down...\n");
 
   StopH2OCore(core);
-  StopFastUVLoop(loop, 2000, 0);
+  DepleteFastUVLoop(loop, 2000, 0, NULL, NULL);
 
   ReleaseH2OCore(core);
   ReleaseFastUVLoop(loop);

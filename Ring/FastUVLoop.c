@@ -143,7 +143,7 @@ static void HandleWalk(uv_handle_t* handle, void* argument)
   }
 }
 
-void StopFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick)
+void DepleteFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick, CheckUVLoopDepletion function, void* closure)
 {
   int64_t limit;
   int64_t remain;
@@ -164,6 +164,8 @@ void StopFastUVLoop(struct FastUVLoop* loop, int timeout, uint64_t kick)
     event.events = POLLIN;
 
     while ((uv_run(loop->loop, UV_RUN_NOWAIT)) &&
+           ((function == NULL)   ||
+            (function(closure))) &&
            ((remain = limit - (int64_t)uv_now(loop->loop)) > 0))
     {
       timeout = uv_backend_timeout(loop->loop);
