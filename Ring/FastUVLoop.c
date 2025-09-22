@@ -121,11 +121,25 @@ void TouchFastUVLoop(struct FastUVLoop* loop)
 
 static void HandleWalk(uv_handle_t* handle, void* argument)
 {
-  if (!uv_is_closing(handle) &&
-      ((*(uint64_t*)argument) & (1ULL << handle->type)))
+  uv_timer_t* timer;
+
+  if ((handle->type == UV_TIMER)                        &&
+      ((*(uint64_t*)argument) & UVLOOP_KICK_POKE_TIMER) &&
+      (!uv_is_closing(handle))                          &&
+      (uv_is_active(handle))                            &&
+      (uv_timer_get_repeat(timer = (uv_timer_t*)handle) == 0ULL))
   {
-    // Remove handle from the queue
+    uv_timer_set_repeat(timer, 1);
+    uv_timer_again(timer);
+    uv_timer_set_repeat(timer, 0);
+    return;
+  }
+
+  if (((*(uint64_t*)argument) & UVLOOP_KICK_UNREF(handle->type)) &&
+      (!uv_is_closing(handle)))
+  {
     uv_unref(handle);
+    return;
   }
 }
 

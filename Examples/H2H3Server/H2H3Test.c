@@ -89,8 +89,10 @@ int main()
   while ((atomic_load_explicit(&state, memory_order_relaxed) < 1) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
+  printf("Shutting down...\n");
+
   StopH2OCore(core);
-  StopFastUVLoop(loop, 2000, 1ULL << UV_TIMER);
+  StopFastUVLoop(loop, 2000, 0);
 
   ReleaseH2OCore(core);
   ReleaseFastUVLoop(loop);

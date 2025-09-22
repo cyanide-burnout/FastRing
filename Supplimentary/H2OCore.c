@@ -220,6 +220,8 @@ void StopH2OCore(struct H2OCore* core)
 {
   if (core != NULL)
   {
+    h2o_context_request_shutdown(&core->context);
+
     if (core->udp               != NULL)  h2o_quic_dispose_context(&core->server.super);
     if (core->tcp.io_watcher.fd != -1)    uv_close((uv_handle_t*)&core->tcp, NULL);
 

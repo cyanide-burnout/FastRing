@@ -10,6 +10,9 @@ extern "C"
 {
 #endif
 
+#define UVLOOP_KICK_UNREF(type)  (1ULL << type)
+#define UVLOOP_KICK_POKE_TIMER   (1ULL << 60)
+
 struct FastUVLoop
 {
   uv_loop_t* loop;
