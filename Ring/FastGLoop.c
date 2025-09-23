@@ -257,26 +257,38 @@ struct FastGLoop* CreateFastGLoop(struct FastRing* ring, int interval)
   struct rlimit limit;
   GSource* source;
 
-  loop = (struct FastGLoop*)calloc(1, sizeof(struct FastGLoop));
+  if (loop = (struct FastGLoop*)calloc(1, sizeof(struct FastGLoop)))
+  {
+    getrlimit(RLIMIT_STACK, &limit);
+    getcontext(loop->fibers + FIBER_MAIN);
+    getcontext(loop->fibers + FIBER_LOOP);
+    loop->fibers[FIBER_LOOP].uc_stack.ss_sp   = malloc(limit.rlim_cur);
+    loop->fibers[FIBER_LOOP].uc_stack.ss_size = limit.rlim_cur;
 
-  getrlimit(RLIMIT_STACK, &limit);
-  getcontext(loop->fibers + FIBER_MAIN);
-  getcontext(loop->fibers + FIBER_LOOP);
-  loop->fibers[FIBER_LOOP].uc_stack.ss_sp   = malloc(limit.rlim_cur);
-  loop->fibers[FIBER_LOOP].uc_stack.ss_size = limit.rlim_cur;
-  makecontext(loop->fibers + FIBER_LOOP, RunLoop, 0);
+    if (loop->fibers[FIBER_LOOP].uc_stack.ss_sp == NULL)
+    {
+      free(loop);
+      return NULL;
+    }
 
-  loop->ring    = ring;
-  loop->context = g_main_context_new();
-  loop->loop    = g_main_loop_new(loop->context, TRUE);
-  g_main_context_set_poll_func(loop->context, HandlePoll);
+    makecontext(loop->fibers + FIBER_LOOP, RunLoop, 0);
 
-  source = g_timeout_source_new(interval);
-  g_source_set_callback(source, HandleTimeout, NULL, NULL);
-  g_source_attach(source, loop->context);
+    loop->ring    = ring;
+    loop->context = g_main_context_new();
+    loop->loop    = g_main_loop_new(loop->context, TRUE);
+    g_main_context_set_poll_func(loop->context, HandlePoll);
 
-  JumpToLoop(loop);
-  HandleRequest(loop);
+    if (interval > 0)
+    {
+      source = g_timeout_source_new(interval);
+      g_source_set_callback(source, HandleTimeout, NULL, NULL);
+      g_source_attach(source, loop->context);
+      g_source_unref(source);
+    }
+
+    JumpToLoop(loop);
+    HandleRequest(loop);
+  }
 
   return loop;
 }
