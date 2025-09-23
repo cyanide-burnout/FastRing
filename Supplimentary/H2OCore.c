@@ -220,8 +220,6 @@ void StopH2OCore(struct H2OCore* core)
 {
   if (core != NULL)
   {
-    h2o_context_request_shutdown(&core->context);
-
     if (core->udp               != NULL)  h2o_quic_dispose_context(&core->server.super);
     if (core->tcp.io_watcher.fd != -1)    uv_close((uv_handle_t*)&core->tcp, NULL);
 
@@ -268,6 +266,12 @@ void UpdateH2OCoreSecurity(struct H2OCore* core, SSL_CTX* context1, ptls_context
     quicly_amend_ptls_context(core->quicly.tls);
   }
 }
+
+size_t GetH2OCoreConnectionCount(struct H2OCore* core)
+{
+  return (core != NULL) ? (core->context._conns.num_conns.idle + core->context._conns.num_conns.active + core->context._conns.num_conns.shutdown) : 0;
+}
+
 
 // Supplimentary routines
 

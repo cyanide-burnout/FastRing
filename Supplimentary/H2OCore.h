@@ -68,6 +68,7 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
 void StopH2OCore(struct H2OCore* core);
 void ReleaseH2OCore(struct H2OCore* core);
 void UpdateH2OCoreSecurity(struct H2OCore* core, SSL_CTX* context1, ptls_context_t* context2, int options);
+size_t GetH2OCoreConnectionCount(struct H2OCore* core);
 
 const char* GetH2OHeaderByIndex(const h2o_headers_t* headers, const h2o_token_t* token, size_t* size);
 const char* GetH2OHeaderByName(const h2o_headers_t* headers, const char* name, size_t length, size_t* size);

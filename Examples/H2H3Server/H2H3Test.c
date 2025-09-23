@@ -89,10 +89,13 @@ int main()
   while ((atomic_load_explicit(&state, memory_order_relaxed) < 1) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
-  printf("Shutting down...\n");
+  printf("Shutting connections down...\n");
+  h2o_context_request_shutdown(&core->context);
+  DepleteFastUVLoop(loop, 2000, 0, (CheckUVLoopDepletion)GetH2OCoreConnectionCount, core);
 
+  printf("Shutting core down...\n");
   StopH2OCore(core);
-  DepleteFastUVLoop(loop, 2000, 0, NULL, NULL);
+  DepleteFastUVLoop(loop, 2000, UVLOOP_KICK_POKE_TIMER | UVLOOP_KICK_UNREF(UV_TIMER), NULL, NULL);
 
   ReleaseH2OCore(core);
   ReleaseFastUVLoop(loop);
