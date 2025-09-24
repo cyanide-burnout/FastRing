@@ -109,8 +109,8 @@ int main()
 
   struct H2ORoute routes[] =
   {
-    { "/",             0, 0,                              HandlePageRequest,         NULL      },
-    { "/demo.Echoer/", 0, H2OCORE_ROUTE_OPTION_STREAMING, HandleGRPCDispatchRequest, &dispatch },
+    { "/",                                           0, 0,                              HandlePageRequest,         NULL      },
+    { GetGRPCServicePath(&demo__echoer__descriptor), 0, H2OCORE_ROUTE_OPTION_STREAMING, HandleGRPCDispatchRequest, &dispatch },
     { 0 }
   };
 

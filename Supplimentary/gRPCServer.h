@@ -91,6 +91,14 @@ int TransmitGRPCPing(struct GRPCInvocation* invocation);
 int TransmitGRPCReply(struct GRPCInvocation* invocation, const ProtobufCMessage* message, uint8_t flags);
 int TransmitGRPCStatus(struct GRPCInvocation* invocation, int status, const char* message);
 
+#define GetGRPCServicePath(service)                   \
+( {                                                   \
+  int length   = strlen((service)->name) + 3;         \
+  char* buffer = (char*)alloca(length);               \
+  snprintf(buffer, length, "/%s/", (service)->name);  \
+  buffer;                                             \
+} )
+
 #ifdef __cplusplus
 }
 #endif
