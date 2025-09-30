@@ -19,8 +19,8 @@ static const h2o_iovec_t codes[] =
 };
 
 #define GRPC_STATUS_CODE(index)      codes[index].base, codes[index].len
-#define GRPC_ALLOCATION_GRANULARITY  (1 << 12)
-#define GRPC_FRAME_SIZE_LIMIT        (1 << 24)
+#define GRPC_ALLOCATION_GRANULARITY  (1 << 12)  // 4 KB
+#define GRPC_FRAME_SIZE_LIMIT        (1 << 24)  // 16 MB
 
 // Helpers
 

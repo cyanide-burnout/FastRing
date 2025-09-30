@@ -90,32 +90,32 @@ typedef void (*HandleGRPCErrorFunction)(void* closure, struct GRPCService* servi
 
 struct GRPCService
 {
-  ProtobufCService super;
+  ProtobufCService super;            // libprotobuf-c's service object
 
-  struct Fetch* fetch;
-  CURLU* location;
+  struct Fetch* fetch;               //
+  CURLU* location;                   // Prepared CURL location
 
-  long type;
-  long timeout;
-  char resolution;
-  struct curl_slist* headers;
+  long type;                         // CURL_HTTP_VERSION_*
+  long timeout;                      // Call timeout for CURL's easy
+  char resolution;                   // Resolution of call timeout
+  struct curl_slist* headers;        // Shared HTTP headers
 
-  int count;
-  void* closure;
-  HandleGRPCErrorFunction function;
+  int count;                         // Reference counter
+  void* closure;                     // Error handler
+  HandleGRPCErrorFunction function;  //  (optional)
 
-  struct GRPCMethod methods[0];
+  struct GRPCMethod methods[0];      // Lazy filling by need
 };
 
 struct GRPCCall
 {
-  struct GRPCTransmission super;
+  struct GRPCTransmission super;                 // Should be allocation of GRPC_TRANSMISSION_LENGTH bytes
 
-  const char* method;
-  const ProtobufCMessageDescriptor* descriptor;
+  const char* method;                            // ProtobufCMethodDescriptor::name
+  const ProtobufCMessageDescriptor* descriptor;  // ProtobufCMethodDescriptor::output
 
-  ProtobufCClosure function;
-  void* closure;
+  ProtobufCClosure function;                     // libprotobuf-c's callback function
+  void* closure;                                 //
 };
 
 ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceDescriptor* descriptor, const char* location, const char* token, long timeout, char resolution, HandleGRPCErrorFunction function, void* closure);

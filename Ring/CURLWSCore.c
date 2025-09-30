@@ -421,7 +421,7 @@ void TransmitCWSMessage(struct CWSMessage* message)
   if (transmission->outbound.head == transmission->outbound.tail)
   {
     curl_easy_pause(transmission->super.easy, CURLPAUSE_SEND_CONT);
-    TouchFetchTransmission(&message->transmission.super);
+    TouchFetchTransmission(&transmission->super);
   }
 
 #else

@@ -8,10 +8,10 @@
 
 // Transport
 
-#define GRPC_TRANSMISSION_LENGTH     sizeof(struct GRPCCall)
-#define GRPC_STRING_BUFFER_LENGTH    2048
-#define GRPC_ALLOCATION_GRANULARITY  (1 << 12)
-#define GRPC_FRAME_SIZE_LIMIT        (1 << 24)
+#define GRPC_TRANSMISSION_LENGTH     sizeof(struct GRPCCall)  // The biggest allocation to fit GRPCTransmission and GRPCCall
+#define GRPC_STRING_BUFFER_LENGTH    2048                     // 2 KB
+#define GRPC_ALLOCATION_GRANULARITY  (1 << 12)                // 4 KB
+#define GRPC_FRAME_SIZE_LIMIT        (1 << 24)                // 16 MB
 
 static void* ExpandBuffer(struct GRPCBuffer* buffer, size_t size)
 {
@@ -495,6 +495,7 @@ static int HandleCall(void* closure, struct GRPCTransmission* transmission, int 
       if ((call->function != NULL) && 
           (message         = protobuf_c_message_unpack(call->descriptor, NULL, length, (uint8_t*)data)))
       {
+        // Due to semantics of ProtobufCMethodDescriptor::closure() it could be call only once
         call->function(message, call->closure);
         call->function = NULL;
         protobuf_c_message_free_unpacked(message, NULL);
@@ -504,7 +505,7 @@ static int HandleCall(void* closure, struct GRPCTransmission* transmission, int 
     case GRPCCLIENT_REASON_STATUS:
       if (call->function != NULL)
       {
-        // Call handler has to be notified anyway
+        // ProtobufCMethodDescriptor::closure() has to be notified anyway
         call->function(NULL, call->closure);
       }
 
@@ -516,6 +517,7 @@ static int HandleCall(void* closure, struct GRPCTransmission* transmission, int 
         private->function(private->closure, private, call->method, parameter, data);
       }
 
+      // Decrease reference counter and free
       private->super.destroy(&private->super);
       break;
   }
