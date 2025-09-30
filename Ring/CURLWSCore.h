@@ -13,25 +13,55 @@ extern "C"
 #define CWS_REASON_CONNECTED  1
 #define CWS_REASON_RECEIVED   2
 
-typedef int (*HandleCWSEventFunction)(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length);
+#define CWS_STATE_CONNECTING  0
+#define CWS_STATE_CONNECTED   1
+#define CWS_STATE_REJECTED    2
+
+struct CWSMessage;
+struct CWSTransmission;
+
+typedef int (*HandleCWSEventFunction)(void* closure, struct CWSTransmission* transmission, int reason, int parameter, char* data, size_t length);
 
 struct CWSMessage
 {
-  struct FetchTransmission* transmission;  //
-  struct CWSMessage* next;                 //
-  size_t size;                             // Size of allocation
+  struct CWSTransmission* transmission;  //
+  struct CWSMessage* next;               //
+  size_t size;                           // Size of allocation
 
-  int type;                                // WebSocket frame type (CURLWS_TEXT, CURLWS_BINARY, CURLWS_CONT, CURLWS_PING, CURLWS_PONG)
-  char* data;                              // Pointer to data (will be set to buffer by default, use NULL to close connection)
-  size_t length;                           // Length of data
+  int type;                              // WebSocket frame type (CURLWS_TEXT, CURLWS_BINARY, CURLWS_CONT, CURLWS_PING, CURLWS_PONG)
+  char* data;                            // Pointer to data (will be set to buffer by default, use NULL to close connection)
+  size_t length;                         // Length of data
 
-  char buffer[0];                          //
+  char buffer[0];                        //
 };
 
-struct FetchTransmission* MakeExtendedCWSTransmission(struct Fetch* fetch, CURL* easy, HandleCWSEventFunction function, void* closure);
-struct FetchTransmission* MakeSimpleCWSTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, HandleCWSEventFunction function, void* closure);
+struct CWSQueue
+{
+  struct CWSMessage* head;
+  struct CWSMessage* tail;
+};
 
-struct CWSMessage* AllocateCWSMessage(struct FetchTransmission* transmission, size_t length, int type);
+struct CWSTransmission
+{
+  struct FetchTransmission super;
+
+  HandleCWSEventFunction function;
+  void* closure;
+
+  struct FastRingDescriptor* descriptor;
+  struct FastRingFlusher* flusher;
+  struct CWSMessage* current;
+  struct CWSMessage* heap;
+  struct CWSQueue inbound;
+  struct CWSQueue outbound;
+  int state;
+};
+
+struct CWSTransmission* MakeExtendedCWSTransmission(struct Fetch* fetch, CURL* easy, HandleCWSEventFunction function, void* closure);
+struct CWSTransmission* MakeSimpleCWSTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, HandleCWSEventFunction function, void* closure);
+void CloseCWSTransmission(struct CWSTransmission* transmission);
+
+struct CWSMessage* AllocateCWSMessage(struct CWSTransmission* transmission, size_t length, int type);
 void TransmitCWSMessage(struct CWSMessage* message);
 
 #ifdef __cplusplus

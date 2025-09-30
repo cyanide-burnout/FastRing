@@ -14,7 +14,7 @@ static void HandleSignal(int signal)
   atomic_store_explicit(&state, 0, memory_order_relaxed);
 }
 
-void HandleSocketIOMessage(struct FetchTransmission* transmission, char* data)
+void HandleSocketIOMessage(struct CWSTransmission* transmission, char* data)
 {
   struct CWSMessage* message;
 
@@ -40,7 +40,7 @@ void HandleSocketIOMessage(struct FetchTransmission* transmission, char* data)
   }
 }
 
-int HandleEvent(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
+int HandleEvent(void* closure, struct CWSTransmission* transmission, int reason, int parameter, char* data, size_t length)
 {
   static int count = 0;
 
@@ -79,7 +79,7 @@ int main()
   struct sigaction action;
   struct FastRing* ring;
   struct Fetch* fetch;
-  struct FetchTransmission* transmission;
+  struct CWSTransmission* transmission;
 
   action.sa_handler = HandleSignal;
   action.sa_flags   = SA_NODEFER | SA_RESTART;
@@ -100,8 +100,7 @@ int main()
   while ((atomic_load_explicit(&state, memory_order_relaxed) == STATE_RUNNING) &&
          (WaitForFastRing(ring, 200, NULL) >= 0));
 
-
-  CancelFetchTransmission(transmission);
+  CloseCWSTransmission(transmission);
   ReleaseFetch(fetch);
   ReleaseFastRing(ring);
 

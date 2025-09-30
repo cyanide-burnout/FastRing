@@ -16,7 +16,7 @@ static void HandleSignal(int signal)
 
 // Example 1 - Direct gRPC handling (suitable for streaming)
 
-int HandleEvent(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
+int HandleEvent(void* closure, struct GRPCTransmission* transmission, int reason, int parameter, char* data, size_t length)
 {
   ProtobufCAllocator* arena;
   struct Demo__EchoReply* reply;
@@ -42,7 +42,7 @@ int HandleEvent(void* closure, struct FetchTransmission* transmission, int reaso
 
 // Example 2 - Using protobuf-c's service wrapper (no streaming support)
 
-void HandleError(void* closure, ProtobufCService* service, const char* method, int status, const char* message)
+void HandleError(void* closure, struct GRPCService* service, const char* method, int status, const char* message)
 {
   printf("Example 2 - status: %d / %s\n", status, message);
 }
@@ -87,8 +87,8 @@ int main()
 
   // Example 1
 
-  struct GRPCMethod* method              = CreateGRPCMethod("http://localhost:50051", "demo", "Echoer", "StreamingEcho", NULL, 0, 0);
-  struct FetchTransmission* transmission = MakeGRPCCall(fetch, method, HandleEvent, &transmission);
+  struct GRPCMethod* method             = CreateGRPCMethod("http://localhost:50051", "demo", "Echoer", "StreamingEcho", NULL, 0, 0);
+  struct GRPCTransmission* transmission = MakeGRPCTransmission(fetch, method, HandleEvent, &transmission);
 
   TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 0);
   TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 1);
@@ -106,7 +106,7 @@ int main()
 
   // Example 1
 
-  CancelFetchTransmission(transmission);
+  CancelGRPCTransmission(transmission);
   ReleaseGRPCMethod(method);
 
   // Example 2

@@ -8,31 +8,10 @@
 
 // Transport
 
+#define GRPC_TRANSMISSION_LENGTH     sizeof(struct GRPCCall)
 #define GRPC_STRING_BUFFER_LENGTH    2048
 #define GRPC_ALLOCATION_GRANULARITY  (1 << 12)
 #define GRPC_FRAME_SIZE_LIMIT        (1 << 24)
-
-struct GRPCBuffer
-{
-  uint8_t* buffer;
-  size_t length;
-  size_t size; 
-};
-
-struct GRPCContext
-{
-  int status;                 // gRPC status
-  char* message;              //
-
-  struct GRPCBuffer inbound;  // Inbound
-  struct GRPCBuffer scratch;  //
-
-  struct GRPCFrame* heap;     //
-  struct GRPCFrame* head;     // Outbound
-  struct GRPCFrame* tail;     //
-};
-
-_Static_assert(FETCH_STORAGE_SIZE >= sizeof(struct GRPCContext), "FETCH_STORAGE_SIZE too small for GRPCContext");
 
 static void* ExpandBuffer(struct GRPCBuffer* buffer, size_t size)
 {
@@ -50,22 +29,15 @@ static void* ExpandBuffer(struct GRPCBuffer* buffer, size_t size)
   return pointer;
 }
 
-static int HandleFrame(struct FetchTransmission* transmission, uint8_t flags, uint8_t* data, size_t length)
+static int HandleFrame(struct GRPCTransmission* transmission, uint8_t flags, uint8_t* data, size_t length)
 {
-  HandleGRPCEventFunction function;
-  struct GRPCContext* context;
   z_stream stream;
-  void* closure;
   int result;
-
-  context  = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
-  function = (HandleGRPCEventFunction)GetFetchTransmissionParameter1(transmission);
-  closure  = GetFetchTransmissionParameter2(transmission);
 
   if (flags & GRPC_FLAG_COMPRESSED)
   {
-    if ((length > context->scratch.size) &&
-        (ExpandBuffer(&context->scratch, length) == NULL))
+    if ((length > transmission->scratch.size) &&
+        (ExpandBuffer(&transmission->scratch, length) == NULL))
     {
       // Allocation error
       return -1;
@@ -77,24 +49,24 @@ static int HandleFrame(struct FetchTransmission* transmission, uint8_t flags, ui
 
     stream.next_in   = data;
     stream.avail_in  = length;
-    stream.next_out  = context->scratch.buffer;
-    stream.avail_out = context->scratch.size;
+    stream.next_out  = transmission->scratch.buffer;
+    stream.avail_out = transmission->scratch.size;
 
     while ((result == Z_OK) &&
-           (context->scratch.size < GRPC_FRAME_SIZE_LIMIT))
+           (transmission->scratch.size < GRPC_FRAME_SIZE_LIMIT))
     {
-      result                  = inflate(&stream, Z_NO_FLUSH);
-      context->scratch.length = (uint8_t*)stream.next_out - context->scratch.buffer;
+      result                       = inflate(&stream, Z_NO_FLUSH);
+      transmission->scratch.length = (uint8_t*)stream.next_out - transmission->scratch.buffer;
 
       if ((stream.avail_out == 0) &&
-          (ExpandBuffer(&context->scratch, context->scratch.size << 1) == NULL))
+          (ExpandBuffer(&transmission->scratch, transmission->scratch.size << 1) == NULL))
       {
         inflateEnd(&stream);
         return -1;
       }
 
-      stream.next_out  = context->scratch.buffer + context->scratch.length;
-      stream.avail_out = context->scratch.size   - context->scratch.length;
+      stream.next_out  = transmission->scratch.buffer + transmission->scratch.length;
+      stream.avail_out = transmission->scratch.size   - transmission->scratch.length;
     }
 
     inflateEnd(&stream);
@@ -105,21 +77,19 @@ static int HandleFrame(struct FetchTransmission* transmission, uint8_t flags, ui
       return -1;
     }
 
-    data   = context->scratch.buffer;
-    length = context->scratch.length;
+    data   = transmission->scratch.buffer;
+    length = transmission->scratch.length;
   }
 
-  return function(closure, transmission, GRPCCLIENT_REASON_FRAME, flags, (char*)data, length);
+  return transmission->function(transmission->closure, transmission, GRPCCLIENT_REASON_FRAME, flags, (char*)data, length);
 }
 
 static size_t HandleHeader(void* buffer, size_t size, size_t count, void* data)
 {
-  struct FetchTransmission* transmission;
-  struct GRPCContext* context;
+  struct GRPCTransmission* transmission;
   char* header;
 
-  transmission  = (struct FetchTransmission*)data;
-  context       = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
+  transmission  = (struct GRPCTransmission*)data;
   header        = (char*)buffer;
   size         *= count;
 
@@ -127,14 +97,14 @@ static size_t HandleHeader(void* buffer, size_t size, size_t count, void* data)
       (strncasecmp((const char*)buffer, GRPC_TRAILER_STATUS, sizeof(GRPC_TRAILER_STATUS) - 1) == 0))
   {
     //
-    context->status = strtol((char*)buffer + sizeof(GRPC_TRAILER_STATUS) - 1, NULL, 10);
+    transmission->status = strtol((char*)buffer + sizeof(GRPC_TRAILER_STATUS) - 1, NULL, 10);
   }
 
   if ((size > (sizeof(GRPC_TRAILER_MESSAGE) - 1)) &&
       (strncasecmp((const char*)buffer, GRPC_TRAILER_MESSAGE, sizeof(GRPC_TRAILER_MESSAGE) - 1) == 0))
   {
-    free(context->message);
-    context->message = strndup((char*)buffer + sizeof(GRPC_TRAILER_MESSAGE) - 1, size - sizeof(GRPC_TRAILER_MESSAGE) - 1);
+    free(transmission->message);
+    transmission->message = strndup((char*)buffer + sizeof(GRPC_TRAILER_MESSAGE) - 1, size - sizeof(GRPC_TRAILER_MESSAGE) - 1);
   }
 
   return size;
@@ -142,30 +112,28 @@ static size_t HandleHeader(void* buffer, size_t size, size_t count, void* data)
 
 static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
 {
-  struct FetchTransmission* transmission;
-  struct GRPCContext* context;
+  struct GRPCTransmission* transmission;
   struct gRPC* frame;
   uint8_t* pointer;
   size_t length;
 
-  transmission  = (struct FetchTransmission*)data;
-  context       = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
+  transmission  = (struct GRPCTransmission*)data;
   size         *= count;
-  length        = context->inbound.length + size;
+  length        = transmission->inbound.length + size;
 
-  if ((context->inbound.size < length) &&
-      (ExpandBuffer(&context->inbound, length) == NULL))
+  if ((transmission->inbound.size < length) &&
+      (ExpandBuffer(&transmission->inbound, length) == NULL))
   {
     // Cannot proceed chunk
     return CURL_WRITEFUNC_ERROR;
   }
 
-  memcpy(context->inbound.buffer + context->inbound.length, buffer, size);
-  context->inbound.length += size;
+  memcpy(transmission->inbound.buffer + transmission->inbound.length, buffer, size);
+  transmission->inbound.length += size;
 
-  while (context->inbound.length >= sizeof(struct gRPC))
+  while (transmission->inbound.length >= sizeof(struct gRPC))
   {
-    frame  = (struct gRPC*)context->inbound.buffer;
+    frame  = (struct gRPC*)transmission->inbound.buffer;
     length = sizeof(struct gRPC) + be32toh(frame->length);
 
     if (length >= GRPC_FRAME_SIZE_LIMIT)
@@ -174,7 +142,7 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
       return CURL_WRITEFUNC_ERROR;
     }
 
-    if (context->inbound.length >= length)
+    if (transmission->inbound.length >= length)
     {
       if (HandleFrame(transmission, frame->flags, frame->data, length - sizeof(struct gRPC)) != 0)
       {
@@ -182,13 +150,13 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
         return CURL_WRITEFUNC_ERROR;
       }
 
-      memmove(context->inbound.buffer, context->inbound.buffer + length, context->inbound.length - length);
-      context->inbound.length -= length;
+      memmove(transmission->inbound.buffer, transmission->inbound.buffer + length, transmission->inbound.length - length);
+      transmission->inbound.length -= length;
       continue;
     }
 
-    if ((context->inbound.size < length) &&
-        (ExpandBuffer(&context->inbound, length) == NULL))
+    if ((transmission->inbound.size < length) &&
+        (ExpandBuffer(&transmission->inbound, length) == NULL))
     {
       // Cannot proceed frame
       return CURL_WRITEFUNC_ERROR;
@@ -202,13 +170,11 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
 
 static size_t HandleRead(void* buffer, size_t size, size_t count, void* data)
 {
-  struct FetchTransmission* transmission;
-  struct GRPCContext* context;
+  struct GRPCTransmission* transmission;
   struct GRPCFrame* frame;
 
-  transmission  = (struct FetchTransmission*)data;
-  context       = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
-  frame         = context->head;
+  transmission  = (struct GRPCTransmission*)data;
+  frame         = transmission->head;
   size         *= count;
 
   if (frame != NULL)
@@ -228,52 +194,49 @@ static size_t HandleRead(void* buffer, size_t size, size_t count, void* data)
     }
 
     memcpy(buffer, frame->data, frame->length);
-    context->head = frame->next;
-    frame->next   = context->heap;
-    context->heap = frame;
+    transmission->head = frame->next;
+    frame->next        = transmission->heap;
+    transmission->heap = frame;
     return frame->length;
   }
 
   return CURL_READFUNC_PAUSE;
 }
 
-static void HandleFetch(struct FetchTransmission* transmission, CURL* easy, int code, char* data, size_t length, void* parameter1, void* parameter2)
+static void HandleFetch(struct FetchTransmission* super, CURL* easy, int code, char* data, size_t length, void* parameter1, void* parameter2)
 {
-  HandleGRPCEventFunction function;
-  struct GRPCContext* context;
+  struct GRPCTransmission* transmission;
   struct GRPCFrame* frame;
   void* closure;
 
-  context  = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
-  function = (HandleGRPCEventFunction)GetFetchTransmissionParameter1(transmission);
-  closure  = GetFetchTransmissionParameter2(transmission);
+  transmission = (struct GRPCTransmission*)super;
 
   if (code != 200)
   {
     // An HTTP or CURL/Fetch error occured
-    function(closure, transmission, GRPCCLIENT_REASON_STATUS, code, data, 0);
+    transmission->function(transmission->closure, transmission, GRPCCLIENT_REASON_STATUS, code, data, 0);
   }
   else
   {
     // gRPC status
-    function(closure, transmission, GRPCCLIENT_REASON_STATUS, context->status, context->message, 0);
+    transmission->function(transmission->closure, transmission, GRPCCLIENT_REASON_STATUS, transmission->status, transmission->message, 0);
   }
 
-  while (frame = context->head)
+  while (frame = transmission->head)
   {
-    context->head = frame->next;
+    transmission->head = frame->next;
     free(frame);
   }
 
-  while (frame = context->heap)
+  while (frame = transmission->heap)
   {
-    context->heap = frame->next;
+    transmission->heap = frame->next;
     free(frame);
   }
 
-  free(context->message);
-  free(context->inbound.buffer);
-  free(context->scratch.buffer);
+  free(transmission->message);
+  free(transmission->inbound.buffer);
+  free(transmission->scratch.buffer);
 }
 
 struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, const char* service, const char* name, const char* token, long timeout, char resolution)
@@ -364,13 +327,21 @@ void HoldGRPCMethod(struct GRPCMethod* method)
   }
 }
 
-struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* method, HandleGRPCEventFunction function, void* closure)
+struct GRPCTransmission* MakeGRPCTransmission(struct Fetch* fetch, struct GRPCMethod* method, HandleGRPCEventFunction function, void* closure)
 {
+  struct GRPCTransmission* transmission;
   CURL* easy;
-  
-  if ((method != NULL) &&
-      (easy    = curl_easy_init()))
+
+  transmission = NULL;
+  easy         = NULL;
+
+  if ((method       != NULL) &&
+      (transmission  = (struct GRPCTransmission*)calloc(1, GRPC_TRANSMISSION_LENGTH)) &&
+      (easy          = curl_easy_init()))
   {
+    transmission->function = function;
+    transmission->closure  = closure;
+
     curl_easy_setopt(easy, CURLOPT_UPLOAD,        1L);
     curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, "POST");
     curl_easy_setopt(easy, CURLOPT_CURLU,         method->location);
@@ -387,15 +358,24 @@ struct FetchTransmission* MakeGRPCCall(struct Fetch* fetch, struct GRPCMethod* m
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,  HandleWrite);
     curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, HandleHeader);
 
-    return MakeExtendedFetchTransmission(fetch, easy, FETCH_OPTION_SET_HANDLER_DATA, HandleFetch, function, closure);
+    return (struct GRPCTransmission*)MakeExtendedFetchTransmission(fetch, &transmission->super, easy, FETCH_OPTION_SET_HANDLER_DATA, HandleFetch, NULL, NULL);
   }
 
+  free(transmission);
   return NULL;
 }
 
-struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size_t length)
+void CancelGRPCTransmission(struct GRPCTransmission* transmission)
 {
-  struct GRPCContext* context;
+  if (transmission != NULL)
+  {
+    // Resources will be released by HandleFetch()
+    CancelFetchTransmission(&transmission->super);
+  }
+}
+
+struct GRPCFrame* AllocateGRPCFrame(struct GRPCTransmission* transmission, size_t length)
+{
   struct GRPCFrame* frame;
   size_t size;
 
@@ -405,14 +385,13 @@ struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size
     return NULL;
   }
 
-  context = (struct GRPCContext*)GetFetchTransmissionStorage(transmission);
-  size    = sizeof(struct GRPCFrame) + sizeof(struct gRPC) + length;
-  size    = (size + GRPC_ALLOCATION_GRANULARITY - 1) & ~(GRPC_ALLOCATION_GRANULARITY - 1);
+  size = sizeof(struct GRPCFrame) + sizeof(struct gRPC) + length;
+  size = (size + GRPC_ALLOCATION_GRANULARITY - 1) & ~(GRPC_ALLOCATION_GRANULARITY - 1);
 
-  if (context->heap != NULL)
+  if (transmission->heap != NULL)
   {
-    frame         = context->heap;
-    context->heap = frame->next;
+    frame              = transmission->heap;
+    transmission->heap = frame->next;
 
     if (size <= frame->size)
     {
@@ -439,12 +418,10 @@ struct GRPCFrame* AllocateGRPCFrame(struct FetchTransmission* transmission, size
 
 void TransmitGRPCFrame(struct GRPCFrame* frame)
 {
-  struct GRPCContext* context;
+  struct GRPCTransmission* transmission;
   struct gRPC* header;
-  CURL* easy;
 
-  context = (struct GRPCContext*)GetFetchTransmissionStorage(frame->transmission);
-  easy    = GetFetchTransmissionHandle(frame->transmission);
+  transmission = frame->transmission;
 
   if (frame->data != NULL)
   {
@@ -455,27 +432,25 @@ void TransmitGRPCFrame(struct GRPCFrame* frame)
     frame->length  += sizeof(struct gRPC);
   }
 
-  if (context->head != NULL)
+  if (transmission->head != NULL)
   {
-    context->tail->next = frame;
-    context->tail       = frame;
+    transmission->tail->next = frame;
+    transmission->tail       = frame;
   }
   else
   {
-    context->head = frame;
-    context->tail = frame;
+    transmission->head = frame;
+    transmission->tail = frame;
   }
 
-  if (context->head == context->tail)
+  if (transmission->head == transmission->tail)
   {
-    curl_easy_pause(easy, CURLPAUSE_SEND_CONT);
-    TouchFetchTransmission(frame->transmission);
+    curl_easy_pause(transmission->super.easy, CURLPAUSE_SEND_CONT);
+    TouchFetchTransmission(&transmission->super);
   }
 }
 
-// Helpers
-
-int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCMessage* message, int final)
+int TransmitGRPCMessage(struct GRPCTransmission* transmission, const ProtobufCMessage* message, int final)
 {
   struct GRPCFrame* frame;
   size_t length;
@@ -505,45 +480,13 @@ int TransmitGRPCMessage(struct FetchTransmission* transmission, const ProtobufCM
 
 // Service
 
-struct GRPCService
-{
-  ProtobufCService service;
-
-  struct Fetch* fetch;
-  CURLU* location;
-
-  long type;
-  long timeout;
-  char resolution;
-  struct curl_slist* headers;
-
-  int count;
-  void* closure;
-  HandleGRPCErrorFunction function;
-
-  struct GRPCMethod methods[0];
-};
-
-struct GRPCCall
-{
-  struct GRPCContext context;
-
-  const char* method;
-  const ProtobufCMessageDescriptor* descriptor;
-
-  ProtobufCClosure function;
-  void* closure;
-};
-
-_Static_assert(FETCH_STORAGE_SIZE >= sizeof(struct GRPCCall), "FETCH_STORAGE_SIZE too small for GRPCCall");
-
-static int HandleCall(void* closure, struct FetchTransmission* transmission, int reason, int parameter, char* data, size_t length)
+static int HandleCall(void* closure, struct GRPCTransmission* transmission, int reason, int parameter, char* data, size_t length)
 {
   struct GRPCCall* call;
   ProtobufCMessage* message;
   struct GRPCService* private;
 
-  call    = (struct GRPCCall*)GetFetchTransmissionStorage(transmission);
+  call    = (struct GRPCCall*)transmission;
   private = (struct GRPCService*)closure;
 
   switch (reason)
@@ -570,10 +513,10 @@ static int HandleCall(void* closure, struct FetchTransmission* transmission, int
           (private->function != NULL))
       {
         // Error handler can observe an detailed error state
-        private->function(private->closure, (ProtobufCService*)private, call->method, parameter, data);
+        private->function(private->closure, private, call->method, parameter, data);
       }
 
-      private->service.destroy((ProtobufCService*)private);
+      private->super.destroy(&private->super);
       break;
   }
 
@@ -585,7 +528,7 @@ static void InvokeService(ProtobufCService* service, unsigned index, const Proto
   struct GRPCCall* call;
   struct GRPCMethod* method;
   struct GRPCService* private;
-  struct FetchTransmission* transmission;
+  struct GRPCTransmission* transmission;
   const ProtobufCServiceDescriptor* descriptor1;
   const ProtobufCMethodDescriptor* descriptor2;
   char buffer[GRPC_STRING_BUFFER_LENGTH];
@@ -611,12 +554,12 @@ static void InvokeService(ProtobufCService* service, unsigned index, const Proto
     }
   }
 
-  transmission = MakeGRPCCall(private->fetch, method, HandleCall, private);
+  transmission = MakeGRPCTransmission(private->fetch, method, HandleCall, private);
 
   if ((transmission == NULL) ||
       (TransmitGRPCMessage(transmission, input, 1) != 2))
   {
-    CancelFetchTransmission(transmission);
+    CancelGRPCTransmission(transmission);
 
     if (closure != NULL)
     {
@@ -627,13 +570,13 @@ static void InvokeService(ProtobufCService* service, unsigned index, const Proto
     if (private->function != NULL)
     {
       // Error handler can observe an detailed error state
-      private->function(private->closure, service, descriptor2->name, -CURLE_OUT_OF_MEMORY, NULL);
+      private->function(private->closure, private, descriptor2->name, -CURLE_OUT_OF_MEMORY, NULL);
     }
 
     return;
   }
 
-  call              = (struct GRPCCall*)GetFetchTransmissionStorage(transmission);
+  call              = (struct GRPCCall*)transmission;
   call->method      = descriptor2->name;
   call->descriptor  = descriptor2->output;
   call->function    = closure;
@@ -672,15 +615,15 @@ ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceD
 
   if (private = (struct GRPCService*)calloc(1, sizeof(struct GRPCService) + sizeof(struct GRPCMethod) * descriptor->n_methods))
   {
-    private->service.descriptor = descriptor;
-    private->service.invoke     = InvokeService;
-    private->service.destroy    = DestroyService;
-    private->location           = curl_url();
-    private->function           = function;
-    private->closure            = closure;
-    private->fetch              = fetch;
-    private->count              = 1;
-    private->type               = CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE;
+    private->super.descriptor = descriptor;
+    private->super.invoke     = InvokeService;
+    private->super.destroy    = DestroyService;
+    private->location         = curl_url();
+    private->function         = function;
+    private->closure          = closure;
+    private->fetch            = fetch;
+    private->count            = 1;
+    private->type             = CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE;
 
     if ((private->location == NULL) ||
         (curl_url_set(private->location, CURLUPART_URL, location, 0) != CURLE_OK))

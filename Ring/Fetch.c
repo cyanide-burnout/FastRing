@@ -15,72 +15,7 @@
 
 #define ALLOCATION_SIZE  16384
 
-#define APPEND(list, record)                   \
-  record->previous = list->last;               \
-  record->next = NULL;                         \
-  if (list->last != NULL)                      \
-    list->last->next = record;                 \
-  else                                         \
-    list->first = record;                      \
-  list->last = record;
-
-#define REMOVE(list, record)                   \
-  if (record->previous != NULL)                \
-    record->previous->next = record->next;     \
-  else                                         \
-    list->first = record->next;                \
-  if (record->next != NULL)                    \
-    record->next->previous = record->previous; \
-  else                                         \
-    list->last = record->previous;
-
 _Static_assert((ALLOCATION_SIZE & (ALLOCATION_SIZE - 1)) == 0, "ALLOCATION_SIZE must be power of two");
-
-struct ContentStorage
-{
-  char* buffer;
-  size_t length;
-  size_t capacity;
-};
-
-struct Fetch
-{
-  CURLM* multi;
-  CURLSH* share;
-  struct FastRing* ring;
-  struct FastRingFlusher* flusher;
-  struct FastRingDescriptor* descriptor;
-  atomic_int count;
-
-#if (LIBCURL_VERSION_NUM < 0x080400)
-  struct FetchTransmission* first;
-  struct FetchTransmission* last;
-#endif
-};
-
-struct FetchTransmission
-{
-  struct Fetch* fetch;
-
-  CURL* easy;
-  int state;
-
-  HandleFetchFunction function;
-  void* parameter1;
-  void* parameter2;
-  int option;
-
-#if (LIBCURL_VERSION_NUM < 0x080400)
-  struct FetchTransmission* previous;
-  struct FetchTransmission* next;
-#endif
-
-  union
-  {
-    struct ContentStorage storage;
-    uint8_t data[FETCH_STORAGE_SIZE];
-  };
-};
 
 static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 static void HandleTimeoutEvent(struct FastRingDescriptor* descriptor);
@@ -213,47 +148,45 @@ static int HandleTimerOperation(CURLM* multi, long timeout, void* data)
 static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
 {
   struct FetchTransmission* transmission;
-  struct ContentStorage* storage;
   curl_off_t capacity;
   size_t length;
   char* pointer;
 
   transmission  = (struct FetchTransmission*)data;
-  storage       = &transmission->storage;
   size         *= count;
-  length        = storage->length + size;
+  length        = transmission->length + size;
 
-  if (storage->buffer == NULL)
+  if (transmission->buffer == NULL)
   {
     curl_easy_getinfo(transmission->easy, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &capacity);
     if (capacity > 0)
     {
-      pointer           = NULL;
-      storage->capacity = capacity + 1;
-      storage->buffer   = (char*)malloc(storage->capacity);
+      pointer                = NULL;
+      transmission->capacity = capacity + 1;
+      transmission->buffer   = (char*)malloc(transmission->capacity);
     }
   }
 
-  if (length > storage->capacity)
+  if (length > transmission->capacity)
   {
-    pointer           = storage->buffer;
-    storage->capacity = (length + ALLOCATION_SIZE) & ~(ALLOCATION_SIZE - 1);
-    storage->buffer   = (char*)realloc(storage->buffer, storage->capacity);
+    pointer                = transmission->buffer;
+    transmission->capacity = (length + ALLOCATION_SIZE) & ~(ALLOCATION_SIZE - 1);
+    transmission->buffer   = (char*)realloc(transmission->buffer, transmission->capacity);
   }
 
-  if ((storage->buffer   == NULL) &&
-      (storage->capacity  > 0))
+  if ((transmission->buffer   == NULL) &&
+      (transmission->capacity  > 0))
   {
     free(pointer);
     return 0;
   }
 
-  if ((size             > 0) &&
-      (storage->buffer != NULL))
+  if ((size                  > 0) &&
+      (transmission->buffer != NULL))
   {
-    pointer         = storage->buffer + storage->length;
-    storage->length = length;
-    pointer[size]   = '\0';
+    pointer              = transmission->buffer + transmission->length;
+    transmission->length = length;
+    pointer[size]        = '\0';
     memcpy(pointer, buffer, size);
   }
 
@@ -275,7 +208,7 @@ static void ReleaseFetchTransmission(struct FetchTransmission* transmission)
     {
       case CURLE_OK:
         curl_easy_getinfo(transmission->easy, CURLINFO_RESPONSE_CODE, &code);
-        transmission->function(transmission, transmission->easy, code, transmission->storage.buffer, transmission->storage.length, transmission->parameter1, transmission->parameter2);
+        transmission->function(transmission, transmission->easy, code, transmission->buffer, transmission->length, transmission->parameter1, transmission->parameter2);
         break;
 
       case FETCH_STATUS_INCOMPLETE:
@@ -290,19 +223,9 @@ static void ReleaseFetchTransmission(struct FetchTransmission* transmission)
     }
   }
 
-  if (transmission->option & FETCH_OPTION_HANDLE_CONTENT)
-  {
-    // Storage area could be used for another purposes
-    free(transmission->storage.buffer);
-  }
-
-#if (LIBCURL_VERSION_NUM < 0x080400)
-  REMOVE(fetch, transmission);
-#endif
-
-  atomic_fetch_sub_explicit(&fetch->count, 1, memory_order_relaxed);
   curl_multi_remove_handle(fetch->multi, transmission->easy);
   curl_easy_cleanup(transmission->easy);
+  free(transmission->buffer);
   free(transmission);
 }
 
@@ -376,7 +299,6 @@ void ReleaseFetch(struct Fetch* fetch)
   RemoveFastRingFlushHandler(fetch->ring, fetch->flusher);
   SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
 
-#if (LIBCURL_VERSION_NUM >= 0x080400)
   if (list = curl_multi_get_handles(fetch->multi))
   {
     handle = list;
@@ -390,135 +312,89 @@ void ReleaseFetch(struct Fetch* fetch)
 
     curl_free(list);
   }
-#else
-  while (fetch->first != NULL)
-  {
-    // libcurl doesn't release contexts automatically :/
-    ReleaseFetchTransmission(fetch->last);
-  }
-#endif
 
   curl_multi_cleanup(fetch->multi);
   curl_share_cleanup(fetch->share);
   free(fetch);
 }
 
-struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2)
+struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, struct FetchTransmission* transmission, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2)
 {
-  struct FetchTransmission* transmission;
   int count;
 
-  transmission = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission));
-
-  if (transmission == NULL)
+  if ((easy != NULL) &&
+      ((transmission != NULL) ||
+       (transmission  = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission)))))
   {
-    curl_easy_cleanup(easy);
-    return NULL;
+    transmission->fetch      = fetch;
+    transmission->easy       = easy;
+    transmission->state      = FETCH_STATUS_INCOMPLETE;
+    transmission->option     = option;
+    transmission->function   = function;
+    transmission->parameter1 = parameter1;
+    transmission->parameter2 = parameter2;
+
+    curl_easy_setopt(easy, CURLOPT_SHARE, fetch->share);
+    curl_easy_setopt(easy, CURLOPT_PRIVATE, transmission);
+    curl_easy_setopt(easy, CURLOPT_DNS_CACHE_TIMEOUT, 600);
+    curl_easy_setopt(easy, CURLOPT_ALTSVC, "");
+
+    if (option & FETCH_OPTION_HANDLE_CONTENT)
+    {
+      curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
+      curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
+    }
+
+    if (option & FETCH_OPTION_SET_HANDLER_DATA)
+    {
+      curl_easy_setopt(easy, CURLOPT_READDATA, transmission);
+      curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
+      curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);      
+    }
+
+    curl_multi_add_handle(fetch->multi, transmission->easy);
+    curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
+
+    return transmission;
   }
 
-  transmission->fetch      = fetch;
-  transmission->easy       = easy;
-  transmission->state      = FETCH_STATUS_INCOMPLETE;
-  transmission->option     = option;
-  transmission->function   = function;
-  transmission->parameter1 = parameter1;
-  transmission->parameter2 = parameter2;
-
-  curl_easy_setopt(easy, CURLOPT_SHARE, fetch->share);
-  curl_easy_setopt(easy, CURLOPT_PRIVATE, transmission);
-  curl_easy_setopt(easy, CURLOPT_DNS_CACHE_TIMEOUT, 600);
-  curl_easy_setopt(easy, CURLOPT_ALTSVC, "");
-
-  if (option & FETCH_OPTION_HANDLE_CONTENT)
-  {
-    curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
-    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleWrite);
-  }
-
-  if (option & FETCH_OPTION_SET_HANDLER_DATA)
-  {
-    curl_easy_setopt(easy, CURLOPT_READDATA, transmission);
-    curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
-    curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);      
-  }
-
-#if (LIBCURL_VERSION_NUM < 0x080400)
-  APPEND(fetch, transmission);
-#endif
-
-  atomic_fetch_add_explicit(&fetch->count, 1, memory_order_relaxed);
-  curl_multi_add_handle(fetch->multi, transmission->easy);
-  curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
-
-  return transmission;
+  curl_easy_cleanup(easy);
+  return NULL;
 }
 
 struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchFunction function, void* parameter1, void* parameter2)
 {
   CURL* easy;
 
-  easy = curl_easy_init();
-
-  curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0);
-  curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1);
-  curl_easy_setopt(easy, CURLOPT_URL, location);
-
-  if (headers != NULL)
+  if (easy = curl_easy_init())
   {
-    // Headers could be overwritten by application
-    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1);
+    curl_easy_setopt(easy, CURLOPT_URL, location);
+
+    if (headers != NULL)
+    {
+      // Headers could be overwritten by application
+      curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
+    }
+
+    if (token != NULL)
+    {
+      curl_easy_setopt(easy, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
+      curl_easy_setopt(easy, CURLOPT_XOAUTH2_BEARER, token);
+    }
+
+    if (data != NULL)
+    {
+      curl_easy_setopt(easy, CURLOPT_POST, 1);
+      curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, length);
+      curl_easy_setopt(easy, CURLOPT_COPYPOSTFIELDS, data);
+    }
+
+    return MakeExtendedFetchTransmission(fetch, NULL, easy, FETCH_OPTION_HANDLE_CONTENT, function, parameter1, parameter2);
   }
 
-  if (token != NULL)
-  {
-    curl_easy_setopt(easy, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
-    curl_easy_setopt(easy, CURLOPT_XOAUTH2_BEARER, token);
-  }
-
-  if (data != NULL)
-  {
-    curl_easy_setopt(easy, CURLOPT_POST, 1);
-    curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE, length);
-    curl_easy_setopt(easy, CURLOPT_COPYPOSTFIELDS, data);
-  }
-
-  return MakeExtendedFetchTransmission(fetch, easy, FETCH_OPTION_HANDLE_CONTENT, function, parameter1, parameter2);
-}
-
-struct FastRing* GetFetchTransmissionRing(struct FetchTransmission* transmission)
-{
-  return transmission->fetch->ring;
-}
-
-void* GetFetchTransmissionParameter1(struct FetchTransmission* transmission)
-{
-  return transmission->parameter1;
-}
-
-void* GetFetchTransmissionParameter2(struct FetchTransmission* transmission)
-{
-  return transmission->parameter2;
-}
-
-void* GetFetchTransmissionStorage(struct FetchTransmission* transmission)
-{
-  return transmission->data;
-}
-
-CURL* GetFetchTransmissionHandle(struct FetchTransmission* transmission)
-{
-  return transmission->easy;  
-}
-
-void TouchFetchTransmission(struct FetchTransmission* transmission)
-{
-  struct Fetch* fetch;
-  int count;
-
-  fetch = transmission->fetch;
-
-  curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
-  TouchTransmissionQueue(fetch);
+  return NULL;
 }
 
 void CancelFetchTransmission(struct FetchTransmission* transmission)
@@ -530,9 +406,15 @@ void CancelFetchTransmission(struct FetchTransmission* transmission)
   }
 }
 
-int GetFetchTransmissionCount(struct Fetch* fetch)
+void TouchFetchTransmission(struct FetchTransmission* transmission)
 {
-  return atomic_load_explicit(&fetch->count, memory_order_relaxed);
+  struct Fetch* fetch;
+  int count;
+
+  fetch = transmission->fetch;
+
+  curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
+  TouchTransmissionQueue(fetch);
 }
 
 int AppendFetchParameter(CURLU* location, int size, const char* format, ...)
