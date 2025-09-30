@@ -323,8 +323,6 @@ struct CWSTransmission* MakeSimpleCWSTransmission(struct Fetch* fetch, const cha
 
   if (easy = curl_easy_init())
   {
-    curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0);
-    curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1);
     curl_easy_setopt(easy, CURLOPT_URL, location);
 
     if (headers != NULL)

@@ -136,7 +136,7 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
     frame  = (struct gRPC*)transmission->inbound.buffer;
     length = sizeof(struct gRPC) + be32toh(frame->length);
 
-    if (length >= GRPC_FRAME_SIZE_LIMIT)
+    if (length > GRPC_FRAME_SIZE_LIMIT)
     {
       // It is too much :)
       return CURL_WRITEFUNC_ERROR;

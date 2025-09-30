@@ -271,7 +271,7 @@ static void HandleFlushEvent(void* closure, int reason)
 struct Fetch* CreateFetch(struct FastRing* ring)
 {
   struct Fetch* fetch;
-
+ 
   if (fetch = (struct Fetch*)calloc(1, sizeof(struct Fetch)))
   {
     fetch->ring  = ring;
@@ -368,7 +368,6 @@ struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const
 
   if (easy = curl_easy_init())
   {
-    curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0);
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1);
     curl_easy_setopt(easy, CURLOPT_URL, location);
 
