@@ -54,6 +54,8 @@ struct FetchTransmission
 struct Fetch* CreateFetch(struct FastRing* ring);
 void ReleaseFetch(struct Fetch* fetch);
 
+int GetFetchTransmissionCount(struct Fetch* fetch);
+
 struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, struct FetchTransmission* transmission, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2);
 struct FetchTransmission* MakeSimpleFetchTransmission(struct Fetch* fetch, const char* location, struct curl_slist* headers, const char* token, const char* data, size_t length, HandleFetchFunction function, void* parameter1, void* parameter2);
 void CancelFetchTransmission(struct FetchTransmission* transmission);

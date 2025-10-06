@@ -318,6 +318,31 @@ void ReleaseFetch(struct Fetch* fetch)
   free(fetch);
 }
 
+int GetFetchTransmissionCount(struct Fetch* fetch)
+{
+  CURL** handle;
+  CURL** list;
+  int count;
+
+  count = 0;
+
+  if ((fetch != 0) &&
+      (list   = curl_multi_get_handles(fetch->multi)))
+  {
+    handle = list;
+
+    while (*handle != NULL)
+    {
+      count  ++;
+      handle ++;
+    }
+
+    curl_free(list);
+  }
+
+  return count;
+}
+
 struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, struct FetchTransmission* transmission, CURL* easy, int option, HandleFetchFunction function, void* parameter1, void* parameter2)
 {
   int count;
