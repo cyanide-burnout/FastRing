@@ -72,7 +72,8 @@ static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallStat
 
 static void MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallState* state)
 {
-  if (atomic_load_explicit(&call->weight, memory_order_relaxed) > TC_ROLE_HANDLER)
+  if ((call != NULL) &&
+      (atomic_load_explicit(&call->weight, memory_order_relaxed) > TC_ROLE_HANDLER))
   {
     if (IsFastRingThread(call->ring) > 0)
     {
@@ -225,8 +226,13 @@ struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunct
 
 struct ThreadCall* HoldThreadCall(struct ThreadCall* call)
 {
-  atomic_fetch_add_explicit(&call->weight, TC_ROLE_CALLER, memory_order_relaxed);
-  return call;
+  if (call != NULL)
+  {
+    atomic_fetch_add_explicit(&call->weight, TC_ROLE_CALLER, memory_order_relaxed);
+    return call;
+  }
+
+  return NULL;
 }
 
 void ReleaseThreadCall(struct ThreadCall* call, int role)
@@ -236,38 +242,41 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
   struct ThreadCallState* state;
   struct FastRingDescriptor* descriptor;
 
-  weight = atomic_fetch_sub_explicit(&call->weight, role, memory_order_relaxed) - role;
-
-  if (role == TC_ROLE_HANDLER)
+  if (call != NULL)
   {
-    while (state = PeekThreadCallState(call))
-    {
-      tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
-      atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_relaxed);
+    weight = atomic_fetch_sub_explicit(&call->weight, role, memory_order_relaxed) - role;
 
-      while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
-             (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
+    if (role == TC_ROLE_HANDLER)
+    {
+      while (state = PeekThreadCallState(call))
+      {
+        tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
+        atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_relaxed);
+
+        while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
+               (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
+      }
+
+      if (descriptor = call->descriptor)
+      {
+        atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+        io_uring_initialize_sqe(&descriptor->submission);
+        io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
+        SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+
+        descriptor->function = NULL;
+        descriptor->closure  = NULL;
+        call->descriptor     = NULL;
+      }
+
+      RemoveFastRingRegisteredFile(call->ring, call->handle);
     }
 
-    if (descriptor = call->descriptor)
+    if (weight == 0)
     {
-      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
-      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-
-      descriptor->function = NULL;
-      descriptor->closure  = NULL;
-      call->descriptor     = NULL;
+      close(call->handle);
+      free(call);
     }
-
-    RemoveFastRingRegisteredFile(call->ring, call->handle);
-  }
-
-  if (weight == 0)
-  {
-    close(call->handle);
-    free(call);
   }
 }
 
