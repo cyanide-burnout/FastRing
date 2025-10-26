@@ -82,12 +82,12 @@ static inline __attribute__((always_inline)) void PushRingFlusher(struct FastRin
 
 static inline __attribute__((always_inline)) struct FastRingFlusher* PopRingFlusher(struct FastRingFlusherStack* stack)
 {
-  void* _Atomic pointer;
+  void* pointer;
   struct FastRingFlusher* flusher;
 
   do pointer = atomic_load_explicit(&stack->top, memory_order_acquire);
   while ((flusher = REMOVE_ABA_TAG(struct FastRingFlusher, pointer, RING_FLUSH_ALIGNMENT)) &&
-         (!atomic_compare_exchange_weak_explicit(&stack->top, &pointer, flusher->next, memory_order_relaxed, memory_order_relaxed)));
+         (!atomic_compare_exchange_weak_explicit(&stack->top, &pointer, flusher->next, memory_order_acquire, memory_order_relaxed)));
 
   return flusher;
 }
@@ -114,12 +114,12 @@ static inline __attribute__((always_inline)) void ReleaseRingDescriptorHeap(stru
 
 static inline __attribute__((always_inline)) struct FastRingDescriptor* AllocateRingDescriptor(struct FastRingDescriptorSet* set)
 {
-  void* _Atomic pointer;
+  void* pointer;
   struct FastRingDescriptor* descriptor;
 
-  do pointer = atomic_load_explicit(&set->available, memory_order_acquire);
+  do pointer = atomic_load_explicit(&set->available, memory_order_relaxed);
   while ((descriptor = REMOVE_ABA_TAG(struct FastRingDescriptor, pointer, RING_DESC_ALIGNMENT)) &&
-         (!atomic_compare_exchange_weak_explicit(&set->available, &pointer, descriptor->next, memory_order_relaxed, memory_order_relaxed)));
+         (!atomic_compare_exchange_weak_explicit(&set->available, &pointer, descriptor->next, memory_order_acquire, memory_order_relaxed)));
 
   if (unlikely(((descriptor == NULL) ||
                 (descriptor->state != RING_DESC_STATE_FREE)) &&
@@ -127,7 +127,7 @@ static inline __attribute__((always_inline)) struct FastRingDescriptor* Allocate
   {
     memset(descriptor, 0, sizeof(struct FastRingDescriptor));
     do descriptor->heap = atomic_load_explicit(&set->heap, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(&set->heap, &descriptor->heap, descriptor, memory_order_release, memory_order_acquire));
+    while (!atomic_compare_exchange_weak_explicit(&set->heap, &descriptor->heap, descriptor, memory_order_release, memory_order_relaxed));
   }
 
   return descriptor;
@@ -147,9 +147,9 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
 {
   struct FastRingDescriptor* descriptor;
 
-  atomic_store_explicit(&last->next, NULL, memory_order_release);
+  atomic_store_explicit(&last->next, NULL, memory_order_relaxed);
   descriptor = atomic_exchange_explicit(&set->pending, last, memory_order_relaxed);
-  atomic_store_explicit(&descriptor->next, first, memory_order_relaxed);
+  atomic_store_explicit(&descriptor->next, first, memory_order_release);
 }
 
 static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct FastRingDescriptor* descriptor, int option)
@@ -1277,8 +1277,13 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
 
     if (likely(result >= 0))
     {
-      ring->buffers.count -= (address == NULL);
-      result               = ring->buffers.position;
+      result = index;
+
+      if (address == NULL)
+      {
+        ring->buffers.count --;
+        result = INT32_MIN;
+      }
     }
 
     pthread_mutex_unlock(&ring->buffers.lock);

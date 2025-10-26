@@ -33,12 +33,12 @@ static struct ThreadCallState* GetThreadCallState()
 
 static struct ThreadCallState* PeekThreadCallState(struct ThreadCall* call)
 {
-  void* _Atomic pointer;
+  void* pointer;
   struct ThreadCallState* state;
 
-  do pointer = atomic_load_explicit(&call->stack, memory_order_acquire);
+  do pointer = atomic_load_explicit(&call->stack, memory_order_relaxed);
   while ((state = REMOVE_ABA_TAG(struct ThreadCallState, pointer, ALIGNMENT)) &&
-         (!atomic_compare_exchange_weak_explicit(&call->stack, &pointer, state->next, memory_order_relaxed, memory_order_relaxed)));
+         (!atomic_compare_exchange_weak_explicit(&call->stack, &pointer, state->next, memory_order_acquire, memory_order_relaxed)));
 
   return state;
 }
@@ -89,7 +89,7 @@ static void MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallSta
     while ((atomic_load_explicit(&state->result, memory_order_acquire) == TC_RESULT_PREPARED) &&
            (futex((uint32_t*)&state->result, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, TC_RESULT_PREPARED, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
 
-    atomic_fetch_add_explicit(&state->tag, 1, memory_order_acquire);
+    atomic_fetch_add_explicit(&state->tag, 1, memory_order_relaxed);
   }
 }
 
@@ -251,7 +251,7 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
       while (state = PeekThreadCallState(call))
       {
         tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
-        atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_relaxed);
+        atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_release);
 
         while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&
                (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));

@@ -28,7 +28,8 @@ void ReleaseFastBufferPool(struct FastBufferPool* pool)
 
     while (buffer = heap)
     {
-      heap = REMOVE_ABA_TAG(struct FastBuffer, buffer->next, FAST_BUFFER_ALIGNMENT);
+      heap = atomic_load_explicit(&buffer->next, memory_order_relaxed);
+      heap = REMOVE_ABA_TAG(struct FastBuffer, heap, FAST_BUFFER_ALIGNMENT);
       UpdateFastRingRegisteredBuffer(pool->ring, buffer->index, NULL, 0);
       free(buffer);
     }
@@ -63,7 +64,7 @@ void TryRegisterFastBuffer(struct FastBuffer* buffer, int option)
 struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size, int option)
 {
   uint32_t tag;
-  void* _Atomic pointer;
+  void* pointer;
   struct FastBuffer* buffer;
 
   tag = 0;
@@ -71,7 +72,7 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
 
   do pointer = atomic_load_explicit(&pool->heap, memory_order_acquire);
   while ((buffer = REMOVE_ABA_TAG(struct FastBuffer, pointer, FAST_BUFFER_ALIGNMENT)) &&
-         (!atomic_compare_exchange_weak_explicit(&pool->heap, &pointer, buffer->next, memory_order_relaxed, memory_order_relaxed)));
+         (!atomic_compare_exchange_weak_explicit(&pool->heap, &pointer, buffer->next, memory_order_acquire, memory_order_relaxed)));
 
   if (buffer != NULL)
   {
