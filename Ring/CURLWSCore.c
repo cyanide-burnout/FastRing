@@ -238,6 +238,14 @@ static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct 
     transmission = (struct CWSTransmission*)descriptor->closure;
     message      = NULL;
 
+    if ((completion->res < 0) ||
+        (completion->res & (POLLHUP | POLLERR | POLLNVAL)))
+    {
+      transmission->descriptor = NULL;
+      CancelFetchTransmission(&transmission->super);
+      return 0;
+    }
+
     while ((transmission->state == CWS_STATE_CONNECTED) &&
            (message = transmission->outbound.head) &&
            (message->data != NULL))

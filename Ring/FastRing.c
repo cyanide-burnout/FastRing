@@ -117,7 +117,7 @@ static inline __attribute__((always_inline)) struct FastRingDescriptor* Allocate
   void* pointer;
   struct FastRingDescriptor* descriptor;
 
-  do pointer = atomic_load_explicit(&set->available, memory_order_relaxed);
+  do pointer = atomic_load_explicit(&set->available, memory_order_acquire);
   while ((descriptor = REMOVE_ABA_TAG(struct FastRingDescriptor, pointer, RING_DESC_ALIGNMENT)) &&
          (!atomic_compare_exchange_weak_explicit(&set->available, &pointer, descriptor->next, memory_order_acquire, memory_order_relaxed)));
 
