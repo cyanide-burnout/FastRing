@@ -238,14 +238,6 @@ static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct 
     transmission = (struct CWSTransmission*)descriptor->closure;
     message      = NULL;
 
-    if ((completion->res < 0) ||
-        (completion->res & (POLLHUP | POLLERR | POLLNVAL)))
-    {
-      transmission->descriptor = NULL;
-      CancelFetchTransmission(&transmission->super);
-      return 0;
-    }
-
     while ((transmission->state == CWS_STATE_CONNECTED) &&
            (message = transmission->outbound.head) &&
            (message->data != NULL))
@@ -437,7 +429,7 @@ void TransmitCWSMessage(struct CWSMessage* message)
       (descriptor = AllocateFastRingDescriptor(transmission->super.fetch->ring, HandleSocketCompletion, message->transmission)))
   {
     transmission->descriptor = descriptor;
-    io_uring_prep_poll_add(&descriptor->submission, handle, POLLIN | POLLOUT | POLLHUP | POLLERR);
+    io_uring_prep_poll_add(&descriptor->submission, handle, POLLOUT);
     SubmitFastRingDescriptor(descriptor, 0);
   }
 

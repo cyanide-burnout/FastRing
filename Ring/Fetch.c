@@ -5,6 +5,7 @@
 #include <malloc.h>
 #include <unistd.h>
 #include <string.h>
+#include <syslog.h>
 #include <stdatomic.h>
 
 #include <netdb.h>
@@ -495,4 +496,24 @@ struct curl_slist* MakeFetchConnectAddress(const struct sockaddr* address)
   }
 
   return NULL;
+}
+
+int HandleFetchDebug(CURL* easy, curl_infotype type, char* data, size_t size, void* closure)
+{
+  typedef void (*ReportFunction)(int priority, const char* format, ...);
+
+  ReportFunction report;
+
+  report = (ReportFunction)closure;
+
+  switch (type)
+  {
+    case CURLINFO_TEXT:        report(LOG_DEBUG, "Fetch: * %.*s", (int)size, data);             break;
+    case CURLINFO_HEADER_OUT:  report(LOG_DEBUG, "Fetch: => Headers: %.*s", (int)size, data);   break;
+    case CURLINFO_HEADER_IN:   report(LOG_DEBUG, "Fetch: <= Headers: %.*s", (int)size, data);   break;
+    case CURLINFO_DATA_OUT:    report(LOG_DEBUG, "Fetch: => Data: %zu bytes\n", size);          break;
+    case CURLINFO_DATA_IN:     report(LOG_DEBUG, "Fetch: <= Data: %zu bytes\n", size);          break;
+  }
+
+  return 0;
 }
