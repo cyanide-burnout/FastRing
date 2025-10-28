@@ -39,8 +39,13 @@ struct FastRingEntry;
 struct FastRingDescriptor;
 struct FastRingBufferProvider;
 
-#define ADD_ABA_TAG(address, tag, addenum, alignment)  ((void*)(((uintptr_t)(address)) | ((((uintptr_t)(tag)) + ((uintptr_t)(addenum))) & (((uintptr_t)(alignment)) - 1ULL))))
-#define REMOVE_ABA_TAG(type, address, alignment)       ((type*)(((uintptr_t)(address)) & (~(((uintptr_t)(alignment)) - 1ULL))))
+#if defined(__x86_64__) || defined(__aarch64__)
+#define ADD_ABA_TAG(address, tag, alignment)      ((void*)(((uintptr_t)(address)) | ((((uintptr_t)(tag)) >> 12) & (((uintptr_t)(alignment)) - 1ULL) | ((uintptr_t)(tag) << 48) & 0x0fff000000000000ULL)))
+#define REMOVE_ABA_TAG(type, address, alignment)  ((type*)(((uintptr_t)(address)) &                             (~(((uintptr_t)(alignment)) - 1ULL))                           & 0xf000ffffffffffffULL))
+#else
+#define ADD_ABA_TAG(address, tag, alignment)      ((void*)(((uintptr_t)(address)) | (((uintptr_t)(tag)) & (((uintptr_t)(alignment)) - 1ULL))))
+#define REMOVE_ABA_TAG(type, address, alignment)  ((type*)(((uintptr_t)(address)) & (~(((uintptr_t)(alignment)) - 1ULL))))
+#endif
 
 // FastRing
 

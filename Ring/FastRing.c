@@ -5,6 +5,7 @@
 
 #include <malloc.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/utsname.h>
 #include <sys/resource.h>
 
@@ -31,6 +32,13 @@
 #endif
 
 // Supplementary
+
+static __attribute__((constructor)) void Initialize()
+{
+#ifdef __aarch64__
+  prctl(PR_SET_TAGGED_ADDR_CTRL, 0UL, 0UL, 0UL, 0UL);
+#endif
+}
 
 static void* ExpandRingFileList(struct FastRingFileList* list, int handle)
 {
@@ -77,7 +85,7 @@ static inline __attribute__((always_inline)) void PushRingFlusher(struct FastRin
   tag = atomic_fetch_add_explicit(&flusher->tag, increment, memory_order_relaxed) + increment;
 
   do flusher->next = atomic_load_explicit(&stack->top, memory_order_relaxed);
-  while (!atomic_compare_exchange_weak_explicit(&stack->top, &flusher->next, ADD_ABA_TAG(flusher, tag, 0, RING_FLUSH_ALIGNMENT), memory_order_release, memory_order_relaxed));
+  while (!atomic_compare_exchange_weak_explicit(&stack->top, &flusher->next, ADD_ABA_TAG(flusher, tag, RING_FLUSH_ALIGNMENT), memory_order_release, memory_order_relaxed));
 }
 
 static inline __attribute__((always_inline)) struct FastRingFlusher* PopRingFlusher(struct FastRingFlusherStack* stack)
@@ -140,7 +148,7 @@ static inline __attribute__((always_inline)) void ReleaseRingDescriptor(struct F
   tag = atomic_fetch_add_explicit(&descriptor->tag, 1, memory_order_relaxed) + 1;
 
   do descriptor->next = atomic_load_explicit(&set->available, memory_order_relaxed);
-  while (!atomic_compare_exchange_weak_explicit(&set->available, &descriptor->next, ADD_ABA_TAG(descriptor, tag, 0, RING_DESC_ALIGNMENT), memory_order_release, memory_order_relaxed));
+  while (!atomic_compare_exchange_weak_explicit(&set->available, &descriptor->next, ADD_ABA_TAG(descriptor, tag, RING_DESC_ALIGNMENT), memory_order_release, memory_order_relaxed));
 }
 
 static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(struct FastRingDescriptorSet* set, struct FastRingDescriptor* first, struct FastRingDescriptor* last)

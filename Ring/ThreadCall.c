@@ -48,7 +48,7 @@ static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallStat
   uint64_t count;
 
   do state->next = atomic_load_explicit(&call->stack, memory_order_relaxed);
-  while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, state->tag, 0, ALIGNMENT), memory_order_release, memory_order_relaxed));
+  while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, state->tag, ALIGNMENT), memory_order_release, memory_order_relaxed));
 
   if (atomic_fetch_add_explicit(&call->count, 1, memory_order_relaxed) == 0)
   {

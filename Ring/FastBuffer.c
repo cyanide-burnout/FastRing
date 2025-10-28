@@ -126,7 +126,7 @@ void ReleaseFastBuffer(struct FastBuffer* buffer)
     tag  = atomic_fetch_add_explicit(&buffer->tag, 1, memory_order_relaxed) + 1;
 
     do buffer->next = atomic_load_explicit(&pool->heap, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(&pool->heap, &buffer->next, ADD_ABA_TAG(buffer, tag, 0, FAST_BUFFER_ALIGNMENT), memory_order_release, memory_order_relaxed));
+    while (!atomic_compare_exchange_weak_explicit(&pool->heap, &buffer->next, ADD_ABA_TAG(buffer, tag, FAST_BUFFER_ALIGNMENT), memory_order_release, memory_order_relaxed));
 
     // Decrease pool reference count and release when required
     ReleaseFastBufferPool(pool);
