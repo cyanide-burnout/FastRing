@@ -112,7 +112,8 @@ static void HandleFetchEvent(struct FetchTransmission* super, CURL* easy, int co
   }
 #endif
 
-  free(transmission->current);
+  free(transmission->current[0]);
+  free(transmission->current[1]);
   RemoveFastRingFlushHandler(transmission->super.fetch->ring, transmission->flusher);
 }
 
@@ -149,6 +150,7 @@ static size_t HandleSocketHeader(void* buffer, size_t size, size_t count, void* 
 static size_t HandleSocketWrite(void* buffer, size_t size, size_t count, void* data)
 {
   struct CWSTransmission* transmission;
+  struct CWSMessage** message;
   const struct curl_ws_frame* frame;
 
   transmission  = (struct CWSTransmission*)data;
@@ -157,28 +159,30 @@ static size_t HandleSocketWrite(void* buffer, size_t size, size_t count, void* d
 
   if (frame != NULL)
   {
-    if ((frame->offset         == 0)    &&
-        (transmission->current != NULL) ||
-        (frame->offset         != 0)    &&
-        (transmission->current == NULL))
+    message = transmission->current + !!(frame->flags & (CURLWS_PING | CURLWS_PONG | CURLWS_CLOSE));
+
+    if ((frame->offset == 0)    &&
+        (*message      != NULL) ||
+        (frame->offset != 0)    &&
+        (*message      == NULL))
     {
       // Frame integrity failure
-      return CURL_WRITEFUNC_ERROR;      
+      return CURL_WRITEFUNC_ERROR;
     }
 
-    if ( (transmission->current == NULL) &&
-        !(transmission->current  = AllocateCWSMessage(transmission, frame->len, frame->flags)))
+    if ( (*message == NULL) &&
+        !(*message  = AllocateCWSMessage(transmission, size + frame->bytesleft, frame->flags)))
     {
       // Message allocation failure
       return CURL_WRITEFUNC_ERROR;
     }
 
-    memcpy(transmission->current->buffer + frame->offset, buffer, size);
+    memcpy((*message)->buffer + frame->offset, buffer, size);
 
     if (frame->bytesleft == 0)
     {
-      SubmitInboundMessage(transmission->current);
-      transmission->current = NULL;
+      SubmitInboundMessage(*message);
+      *message = NULL;
     }
   }
 

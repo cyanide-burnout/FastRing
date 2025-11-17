@@ -5,6 +5,10 @@
 #include <unistd.h>
 #include <systemd/sd-daemon.h>
 
+#ifdef USE_LIGHTNOTIFIER
+#include "LightNotifier.h"
+#endif
+
 #define STATE_INITIALIZING  0
 #define STATE_RUNNING       1
 

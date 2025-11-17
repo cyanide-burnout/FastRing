@@ -50,7 +50,7 @@ struct CWSTransmission
 
   struct FastRingDescriptor* descriptor;
   struct FastRingFlusher* flusher;
-  struct CWSMessage* current;
+  struct CWSMessage* current[2];
   struct CWSMessage* heap;
   struct CWSQueue inbound;
   struct CWSQueue outbound;
