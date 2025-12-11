@@ -137,6 +137,7 @@ struct KCPPoint
   sa_family_t family;
   union
   {
+    uint8_t any[0];
     struct in_addr v4;
     struct in6_addr v6;
   };
