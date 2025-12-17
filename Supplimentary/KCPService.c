@@ -230,11 +230,16 @@ static int PutIntoKCPQueue(struct KCPQueue* queue, struct KCPSegment* segment, u
 
   difference = (int32_t)(le32toh(segment->control->sn) - le32toh(queue->slots[queue->head & mask]->control->sn));
 
-  if ((difference <= 0) || 
-      (difference >= window))
+  if (difference <= 0)
+  {
+    // Segment is too old
+    return -EBADF;
+  }
+
+  if (difference >= window)
   {
     // Out of allowed range
-    return -EBADF;
+    return -EFBIG;
   }
 
   number = difference + 1;
@@ -484,6 +489,13 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
     case KCP_CMD_PUSH:
       if ((result = PutIntoKCPQueue(&conversation->inbound, segment, congestion->control.wnd)) < 0)
       {
+        if ((result == -EBADF) ||
+            (result == -EEXIST))
+        {
+          size = GetKCPWindowSize(&conversation->inbound, congestion);
+          TransmitKCPControlSegment(conversation, &conversation->time, KCP_CMD_ACK, htole16(size), control->sn, htole32(congestion->rcvnxt));
+        }
+
         ReleaseKCPSegment(service, segment);
         break;
       }
@@ -946,7 +958,7 @@ int FlushKCPConversation(struct KCPConversation* conversation, struct timespec* 
         (time->tv_nsec >= threshold.tv_nsec))
     {
       conversation->state |= KCP_CONVERSATION_DEAD;
-      conversation->cause  = ETIME;
+      conversation->cause  = -ETIME;
       return -ECONNRESET;
     }
   }
@@ -974,7 +986,7 @@ int FlushKCPConversation(struct KCPConversation* conversation, struct timespec* 
       if (segment->tries >= conversation->tries)
       {
         conversation->state |= KCP_CONVERSATION_DEAD;
-        conversation->cause  = ECONNRESET;
+        conversation->cause  = -ECONNRESET;
         result               = -ECONNRESET;
         break;
       }
@@ -1004,7 +1016,7 @@ int FlushKCPConversation(struct KCPConversation* conversation, struct timespec* 
       {
         control->ts  = htole32(stamp);
         control->wnd = htole16(GetKCPWindowSize(&conversation->inbound, congestion));
-        control->una = htole32(congestion->control.una);
+        control->una = htole32(congestion->rcvnxt);
 
         if (~segment->state & KCP_SEGMENT_NUMBERED)
         {
