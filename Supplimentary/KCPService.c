@@ -422,6 +422,7 @@ static int HandleIncomingKCPMessage(struct KCPService* service, struct KCPConver
   if (segment->state & KCP_SEGMENT_ANCHOR)
   {
     ReleaseKCPSegment(service, segment);
+    queue->slots[queue->head & mask] = NULL;
     segment = queue->slots[(++ queue->head) & mask];
   }
 
@@ -453,6 +454,7 @@ static int HandleIncomingKCPMessage(struct KCPService* service, struct KCPConver
     buffer += segment->length;
 
     ReleaseKCPSegment(service, segment);
+    queue->slots[queue->head & mask] = NULL;
     segment = queue->slots[(++ queue->head) & mask];
   }
 
