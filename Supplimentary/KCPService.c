@@ -576,6 +576,12 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
           queue->slots[queue->head & mask] = NULL;
           queue->head ++;
         }
+
+        if (queue->head == queue->tail)
+        {
+          //
+          CallKCPHandler(service, conversation, KCP_EVENT_SEND, NULL, 0);
+        }
       }
 
       if ((guard == 0) &&
