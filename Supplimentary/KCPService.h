@@ -114,7 +114,7 @@ struct KCPFormat
 #define KCP_EVENT_CREATE   0
 #define KCP_EVENT_REMOVE   1
 #define KCP_EVENT_RECEIVE  2
-#define KCP_EVENT_SEND     3
+#define KCP_EVENT_RESUME   3
 
 #define KCP_CONVERSATION_DETACHED  (1 << 0)
 #define KCP_CONVERSATION_SILENT    (1 << 1)

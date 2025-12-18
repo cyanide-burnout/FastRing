@@ -580,7 +580,7 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
         if (queue->head == queue->tail)
         {
           //
-          CallKCPHandler(service, conversation, KCP_EVENT_SEND, NULL, 0);
+          CallKCPHandler(service, conversation, KCP_EVENT_RESUME, NULL, 0);
         }
       }
 
