@@ -46,28 +46,33 @@ struct StandardKCPHeader
 #define KCP_DEFAULT_RTO         200   // milliseconds
 #define KCP_DEFAULT_WND         128   // segments
 #define KCP_DEFAULT_INTERVAL    100   // milliseconds
+#define KCP_DEFAULT_ACKTHRESH   16    // segments
 #define KCP_DEFAULT_FASTRESEND  2     // 0 / 2
 
 struct KCPCongestion
 {
-  struct KCPControl control;  // counters: wnd = local receive window capacity (in segments), sn = next sequence to send, una = lowest unacked sequence
+  struct KCPControl control;      // counters: wnd = local receive window capacity (in segments), sn = next sequence to send, una = lowest unacked sequence
+  struct KCPControl acknowledge;  // acknowledge parameters: cmd = KCP_CMD_ACK/KCP_CMD_PUSH - armed, sn = sequence number, ts = timestamp
 
-  uint32_t mss;               // maximum segment size in bytes
-  uint32_t cwnd;              // congestion window (in segments)
-  uint32_t ssthresh;          // slow start threshold (in segments)
-  uint32_t incr;              // accumulator used to grow cwnd (in bytes)
-  uint32_t rmtwnd;            // last advertised window from peer (wnd field from incoming segments)
-  uint32_t fastresend;        // fastack threshold for fast retransmit (0 = disabled)
-  uint8_t nocwnd;             // if nonzero, ignore cwnd and use only rmtwnd
-  uint32_t rcvnxt;            // host-order, next expected sn on RX
+  uint32_t mss;                   // maximum segment size in bytes
+  uint32_t cwnd;                  // congestion window (in segments)
+  uint32_t ssthresh;              // slow start threshold (in segments)
+  uint32_t incr;                  // accumulator used to grow cwnd (in bytes)
+  uint32_t rmtwnd;                // last advertised window from peer (wnd field from incoming segments)
+  uint32_t fastresend;            // fastack threshold for fast retransmit (0 = disabled)
+  uint8_t nocwnd;                 // if nonzero, ignore cwnd and use only rmtwnd
+  uint32_t rcvnxt;                // host-order, next expected sn on RX
 
-  uint32_t srtt;              // smoothed RTT
-  uint32_t rttvar;            // RTT variance
-  uint32_t rto;               // current retransmit timeout
-  uint32_t interval;          // base timer interval (tick), milliseconds
+  uint32_t srtt;                  // smoothed RTT
+  uint32_t rttvar;                // RTT variance
+  uint32_t rto;                   // current retransmit timeout
+  uint32_t interval;              // base timer interval (tick), milliseconds
 
-  uint32_t pwait;             // delay between window probes in milliseconds
-  uint32_t pts;               // next scheduled probe time in milliseconds
+  uint32_t pwait;                 // delay between window probes in milliseconds
+  uint32_t pts;                   // next scheduled probe time in milliseconds
+
+  uint32_t ackdue;                // acknowledge's due (in milliseconds)
+  uint16_t ackthresh;             // acknowledge's threshold (in segments)
 };
 
 // KCP format description

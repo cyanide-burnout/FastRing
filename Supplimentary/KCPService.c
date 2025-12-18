@@ -24,16 +24,9 @@ static void InitializeKCPCongestion(struct KCPCongestion* congestion)
   congestion->control.wnd = KCP_DEFAULT_WND;          // our local receive window capacity
   congestion->rmtwnd      = congestion->control.wnd;  //
   congestion->fastresend  = KCP_DEFAULT_FASTRESEND;   // fast retransmit disabled by default
-  congestion->nocwnd      = 0;
-  congestion->rcvnxt      = 0;
-
-  congestion->srtt        = 0;
-  congestion->rttvar      = 0;
-  congestion->rto         = KCP_DEFAULT_RTO;
-  congestion->interval    = KCP_DEFAULT_INTERVAL;
-
-  congestion->pwait       = 0;
-  congestion->pts         = 0;
+  congestion->rto         = KCP_DEFAULT_RTO;          //
+  congestion->interval    = KCP_DEFAULT_INTERVAL;     //
+  congestion->ackthresh   = KCP_DEFAULT_ACKTHRESH;    //
 }
 
 static void SetKCPCongestionRemoteWindow(struct KCPCongestion* congestion, uint32_t wnd)
@@ -344,7 +337,7 @@ static void ReleaseKCPSegment(struct KCPService* service, struct KCPSegment* seg
   }
 }
 
-static int TransmitKCPControlSegment(struct KCPConversation* conversation, struct timespec* time, uint8_t cmd, uint16_t wnd, uint32_t sn, uint32_t una)
+static int TransmitKCPControlSegment(struct KCPConversation* conversation, uint8_t cmd, uint16_t wnd, uint32_t ts, uint32_t sn, uint32_t una)
 {
   const struct KCPFormat* format;
   struct KCPTransmitter* transmitter;
@@ -382,7 +375,7 @@ static int TransmitKCPControlSegment(struct KCPConversation* conversation, struc
   control->cmd = cmd;
   control->frg = 0;
   control->wnd = wnd;
-  control->ts  = htole32((uint32_t)(time->tv_sec * 1000u + time->tv_nsec / 1000000u));
+  control->ts  = ts;
   control->sn  = sn;
   control->una = una;
 
@@ -483,6 +476,7 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
   congestion = &conversation->congestion;
   control    = segment->control;
   result     = 0;
+  time       = conversation->time.tv_sec * 1000u + conversation->time.tv_nsec / 1000000u;
 
   SetKCPCongestionRemoteWindow(congestion, le16toh(control->wnd));
 
@@ -494,8 +488,11 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
         if ((result == -EBADF) ||
             (result == -EEXIST))
         {
-          size = GetKCPWindowSize(&conversation->inbound, congestion);
-          TransmitKCPControlSegment(conversation, &conversation->time, KCP_CMD_ACK, htole16(size), control->sn, htole32(congestion->rcvnxt));
+          congestion->acknowledge.cmd = KCP_CMD_PUSH;
+          congestion->acknowledge.ts  = control->ts;
+          congestion->acknowledge.sn  = control->sn;
+          congestion->ackdue          = time;
+          result                      = 0;
         }
 
         ReleaseKCPSegment(service, segment);
@@ -537,9 +534,21 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
       if ((control != NULL) &&
           (entry   != congestion->rcvnxt))
       {
-        congestion->rcvnxt = entry;
-        size               = GetKCPWindowSize(queue, congestion);
-        TransmitKCPControlSegment(conversation, &conversation->time, KCP_CMD_ACK, htole16(size), number, htole32(entry));
+        congestion->rcvnxt         = entry;
+        congestion->acknowledge.ts = control->ts;
+        congestion->acknowledge.sn = control->sn;
+
+        if ((int32_t)(queue->tail - queue->head) >= (int32_t)congestion->ackthresh)
+        {
+          congestion->acknowledge.cmd = KCP_CMD_PUSH;
+          congestion->ackdue          = time;
+        }
+
+        if (congestion->acknowledge.cmd == 0)
+        {
+          congestion->acknowledge.cmd = KCP_CMD_ACK;
+          congestion->ackdue          = time + congestion->interval;
+        }
       }
 
       break;
@@ -548,7 +557,6 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
       number = control->una;
       entry  = control->sn;
       queue  = &conversation->outbound;
-      time   = conversation->time.tv_sec * 1000u + conversation->time.tv_nsec / 1000000u;
       mask   = queue->size - 1;
       guard  = 0;
 
@@ -600,7 +608,7 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
     case KCP_CMD_WASK:
       ReleaseKCPSegment(service, segment);
       size = GetKCPWindowSize(&conversation->inbound, congestion);
-      TransmitKCPControlSegment(conversation, &conversation->time, KCP_CMD_WINS, htole16(size), 0, htole32(congestion->rcvnxt));
+      TransmitKCPControlSegment(conversation, KCP_CMD_WINS, htole16(size), htole32(time), 0, htole32(congestion->rcvnxt));
       break;
 
     case KCP_CMD_WINS:
@@ -965,14 +973,24 @@ int FlushKCPConversation(struct KCPConversation* conversation, struct timespec* 
     }
   }
 
-  if (queue->head != queue->tail)
-  {
-    stamp = time->tv_sec * 1000u + time->tv_nsec / 1000000u;
+  stamp = time->tv_sec * 1000u + time->tv_nsec / 1000000u;
 
+  if ((congestion->acknowledge.cmd == KCP_CMD_PUSH) ||
+      (congestion->acknowledge.cmd == KCP_CMD_ACK)  &&
+      ((int32_t)(stamp - congestion->ackdue) >= 0))
+  {
+    size   = GetKCPWindowSize(&conversation->inbound, congestion);
+    result = TransmitKCPControlSegment(conversation, KCP_CMD_ACK, htole16(size), congestion->acknowledge.ts, congestion->acknowledge.sn, htole32(congestion->rcvnxt));
+    congestion->acknowledge.cmd *= (result < 0);
+  }
+
+  if ((result      >= 0) &&
+      (queue->head != queue->tail))
+  {
     if (UpdateKCPZeroWindowProbe(congestion, stamp) != 0)
     {
       size   = GetKCPWindowSize(&conversation->inbound, congestion);
-      result = TransmitKCPControlSegment(conversation, time, KCP_CMD_WASK, htole16(size), 0, htole32(congestion->rcvnxt));
+      result = TransmitKCPControlSegment(conversation, KCP_CMD_WASK, htole16(size), htole32(stamp), 0, htole32(congestion->rcvnxt));
     }
 
     count = GetKCPCongestionSendQuota(congestion, queue->tail - queue->head);
