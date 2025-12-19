@@ -226,6 +226,8 @@ struct KCPService
   struct KCPCongestion congestion;
 };
 
+uint32_t GetKCPQueueLength(struct KCPQueue* queue);
+
 int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, struct KCPConversation** reference, struct timespec* time, struct sockaddr* address, void* packet, uint32_t size, struct KCPPoint* point, ReleaseKCPClosure release, void* closure);
 int SubmitKCPMessage(struct KCPConversation* conversation, const uint8_t* data, size_t length);
 int SubmitKCPVectorList(struct KCPConversation* conversation, const struct iovec* list, size_t length);

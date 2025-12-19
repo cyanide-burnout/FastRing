@@ -251,7 +251,7 @@ static int PutIntoKCPQueue(struct KCPQueue* queue, struct KCPSegment* segment, u
   {
     // Duplicated segment
     return -EEXIST;
-  }  
+  }
 
   queue->slots[number & mask] = segment;
 
@@ -279,6 +279,11 @@ static int PushIntoKCPQueue(struct KCPQueue* queue, struct KCPSegment* segment)
   return 0;
 }
 
+uint32_t GetKCPQueueLength(struct KCPQueue* queue)
+{
+  return queue->tail - queue->head;
+}
+
 // Helpers
 
 static uint16_t GetKCPWindowSize(struct KCPQueue* queue, struct KCPCongestion* congestion)
@@ -288,7 +293,7 @@ static uint16_t GetKCPWindowSize(struct KCPQueue* queue, struct KCPCongestion* c
 
   size1 = queue->tail - queue->head;
   size2 = congestion->control.wnd - size1;
-  
+
   return (size1 >= congestion->control.wnd) ? 0 : (size2 > UINT16_MAX) ? UINT16_MAX : size2;
 }
 
@@ -333,7 +338,7 @@ static void ReleaseKCPSegment(struct KCPService* service, struct KCPSegment* seg
       return;
     }
 
-    queue->slots[(queue->tail ++) & (queue->size - 1)] = segment; 
+    queue->slots[(queue->tail ++) & (queue->size - 1)] = segment;
   }
 }
 
@@ -1263,7 +1268,7 @@ static int VerifyStandardKCPPacket(uint8_t* packet, uint32_t size)
   if (size >= sizeof(struct StandardKCPHeader))
   {
     size -= sizeof(struct StandardKCPHeader);
-    if ((header->ctl.cmd == KCP_CMD_PUSH) && 
+    if ((header->ctl.cmd == KCP_CMD_PUSH) &&
         (size == le32toh(header->len))    ||
         (header->ctl.cmd >= KCP_CMD_ACK)  &&
         (header->ctl.cmd <= KCP_CMD_WINS) &&
