@@ -1058,6 +1058,14 @@ int FlushKCPConversation(struct KCPConversation* conversation, struct timespec* 
         segment->tries ++;
         count --;
       }
+
+      if ((count == 0) &&
+          (~segment->state & KCP_SEGMENT_SENT))
+      {
+        // Send quota exhausted. This segment is not in-flight, and the outbound queue is ordered as
+        // an in-flight prefix followed by a not-yet-sent tail, so scanning further is pointless.
+        break;
+      }
     }
   }
 
