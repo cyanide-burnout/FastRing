@@ -808,13 +808,11 @@ static int PrepareKCPSegmentList(struct KCPConversation* conversation, struct KC
 
 static void SubmitKCPSegment(struct KCPConversation* conversation, struct KCPSegment* segment, uint8_t frg)
 {
-  struct KCPCongestion* congestion;
   struct KCPControl* control;
   struct KCPQueue* queue;
 
-  congestion = &conversation->congestion;
-  queue      = &conversation->outbound;
-  control    = segment->control;
+  queue   = &conversation->outbound;
+  control = segment->control;
 
   control->cmd = KCP_CMD_PUSH;
   control->frg = frg;
