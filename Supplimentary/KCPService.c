@@ -634,19 +634,18 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
   return result;
 }
 
-int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, struct KCPConversation** reference, struct timespec* time, struct sockaddr* address, void* packet, uint32_t size, struct KCPPoint* point, ReleaseKCPClosure release, void* closure)
+int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, struct KCPConversation** reference, struct timespec* time, struct sockaddr* address, void* packet, uint32_t size, struct KCPPoint* point, AcquireKCPClosure acquire, ReleaseKCPClosure release, void* closure)
 {
   struct KCPConversation* conversation;
   struct KCPSegment* segment;
   struct KCPKey key;
+  uint32_t length;
   int result;
   int kind;
 
-  // Parse packet, prepare conversation
-
   if (format->verify((uint8_t*)packet, size) < 0)
   {
-    release(closure);
+    // Malformed packet
     return -EINVAL;
   }
 
@@ -658,79 +657,103 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
     case AF_INET6:  memcpy(&key.address, address, sizeof(struct sockaddr_in6)); break;
   }
 
-  if ((segment = AllocateKCPSegment(service)) == NULL)
+  result = 0;
+
+  while ((size > 0) &&
+         (result == 0))
   {
-    release(closure);
-    return -ENOMEM;
-  }
-
-  format->parse(&key, segment, (uint8_t*)packet, size);
-  segment->release = release;
-  segment->closure = closure;
-
-  if (GetFromHashMap(service->map, &key, sizeof(struct KCPKey), (void**)&conversation) != HASHMAP_SUCCESS)
-  {
-    conversation = (struct KCPConversation*)calloc(1, sizeof(struct KCPConversation));
-
-    if (conversation == NULL)
+    if ((segment = AllocateKCPSegment(service)) == NULL)
     {
-      ReleaseKCPSegment(service, segment);
+      // Ups...
       return -ENOMEM;
     }
 
-    memcpy(&conversation->key, &key, sizeof(struct KCPKey));
+    acquire(closure);
 
-    if (PutIntoHashMap(service->map, &conversation->key, sizeof(struct KCPKey), conversation) != HASHMAP_SUCCESS)
+    length           = format->parse(&key, segment, (uint8_t*)packet, size);
+    segment->release = release;
+    segment->closure = closure;
+
+    if (length == 0)
     {
       ReleaseKCPSegment(service, segment);
-      free(conversation);
-      return -ENOMEM;
+      break;
     }
 
-    conversation->format  = format;
-    conversation->service = service;
-    conversation->timeout = KCP_DEFAULT_TIMEOUT;
-    conversation->tries   = KCP_DEFAULT_TRIES;
-    conversation->count   = 1;
-    memcpy(&conversation->congestion, &service->congestion, sizeof(struct KCPCongestion));
+    if (length > size)
+    {
+      ReleaseKCPSegment(service, segment);
+      return -EPROTO;
+    }
 
-    CallKCPHandler(service, conversation, KCP_EVENT_CREATE, NULL, 0);
+    if (GetFromHashMap(service->map, &key, sizeof(struct KCPKey), (void**)&conversation) != HASHMAP_SUCCESS)
+    {
+      conversation = (struct KCPConversation*)calloc(1, sizeof(struct KCPConversation));
+
+      if (conversation == NULL)
+      {
+        ReleaseKCPSegment(service, segment);
+        return -ENOMEM;
+      }
+
+      memcpy(&conversation->key, &key, sizeof(struct KCPKey));
+
+      if (PutIntoHashMap(service->map, &conversation->key, sizeof(struct KCPKey), conversation) != HASHMAP_SUCCESS)
+      {
+        ReleaseKCPSegment(service, segment);
+        free(conversation);
+        return -ENOMEM;
+      }
+
+      conversation->format  = format;
+      conversation->service = service;
+      conversation->timeout = KCP_DEFAULT_TIMEOUT;
+      conversation->tries   = KCP_DEFAULT_TRIES;
+      conversation->count   = 1;
+      memcpy(&conversation->congestion, &service->congestion, sizeof(struct KCPCongestion));
+
+      CallKCPHandler(service, conversation, KCP_EVENT_CREATE, NULL, 0);
+    }
+
+    if ((point                      != NULL)      &&
+        (point->family              != AF_UNSPEC) &&
+        (conversation->point.family == AF_UNSPEC))
+    {
+      // Copy local address to the conversation
+      memcpy(&conversation->point, point, sizeof(struct KCPPoint));
+    }
+
+    if (reference != NULL)
+    {
+      // Pass conversation reference to the caller
+      *reference = conversation;
+    }
+
+    if (conversation->format != format)
+    {
+      ReleaseKCPSegment(service, segment);
+      return -EINVAL;
+    }
+
+    if (time != NULL)
+    {
+      conversation->time.tv_sec  = time->tv_sec;
+      conversation->time.tv_nsec = time->tv_nsec;
+    }
+    else
+    {
+      // Use vDSO clock instead
+      clock_gettime(CLOCK_MONOTONIC, &conversation->time);
+    }
+
+    // Proceed conversation state and go ahead
+
+    result  = HandleIncomingKCPSegment(service, conversation, segment);
+    packet += length;
+    size   -= length;
   }
 
-  if ((point                      != NULL)      &&
-      (point->family              != AF_UNSPEC) &&
-      (conversation->point.family == AF_UNSPEC))
-  {
-    // Copy local address to the conversation
-    memcpy(&conversation->point, point, sizeof(struct KCPPoint));
-  }
-
-  if (reference != NULL)
-  {
-    // Pass conversation reference to the caller
-    *reference = conversation;
-  }
-
-  if (conversation->format != format)
-  {
-    ReleaseKCPSegment(service, segment);
-    return -EINVAL;
-  }
-
-  if (time != NULL)
-  {
-    conversation->time.tv_sec  = time->tv_sec;
-    conversation->time.tv_nsec = time->tv_nsec;
-  }
-  else
-  {
-    // Use vDSO clock instead
-    clock_gettime(CLOCK_MONOTONIC, &conversation->time);
-  }
-
-  // Proceed conversation state
-
-  return HandleIncomingKCPSegment(service, conversation, segment);
+  return result;
 }
 
 // Transmitter
@@ -1281,7 +1304,7 @@ static int VerifyStandardKCPPacket(uint8_t* packet, uint32_t size)
   return KCP_PACKET_INVALID;
 }
 
-static void ParseStandardKCPPacket(struct KCPKey* key, struct KCPSegment* segment, uint8_t* packet, uint32_t size)
+static uint32_t ParseStandardKCPPacket(struct KCPKey* key, struct KCPSegment* segment, uint8_t* packet, uint32_t size)
 {
   struct StandardKCPHeader* header;
 
@@ -1292,6 +1315,8 @@ static void ParseStandardKCPPacket(struct KCPKey* key, struct KCPSegment* segmen
   segment->control  = &header->ctl;
   segment->data     = packet + sizeof(struct StandardKCPHeader);
   segment->length   = le32toh(header->len);
+
+  return sizeof(struct StandardKCPHeader) + segment->length;
 }
 
 static uint32_t ProposeStandardKCPPacket(struct sockaddr* address, uint32_t length)

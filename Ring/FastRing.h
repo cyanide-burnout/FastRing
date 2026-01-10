@@ -61,7 +61,8 @@ struct FastRingBufferProvider;
 #define RING_DESC_STATE_FREE       0
 #define RING_DESC_STATE_ALLOCATED  1
 #define RING_DESC_STATE_PENDING    2
-#define RING_DESC_STATE_SUBMITTED  3
+#define RING_DESC_STATE_LOCKED     3
+#define RING_DESC_STATE_SUBMITTED  4
 
 #define RING_DESC_ALIGNMENT        512
 #define RING_DESC_INTEGRITY_MASK   0x0fff00000000003fULL
@@ -131,8 +132,8 @@ union FastRingData
 struct FastRingDescriptor
 {
   struct FastRing* ring;                         // (  8) Related ring
+  ATOMIC(uint32_t) state;                        // ( 12) RING_DESC_STATE_*
 
-  uint32_t state;                                // ( 12) RING_DESC_STATE_*
   uint32_t length;                               // ( 16) Length of submission
   uint32_t linked;                               // ( 20) Count of following linked descriptors in chain (when check is required)
   uint32_t alignment;                            // ( 24)
@@ -188,6 +189,7 @@ struct FastRingTrace
 
 struct FastRingFileEntry
 {
+  uint32_t tag;                                  // Tag of descriptor
   uint32_t index;                                // | Index in registered file table
   uint32_t references;                           // | Count of references to registered file table
   struct FastRingDescriptor* descriptor;         // Descriptor for Poll API

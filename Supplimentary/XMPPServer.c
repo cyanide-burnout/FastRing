@@ -71,7 +71,7 @@ static char* AppendScratchPad(struct XMPPScratchPad* scratch, const char** store
   data[length]     = '\0';
   scratch->length += length - append + 1;
 
-  memcpy(data, value, length); 
+  memcpy(data, value, length);
   return data;
 }
 

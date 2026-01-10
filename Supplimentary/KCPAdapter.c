@@ -113,17 +113,13 @@ static void HandleSocketEvent(struct FastSocket* socket, int event, int paramete
       control = io_uring_recvmsg_cmsg_nexthdr(output, &adapter->message, control);
     }
 
-    if ((adapter->validate == NULL) &&
-        (format = adapter->format)  ||
-        (format = adapter->validate(adapter, address, data, length)))
+    if (((adapter->validate == NULL) &&
+         (format = adapter->format)  ||
+         (format = adapter->validate(adapter, address, data, length))) &&
+         (HandleKCPPacket(adapter->service, format, &conversation, time, address, data, length, &point, (AcquireKCPClosure)HoldFastBuffer, (ReleaseKCPClosure)ReleaseFastBuffer, buffer) >= 0))
     {
-      if (HandleKCPPacket(adapter->service, format, &conversation, time, address, data, length, &point, (ReleaseKCPClosure)ReleaseFastBuffer, buffer) >= 0)
-      {
-        // Flush outbound queue immedieatly
-        FlushKCPConversation(conversation, &conversation->time);
-      }
-
-      continue;
+      // Flush outbound queue immedieatly
+      FlushKCPConversation(conversation, &conversation->time);
     }
 
     ReleaseFastBuffer(buffer);

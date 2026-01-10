@@ -629,13 +629,13 @@ void ReleaseFastSocket(struct FastSocket* socket)
     }
 
     if ((descriptor = socket->inbound.descriptor) &&
-        (descriptor->state == RING_DESC_STATE_PENDING))
+        (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING))
     {
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_nop(&descriptor->submission);
-      descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
-      socket->inbound.descriptor        = NULL;
-      socket->count                    --;
+      PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      socket->inbound.descriptor = NULL;
+      socket->count --;
     }
 
     if (descriptor = socket->inbound.descriptor)

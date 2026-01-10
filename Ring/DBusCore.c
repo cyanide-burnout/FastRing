@@ -47,7 +47,7 @@ static int HandleWatchEvent(struct FastRingDescriptor* descriptor, struct io_uri
         descriptor->submission.user_data &= ~RING_DESC_OPTION_IGNORE;
       }
 
-      if (descriptor->state == RING_DESC_STATE_SUBMITTED)
+      if (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_SUBMITTED)
       {
         // Since D-BUS doesn't support edge triggering
         // We have to submit each time after completion
@@ -84,9 +84,9 @@ static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
 
   if (descriptor = (struct FastRingDescriptor*)dbus_watch_get_data(watch))
   {
-    if ((descriptor->data.number != 0) ||                                            // We are inside a call to HandleWatchEvent()
-        (descriptor->state == RING_DESC_STATE_PENDING) ||                            // There is a pending io_uring_prep_poll_add() or io_uring_prep_poll_update()
-        (descriptor->submission.poll32_events == __io_uring_prep_poll_mask(flags)))  // Poll mask has no changes
+    if ((descriptor->data.number != 0) ||                                                               // We are inside a call to HandleWatchEvent()
+        (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING) ||  // There is a pending io_uring_prep_poll_add() or io_uring_prep_poll_update()
+        (descriptor->submission.poll32_events == __io_uring_prep_poll_mask(flags)))                     // Poll mask has no changes
     {
       // Existing io_uring_prep_poll_add() or io_uring_prep_poll_update() is not yet submitted to kernel
       descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
@@ -123,12 +123,13 @@ static void RemoveWatch(DBusWatch* watch, void* data)
     descriptor->function = NULL;
     descriptor->closure  = NULL;
 
-    if ((descriptor->data.number != 0) ||                       // We are inside a call to HandleWatchEvent()
-        (descriptor->state == RING_DESC_STATE_PENDING) &&       //
-        (descriptor->submission.opcode == IORING_OP_POLL_ADD))  // io_uring_prep_poll_add() is not yet submitted to kernel
+    if ((descriptor->data.number != 0) ||                                                               // We are inside a call to HandleWatchEvent()
+        (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING) &&  //
+        (descriptor->submission.opcode == IORING_OP_POLL_ADD))                                          // io_uring_prep_poll_add() is not yet submitted to kernel
     {
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_nop(&descriptor->submission);
+      PrepareFastRingDescriptor(descriptor, 0);
       descriptor->data.number = 0;
       return;
     }

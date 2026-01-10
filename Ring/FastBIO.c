@@ -401,14 +401,14 @@ static int HandleBIODestroy(BIO* handle)
   }
 
   if ((descriptor = engine->inbound.descriptor) &&
-      (descriptor->state == RING_DESC_STATE_PENDING))
+      (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING))
   {
     // io_uring_prep_recv_multishot() is waiting for submission
     io_uring_initialize_sqe(&descriptor->submission);
     io_uring_prep_nop(&descriptor->submission);
-    descriptor->submission.user_data |= RING_DESC_OPTION_IGNORE;
-    engine->inbound.descriptor        = NULL;
-    engine->count                    --;
+    PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    engine->inbound.descriptor = NULL;
+    engine->count --;
   }
 
   if (descriptor = engine->inbound.descriptor)

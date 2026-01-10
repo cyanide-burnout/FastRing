@@ -85,7 +85,7 @@ struct KCPKey;
 struct KCPSegment;
 
 typedef int (*VerifyKCPPacket)(uint8_t* packet, uint32_t size);
-typedef void (*ParseKCPPacket)(struct KCPKey* key, struct KCPSegment* segment, uint8_t* packet, uint32_t size);
+typedef uint32_t (*ParseKCPPacket)(struct KCPKey* key, struct KCPSegment* segment, uint8_t* packet, uint32_t size);
 typedef uint32_t (*ProposeKCPPacket)(struct sockaddr* address, uint32_t length);
 typedef void (*PrepareKCPPacket)(uint8_t* buffer, struct KCPKey* key, struct KCPSegment* segment, uint32_t length);
 typedef void (*ComposeKCPPacket)(struct KCPSegment* segment);
@@ -129,6 +129,7 @@ typedef void (*HandleKCPEvent)(void* closure, struct KCPConversation* conversati
 typedef uint8_t* (*AllocateKCPPacket)(void* closure, uint32_t size);
 typedef int (*TransmitKCPPacket)(void* closure, struct sockaddr* address, uint8_t* data, uint32_t size);
 
+typedef void (*AcquireKCPClosure)(void* closure);
 typedef void (*ReleaseKCPClosure)(void* closure);
 
 union KCPAddress
@@ -228,7 +229,7 @@ struct KCPService
 
 uint32_t GetKCPQueueLength(struct KCPQueue* queue);
 
-int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, struct KCPConversation** reference, struct timespec* time, struct sockaddr* address, void* packet, uint32_t size, struct KCPPoint* point, ReleaseKCPClosure release, void* closure);
+int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, struct KCPConversation** reference, struct timespec* time, struct sockaddr* address, void* packet, uint32_t size, struct KCPPoint* point, AcquireKCPClosure acquire, ReleaseKCPClosure release, void* closure);
 int SubmitKCPMessage(struct KCPConversation* conversation, const uint8_t* data, size_t length);
 int SubmitKCPVectorList(struct KCPConversation* conversation, const struct iovec* list, size_t length);
 int FlushKCPConversation(struct KCPConversation* conversation, struct timespec* time);
