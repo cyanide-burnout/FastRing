@@ -657,10 +657,21 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
     case AF_INET6:  memcpy(&key.address, address, sizeof(struct sockaddr_in6)); break;
   }
 
-  result = 0;
+  if (time == NULL)
+  {
+    time = (struct timespec*)alloca(sizeof(struct timespec));
+    clock_gettime(CLOCK_MONOTONIC, time);
+  }
 
-  while ((size > 0) &&
-         (result == 0))
+  if (reference != NULL)
+  {
+    // Reset conversation reference
+    *reference = NULL;
+  }
+
+  conversation = NULL;
+
+  while (size > 0)
   {
     if ((segment = AllocateKCPSegment(service)) == NULL)
     {
@@ -686,7 +697,9 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
       return -EPROTO;
     }
 
-    if (GetFromHashMap(service->map, &key, sizeof(struct KCPKey), (void**)&conversation) != HASHMAP_SUCCESS)
+    if (((conversation == NULL) ||
+         (memcmp(&key, &conversation->key, sizeof(struct KCPKey)) != 0)) &&
+        (GetFromHashMap(service->map, &key, sizeof(struct KCPKey), (void**)&conversation) != HASHMAP_SUCCESS))
     {
       conversation = (struct KCPConversation*)calloc(1, sizeof(struct KCPConversation));
 
@@ -723,42 +736,39 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
       memcpy(&conversation->point, point, sizeof(struct KCPPoint));
     }
 
-    if (reference != NULL)
-    {
-      // Pass conversation reference to the caller
-      *reference = conversation;
-    }
-
     if (conversation->format != format)
     {
       ReleaseKCPSegment(service, segment);
       return -EINVAL;
     }
 
-    if (time != NULL)
-    {
-      conversation->time.tv_sec  = time->tv_sec;
-      conversation->time.tv_nsec = time->tv_nsec;
-    }
-    else
-    {
-      // Use vDSO clock instead
-      clock_gettime(CLOCK_MONOTONIC, &conversation->time);
-    }
+    conversation->time.tv_sec  = time->tv_sec;
+    conversation->time.tv_nsec = time->tv_nsec;
 
     // Proceed conversation state and go ahead
 
-    result  = HandleIncomingKCPSegment(service, conversation, segment);
+    if (reference != NULL)
+    {
+      // Pass conversation reference to the caller
+      *reference = conversation;
+    }
+
+    if ((result = HandleIncomingKCPSegment(service, conversation, segment)) < 0)
+    {
+      // An error occurred while segment processed
+      return result;
+    }
+
     packet += length;
     size   -= length;
   }
 
-  return result;
+  return 0;
 }
 
 // Transmitter
 
-static int PrepareKCPSegmentList(struct KCPConversation* conversation, struct KCPSegment** list, uint16_t count, size_t length)
+static int PrepareKCPSegmentList(struct KCPConversation* conversation, struct KCPSegment** list, uint32_t count, size_t length)
 {
   const struct KCPFormat* format;
   struct KCPTransmitter* transmitter;
@@ -1290,11 +1300,10 @@ static int VerifyStandardKCPPacket(uint8_t* packet, uint32_t size)
   {
     size -= sizeof(struct StandardKCPHeader);
     if ((header->ctl.cmd == KCP_CMD_PUSH) &&
-        (size == le32toh(header->len))    ||
+        (size >= le32toh(header->len))    ||
         (header->ctl.cmd >= KCP_CMD_ACK)  &&
         (header->ctl.cmd <= KCP_CMD_WINS) &&
-        (header->len == 0)                &&
-        (size        == 0))
+        (header->len     == 0))
     {
       //
       return KCP_PACKET_EXACTLY_VALID;
@@ -1308,15 +1317,19 @@ static uint32_t ParseStandardKCPPacket(struct KCPKey* key, struct KCPSegment* se
 {
   struct StandardKCPHeader* header;
 
-  header            = (struct StandardKCPHeader*)packet;
-  key->conversation = header->conv;
-  segment->packet   = packet;
-  segment->size     = size;
-  segment->control  = &header->ctl;
-  segment->data     = packet + sizeof(struct StandardKCPHeader);
-  segment->length   = le32toh(header->len);
+  if (VerifyStandardKCPPacket(packet, size) == KCP_PACKET_EXACTLY_VALID)
+  {
+    header = (struct StandardKCPHeader*)packet;
 
-  return sizeof(struct StandardKCPHeader) + segment->length;
+    key->conversation = header->conv;
+    segment->control  = &header->ctl;
+    segment->data     = packet + sizeof(struct StandardKCPHeader);
+    segment->length   = le32toh(header->len);
+
+    return sizeof(struct StandardKCPHeader) + segment->length;
+  }
+
+  return 0;
 }
 
 static uint32_t ProposeStandardKCPPacket(struct sockaddr* address, uint32_t length)
