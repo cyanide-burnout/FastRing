@@ -641,7 +641,7 @@ int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFas
                (ExpandRingFileList(&ring->files, handle) != NULL)) &&
                (descriptor = AllocateFastRingDescriptor(ring, HandlePollEvent, closure)))
     {
-      ring->files.entries[handle].tag        = descriptor->tag;
+      ring->files.entries[handle].tag        = atomic_load_explicit(&descriptor->tag, memory_order_relaxed);
       ring->files.entries[handle].descriptor = descriptor;
 
       pthread_mutex_unlock(&ring->files.lock);
@@ -674,8 +674,8 @@ int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
     pthread_mutex_lock(&ring->files.lock);
 
     if (likely((handle < ring->files.length) &&
-               (descriptor       = ring->files.entries[handle].descriptor) &&
-               (descriptor->tag == ring->files.entries[handle].tag)))
+               (descriptor = ring->files.entries[handle].descriptor) &&
+               (atomic_load_explicit(&descriptor->tag, memory_order_acquire) == ring->files.entries[handle].tag)))
     {
       pthread_mutex_unlock(&ring->files.lock);
 
@@ -741,8 +741,8 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle)
     pthread_mutex_lock(&ring->files.lock);
 
     if (likely((handle < ring->files.length) &&
-               (descriptor       = ring->files.entries[handle].descriptor) &&
-               (descriptor->tag == ring->files.entries[handle].tag)))
+               (descriptor = ring->files.entries[handle].descriptor) &&
+               (atomic_load_explicit(&descriptor->tag, memory_order_acquire) == ring->files.entries[handle].tag)))
     {
       descriptor->data.poll.function         = NULL;
       ring->files.entries[handle].descriptor = NULL;
@@ -805,9 +805,9 @@ void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction funct
 
     while (entry < limit)
     {
-      if (unlikely((descriptor                      = entry->descriptor) &&
-                   (descriptor->tag                == entry->tag)        &&
-                   (descriptor->data.poll.function == function)          &&
+      if (unlikely((descriptor = entry->descriptor) &&
+                   (atomic_load_explicit(&descriptor->tag, memory_order_acquire) == entry->tag) &&
+                   (descriptor->data.poll.function == function) &&
                    (descriptor->closure            == closure)))
       {
         // Remove handler and submit cancel request
@@ -848,8 +848,8 @@ struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int 
     pthread_mutex_lock(&ring->files.lock);
 
     if ((handle < ring->files.length) &&
-        (descriptor       = ring->files.entries[handle].descriptor) &&
-        (descriptor->tag != ring->files.entries[handle].tag))
+        (descriptor = ring->files.entries[handle].descriptor) &&
+        (atomic_load_explicit(&descriptor->tag, memory_order_acquire) != ring->files.entries[handle].tag))
     {
       // Existing descriptor could change purpose and ownership
       descriptor = NULL;
