@@ -158,6 +158,15 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     }
   }
 
+  if (unlikely((completion->res == 0) &&
+               (~completion->flags & IORING_CQE_F_BUFFER)))
+  {
+    socket->inbound.descriptor = NULL;
+    CallHandlerFunction(socket, POLLHUP, -completion->res);
+    ReleaseSocketInstance(socket, reason);
+    return 0;
+  }
+
   if (likely((completion->res >= 0) &&
              (data = GetFastRingBuffer(socket->inbound.provider, completion))))
   {
