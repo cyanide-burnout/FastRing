@@ -162,7 +162,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
                (~completion->flags & IORING_CQE_F_BUFFER)))
   {
     socket->inbound.descriptor = NULL;
-    CallHandlerFunction(socket, POLLHUP, -completion->res);
+    CallHandlerFunction(socket, POLLHUP, 0);
     ReleaseSocketInstance(socket, reason);
     return 0;
   }

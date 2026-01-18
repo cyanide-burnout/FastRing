@@ -321,31 +321,6 @@ static void HandleSocket(struct FastSocket* socket, int event, int parameter)
   }
 }
 
-static void DestroyConnection(struct XMPPServer* server, struct XMPPConnection* connection)
-{
-  struct XMPPConnection* linked;
-
-  if (~connection->state & XMPP_STATE_GUARD)
-  {
-    if (linked = connection->next)      linked->previous    = connection->previous;
-    if (linked = connection->previous)  linked->next        = connection->next;
-    else                                server->connections = connection->next;
-
-    if ((~connection->state & XMPP_STATE_CLOSE) &&
-        (~connection->state & XMPP_STATE_DESTROY))
-    {
-      connection->state |= XMPP_STATE_GUARD;
-      server->function(server, connection, XMPP_EVENT_CONNECTION_DESTROY, NULL);
-    }
-
-    xmlParseChunk(connection->parser, NULL, 0, 1);
-    xmlFreeParserCtxt(connection->parser);
-    ReleaseFastSocket(connection->socket);
-    free(connection->scratch.data);
-    free(connection);
-  }
-}
-
 static int CreateConnection(struct XMPPServer* server, int handle, struct sockaddr* address, socklen_t length)
 {
   struct XMPPConnection* connection;
@@ -382,32 +357,64 @@ static int CreateConnection(struct XMPPServer* server, int handle, struct sockad
   return -1;
 }
 
+static void DestroyConnection(struct XMPPServer* server, struct XMPPConnection* connection)
+{
+  struct XMPPConnection* linked;
+
+  if (~connection->state & XMPP_STATE_GUARD)
+  {
+    if (linked = connection->next)      linked->previous    = connection->previous;
+    if (linked = connection->previous)  linked->next        = connection->next;
+    else                                server->connections = connection->next;
+
+    if ((~connection->state & XMPP_STATE_CLOSE) &&
+        (~connection->state & XMPP_STATE_DESTROY))
+    {
+      connection->state |= XMPP_STATE_GUARD;
+      server->function(server, connection, XMPP_EVENT_CONNECTION_DESTROY, NULL);
+    }
+
+    xmlParseChunk(connection->parser, NULL, 0, 1);
+    xmlFreeParserCtxt(connection->parser);
+    ReleaseFastSocket(connection->socket);
+    free(connection->scratch.data);
+    free(connection);
+  }
+}
+
+static void RejectConnection(struct XMPPServer* server, int handle)
+{
+  struct FastRingDescriptor* descriptor;
+
+  if (descriptor = AllocateFastRingDescriptor(server->ring, NULL, NULL))
+  {
+    io_uring_prep_close(&descriptor->submission, handle);
+    SubmitFastRingDescriptor(descriptor, 0);
+    return;
+  }
+
+  close(handle);
+}
+
 static int HandleConnection(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   union XMPPEventData parameter;
   struct XMPPServer* server;
-  int result;
-
 
   if ((completion != NULL) &&
       (server      = (struct XMPPServer*)descriptor->closure))
   {
     parameter.address = (struct sockaddr*)&descriptor->data.socket.address;
-    result            =
-      (completion->res >= 0) &&
-      ((server->function(server, NULL, XMPP_EVENT_CONNECTION_ACCEPT, &parameter) < 0) ||
-       (CreateConnection(server, completion->res, (struct sockaddr*)&descriptor->data.socket.address, descriptor->data.socket.length) < 0));
+    if ((completion->res >= 0) &&
+        ((server->function(server, NULL, XMPP_EVENT_CONNECTION_ACCEPT, &parameter) < 0) ||
+         (CreateConnection(server, completion->res, (struct sockaddr*)&descriptor->data.socket.address, descriptor->data.socket.length) < 0)))
+    {
+      //
+      RejectConnection(server, completion->res);
+    }
 
     descriptor->data.socket.length = sizeof(struct sockaddr_storage);
     SubmitFastRingDescriptor(descriptor, 0);
-
-    if ((result     != 0) &&
-        (descriptor  = AllocateFastRingDescriptor(server->ring, NULL, NULL)))
-    {
-      io_uring_prep_close(&descriptor->submission, completion->res);
-      SubmitFastRingDescriptor(descriptor, 0);
-    }
-
     return 1;
   }
 
@@ -458,11 +465,12 @@ struct XMPPServer* CreateXMPPServer(struct FastRing* ring, HandleXMPPEvent funct
     server->handle = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
 
     if ((server->handle < 0) ||
-        (setsockopt(server->handle, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(int)) < 0) ||
-        (setsockopt(server->handle, SOL_SOCKET, SO_REUSEPORT, &value, sizeof(int)) < 0) ||
-        (setsockopt(server->handle, SOL_TCP,    TCP_NODELAY,  &value, sizeof(int)) < 0) ||
-        (bind(server->handle, (struct sockaddr*)&address, sizeof(struct sockaddr_in6)) < 0) ||
-        (listen(server->handle, 10) < 0))
+        (setsockopt(server->handle, SOL_SOCKET,  SO_REUSEADDR,     &value, sizeof(int)) < 0) ||
+        (setsockopt(server->handle, SOL_SOCKET,  SO_REUSEPORT,     &value, sizeof(int)) < 0) ||
+        (setsockopt(server->handle, SOL_TCP,     TCP_NODELAY,      &value, sizeof(int)) < 0) ||
+        (setsockopt(server->handle, IPPROTO_TCP, TCP_DEFER_ACCEPT, &value, sizeof(int)) < 0) ||
+        (bind(server->handle, (struct sockaddr*)&address, sizeof(struct sockaddr_in6))  < 0) ||
+        (listen(server->handle, 256) < 0))
     {
       close(server->handle);
       free(server);
