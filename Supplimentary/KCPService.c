@@ -643,6 +643,12 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
   int result;
   int kind;
 
+  if (reference != NULL)
+  {
+    // Reset conversation reference
+    *reference = NULL;
+  }
+
   if (format->verify((uint8_t*)packet, size) < 0)
   {
     // Malformed packet
@@ -661,12 +667,6 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
   {
     time = (struct timespec*)alloca(sizeof(struct timespec));
     clock_gettime(CLOCK_MONOTONIC, time);
-  }
-
-  if (reference != NULL)
-  {
-    // Reset conversation reference
-    *reference = NULL;
   }
 
   conversation = NULL;
@@ -1182,8 +1182,8 @@ void ReleaseKCPConversation(struct KCPConversation* conversation)
 
     if (conversation->count == 0)
     {
-      queue   = &conversation->outbound;
-      mask    = queue->size - 1;
+      queue = &conversation->outbound;
+      mask  = queue->size - 1;
 
       while (queue->head != queue->tail)
       {
