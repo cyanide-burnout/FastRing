@@ -12,52 +12,24 @@ struct DBusCore
   DBusConnection* connection;
 };
 
-static int HandleWatchEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+static void HandleWatchEvent(struct FastRingDescriptor* descriptor, int result)
 {
   int handle;
   uint32_t flags;
   DBusWatch* watch;
 
-  if ((completion != NULL) &&
-      (watch = (DBusWatch*)descriptor->closure) &&
-      (~completion->user_data & RING_DESC_OPTION_IGNORE))
+  if (watch = (DBusWatch*)descriptor->closure)
   {
-    descriptor->data.number = 1;
-    flags                   =
-      ((completion->res > 0) *
-       ((((completion->res & POLLIN)  != 0) * DBUS_WATCH_READABLE) |
-        (((completion->res & POLLOUT) != 0) * DBUS_WATCH_WRITABLE) |
-        (((completion->res & POLLERR) != 0) * DBUS_WATCH_ERROR)    |
-        (((completion->res & POLLHUP) != 0) * DBUS_WATCH_HANGUP))) |
-      ((completion->res < 0) * DBUS_WATCH_ERROR);
+    flags =
+      ((result > 0) *
+       ((((result & POLLIN)  != 0) * DBUS_WATCH_READABLE) |
+        (((result & POLLOUT) != 0) * DBUS_WATCH_WRITABLE) |
+        (((result & POLLERR) != 0) * DBUS_WATCH_ERROR)    |
+        (((result & POLLHUP) != 0) * DBUS_WATCH_HANGUP))) |
+      ((result < 0) * DBUS_WATCH_ERROR);
 
     dbus_watch_handle(watch, flags);
-
-    if (descriptor->data.number != 0)
-    {
-      // Watch didn't clear resubmission flag
-      // Clear flag to indicate an exit from HandleWatchEvent()
-      descriptor->data.number = 0;
-
-      if (descriptor->submission.opcode != IORING_OP_POLL_ADD)
-      {
-        // Last SQE was about io_uring_prep_poll_update()
-        io_uring_prep_rw(IORING_OP_POLL_ADD, &descriptor->submission, -1, NULL, 0, 0);
-        descriptor->submission.fd         = dbus_watch_get_unix_fd(watch);
-        descriptor->submission.user_data &= ~RING_DESC_OPTION_IGNORE;
-      }
-
-      if (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_SUBMITTED)
-      {
-        // Since D-BUS doesn't support edge triggering
-        // We have to submit each time after completion
-        SubmitFastRingDescriptor(descriptor, 0);
-        return 1;
-      }
-    }
   }
-
-  return 0;
 }
 
 static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
@@ -82,30 +54,9 @@ static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
     (((flags & DBUS_WATCH_ERROR)    != 0) * POLLERR) |
     (((flags & DBUS_WATCH_HANGUP)   != 0) * POLLHUP);
 
-  if (descriptor = (struct FastRingDescriptor*)dbus_watch_get_data(watch))
-  {
-    if ((descriptor->data.number != 0) ||                                                               // We are inside a call to HandleWatchEvent()
-        (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING) ||  // There is a pending io_uring_prep_poll_add() or io_uring_prep_poll_update()
-        (descriptor->submission.poll32_events == __io_uring_prep_poll_mask(flags)))                     // Poll mask has no changes
-    {
-      // Existing io_uring_prep_poll_add() or io_uring_prep_poll_update() is not yet submitted to kernel
-      descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
-      return TRUE;
-    }
-
-    // Update any incomplete io_uring_prep_poll_add()
-    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_initialize_sqe(&descriptor->submission);
-    io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
-    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-    return TRUE;
-  }
-
-  if (descriptor = AllocateFastRingDescriptor(core->ring, HandleWatchEvent, watch))
+  if (descriptor = AddFastRingWatch(core->ring, handle, flags, HandleWatchEvent, watch))
   {
     dbus_watch_set_data(watch, descriptor, NULL);
-    io_uring_prep_poll_add(&descriptor->submission, handle, flags);
-    SubmitFastRingDescriptor(descriptor, 0);
     return TRUE;
   }
 
@@ -119,26 +70,7 @@ static void RemoveWatch(DBusWatch* watch, void* data)
   if (descriptor = (struct FastRingDescriptor*)dbus_watch_get_data(watch))
   {
     dbus_watch_set_data(watch, NULL, NULL);
-
-    descriptor->function = NULL;
-    descriptor->closure  = NULL;
-
-    if ((descriptor->data.number != 0) ||                                                               // We are inside a call to HandleWatchEvent()
-        (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING) &&  //
-        (descriptor->submission.opcode == IORING_OP_POLL_ADD))                                          // io_uring_prep_poll_add() is not yet submitted to kernel
-    {
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_nop(&descriptor->submission);
-      PrepareFastRingDescriptor(descriptor, 0);
-      descriptor->data.number = 0;
-      return;
-    }
-
-    // Cancel any incomplete io_uring_prep_poll_add()
-    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_initialize_sqe(&descriptor->submission);
-    io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
-    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    RemoveFastRingWatch(descriptor);
   }
 }
 
@@ -159,7 +91,6 @@ static void HandleTimoutEvent(struct FastRingDescriptor* descriptor)
 
   timeout = (DBusTimeout*)descriptor->closure;
 
-  dbus_timeout_set_data(timeout, NULL, NULL);
   dbus_timeout_handle(timeout);
 }
 
@@ -169,15 +100,22 @@ static dbus_bool_t AddTimeout(DBusTimeout* timeout, void* data)
   struct DBusCore* core;
   int interval;
 
-  if (dbus_timeout_get_enabled(timeout))
+  if (!dbus_timeout_get_enabled(timeout))
   {
-    core       = (struct DBusCore*)data;
-    interval   = dbus_timeout_get_interval(timeout);
-    descriptor = SetFastRingTimeout(core->ring, NULL, interval, 0, HandleTimoutEvent, timeout);
-    dbus_timeout_set_data(timeout, descriptor, NULL);
+    // Timeout is created in disabled state
+    return TRUE;
   }
 
-  return TRUE;
+  core     = (struct DBusCore*)data;
+  interval = dbus_timeout_get_interval(timeout);
+
+  if (descriptor = SetFastRingTimeout(core->ring, NULL, interval, TIMEOUT_FLAG_REPEAT, HandleTimoutEvent, timeout))
+  {
+    dbus_timeout_set_data(timeout, descriptor, NULL);
+    return TRUE;
+  }
+
+  return FALSE;
 }
 
 static void RemoveTimeout(DBusTimeout* timeout, void* data)
@@ -240,28 +178,35 @@ struct DBusCore* CreateDBusCore(DBusConnection* connection, struct FastRing* rin
 {
   struct DBusCore* core;
 
-  core = (struct DBusCore*)calloc(1, sizeof(struct DBusCore));
+  core = NULL;
 
-  core->ring       = ring;
-  core->connection = connection;
-  core->flusher    = SetFastRingFlushHandler(core->ring, HandleDispatchEvent, core);;
+  if ((connection != NULL) &&
+      (core = (struct DBusCore*)calloc(1, sizeof(struct DBusCore))))
+  {
+    core->ring       = ring;
+    core->connection = connection;
+    core->flusher    = SetFastRingFlushHandler(core->ring, HandleDispatchEvent, core);
 
-  dbus_connection_ref(connection);
-  dbus_connection_set_dispatch_status_function(connection, HandleDispatchStatus, core, NULL);
-  dbus_connection_set_watch_functions(connection, AddWatch, RemoveWatch, ToggleWatch, core, NULL);
-  dbus_connection_set_timeout_functions(connection, AddTimeout, RemoveTimeout, ToggleTimeout, core, NULL);
+    dbus_connection_ref(connection);
+    dbus_connection_set_dispatch_status_function(connection, HandleDispatchStatus, core, NULL);
+    dbus_connection_set_watch_functions(connection, AddWatch, RemoveWatch, ToggleWatch, core, NULL);
+    dbus_connection_set_timeout_functions(connection, AddTimeout, RemoveTimeout, ToggleTimeout, core, NULL);
+  }
 
   return core;
 }
 
 void ReleaseDBusCore(struct DBusCore* core)
 {
-  RemoveFastRingFlushHandler(core->ring, core->flusher);
+  if (core != NULL)
+  {
+    RemoveFastRingFlushHandler(core->ring, core->flusher);
 
-  dbus_connection_set_timeout_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
-  dbus_connection_set_watch_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
-  dbus_connection_set_dispatch_status_function(core->connection, NULL, NULL, NULL);
-  dbus_connection_unref(core->connection);
+    dbus_connection_set_timeout_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
+    dbus_connection_set_watch_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
+    dbus_connection_set_dispatch_status_function(core->connection, NULL, NULL, NULL);
+    dbus_connection_unref(core->connection);
 
-  free(core);
+    free(core);
+  }
 }

@@ -88,24 +88,37 @@ struct FastRingBufferProvider;
 #define RING_TRACE_ACTION_HANDLE   0
 #define RING_TRACE_ACTION_RELEASE  1
 
+#define RING_CONDITION_GUARD       (1U << 0)
+#define RING_CONDITION_UPDATE      (1U << 1)
+#define RING_CONDITION_REMOVE      (1U << 2)
+
 typedef int (*HandleFastRingCompletionFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 typedef void (*HandleFastRingFlushFunction)(void* closure, int reason);
 typedef void (*TraceFastRingFunction)(int action, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason, void* closure);
 typedef void (*HandleFastRingPollFunction)(int handle, uint32_t flags, void* closure, uint64_t options);
+typedef void (*HandleFastRingWatchFunction)(struct FastRingDescriptor* descriptor, int result);
 typedef void (*HandleFastRingTimeoutFunction)(struct FastRingDescriptor* descriptor);
 
 struct FastRingPollData
 {
   int handle;
   uint64_t flags;
-  uint32_t condition;
+  ATOMIC(uint32_t) condition;
   HandleFastRingPollFunction function;
+};
+
+struct FastRingWatchData
+{
+  int handle;
+  uint64_t flags;
+  ATOMIC(uint32_t) condition;
+  HandleFastRingWatchFunction function;
 };
 
 struct FastRingTimeoutData
 {
   uint64_t flags;
-  uint32_t condition;
+  ATOMIC(uint32_t) condition;
   struct __kernel_timespec interval;
   HandleFastRingTimeoutFunction function;
 };
@@ -124,6 +137,7 @@ union FastRingData
   void* pointer;
   uint64_t number;
   struct FastRingPollData poll;
+  struct FastRingWatchData watch;
   struct FastRingSocketData socket;
   struct FastRingTimeoutData timeout;
   uint8_t data[256];
@@ -275,6 +289,14 @@ void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction funct
 
 int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
 struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int handle);
+
+// Watch
+
+struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, uint32_t flags, HandleFastRingWatchFunction function, void* closure);
+void UpdateFastRingWatch(struct FastRingDescriptor* descriptor, uint32_t flags);
+void RemoveFastRingWatch(struct FastRingDescriptor* descriptor);
+
+struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRingDescriptor* descriptor, int handle, uint32_t flags, HandleFastRingWatchFunction function, void* closure);
 
 // Timeout
 
