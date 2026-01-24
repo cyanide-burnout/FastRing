@@ -88,9 +88,10 @@ struct FastRingBufferProvider;
 #define RING_TRACE_ACTION_HANDLE   0
 #define RING_TRACE_ACTION_RELEASE  1
 
-#define RING_CONDITION_GUARD       (1U << 0)
-#define RING_CONDITION_UPDATE      (1U << 1)
-#define RING_CONDITION_REMOVE      (1U << 2)
+#define RING_CONDITION_GUARD       (1U << 16)
+#define RING_CONDITION_UPDATE      (1U << 17)
+#define RING_CONDITION_REMOVE      (1U << 18)
+#define RING_CONDITION_MASK        (RING_CONDITION_GUARD | RING_CONDITION_UPDATE | RING_CONDITION_REMOVE)
 
 typedef int (*HandleFastRingCompletionFunction)(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 typedef void (*HandleFastRingFlushFunction)(void* closure, int reason);
