@@ -615,14 +615,24 @@ void ReleaseFastRing(struct FastRing* ring)
 
 static int __attribute__((hot)) HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
+  uint32_t condition;
+
   if (likely(( completion      != NULL) &&
              ( completion->res >= 0)    &&
-             (~completion->user_data & RING_DESC_OPTION_IGNORE) &&
-             (descriptor->data.poll.function != NULL)))
+             (~completion->user_data & RING_DESC_OPTION_IGNORE)))
   {
-    descriptor->data.poll.condition = ~completion->flags;
-    descriptor->data.poll.function(descriptor->data.poll.handle, completion->res, descriptor->closure, descriptor->data.poll.flags);
-    descriptor->data.poll.condition = 0;
+    do condition = atomic_load_explicit(&descriptor->data.poll.condition, memory_order_relaxed);
+    while (!(atomic_compare_exchange_weak_explicit(&descriptor->data.poll.condition, &condition,
+              condition & RING_CONDITION_MASK | completion->flags & IORING_CQE_F_MORE | RING_CONDITION_GUARD,
+              memory_order_release, memory_order_relaxed)));
+
+    if (likely(~condition & RING_CONDITION_REMOVE))
+    {
+      //
+      descriptor->data.poll.function(descriptor->data.poll.handle, completion->res, descriptor->closure, descriptor->data.poll.flags);
+    }
+
+    atomic_fetch_and_explicit(&descriptor->data.poll.condition, ~RING_CONDITION_GUARD, memory_order_release);
   }
 
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
@@ -646,14 +656,14 @@ int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFas
 
       pthread_mutex_unlock(&ring->files.lock);
 
+      io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_poll_add(&descriptor->submission, handle, flags);
       descriptor->submission.len     = RING_POLL_FLAGS(flags);
       descriptor->data.poll.function = function;
       descriptor->data.poll.handle   = handle;
       descriptor->data.poll.flags    = flags;
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
-
+      atomic_store_explicit(&descriptor->data.poll.condition, 0, memory_order_relaxed);
       SubmitFastRingDescriptor(descriptor, 0);
       return 0;
     }
@@ -667,6 +677,7 @@ int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFas
 int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
 {
   struct FastRingDescriptor* descriptor;
+  uint32_t condition;
 
   if (likely((handle >= 0) &&
              (ring != NULL)))
@@ -680,6 +691,7 @@ int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
       pthread_mutex_unlock(&ring->files.lock);
 
       descriptor->data.poll.flags = flags;
+      condition = atomic_load_explicit(&descriptor->data.poll.condition, memory_order_relaxed);
 
       if (unlikely(LockPendingRingDescriptor(descriptor)))
       {
@@ -697,7 +709,7 @@ int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
         return 0;
       }
 
-      if (unlikely((descriptor->data.poll.condition & IORING_CQE_F_MORE) ||
+      if (unlikely((~condition & IORING_CQE_F_MORE) ||
                    (atomic_load_explicit(&descriptor->references, memory_order_relaxed) == 1)))
       {
         if (likely(LockSubmittedRingDescriptor(descriptor)))
@@ -744,7 +756,7 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle)
                (descriptor = ring->files.entries[handle].descriptor) &&
                (atomic_load_explicit(&descriptor->tag, memory_order_acquire) == ring->files.entries[handle].tag)))
     {
-      descriptor->data.poll.function         = NULL;
+      atomic_fetch_or_explicit(&descriptor->data.poll.condition, RING_CONDITION_REMOVE, memory_order_release);
       ring->files.entries[handle].descriptor = NULL;
       ring->files.entries[handle].tag        = 0;
 
