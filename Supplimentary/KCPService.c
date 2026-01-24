@@ -652,7 +652,7 @@ int HandleKCPPacket(struct KCPService* service, const struct KCPFormat* format, 
   if (format->verify((uint8_t*)packet, size) < 0)
   {
     // Malformed packet
-    return -EINVAL;
+    return -EPROTO;
   }
 
   memset(&key, 0, sizeof(struct KCPKey));

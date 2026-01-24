@@ -28,9 +28,9 @@ typedef void (*HandleThreadCallFunction)(void* closure, va_list arguments);
 
 struct ThreadCallState
 {
-  ATOMIC(uint32_t) result;
+  void* next;
   ATOMIC(uint32_t) tag;
-  ATOMIC(struct ThreadCallState*) next;
+  ATOMIC(uint32_t) result;
   va_list arguments;
 };
 
@@ -47,7 +47,7 @@ struct ThreadCall
   int feature;
   ATOMIC(int) count;
   ATOMIC(int) weight;
-  ATOMIC(struct ThreadCallState*) stack;
+  ATOMIC(void*) stack;
 };
 
 struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunction function, void* closure);
