@@ -40,7 +40,7 @@ static void ManageResolverHandler(void* data, ares_socket_t handle, int readable
     ((!!readable) * (POLLIN |           POLLERR | POLLHUP)) |
     ((!!writable) * (POLLIN | POLLOUT | POLLERR | POLLHUP));
 
-  ManageFastRingPoll(state->ring, handle, flags, HandleSocketEvent, data);
+  SetFastRingPoll(state->ring, handle, flags, HandleSocketEvent, data);
 }
 
 struct ResolverState* CreateResolver(struct FastRing* ring)

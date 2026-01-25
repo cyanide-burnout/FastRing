@@ -674,7 +674,7 @@ int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFas
   return -ENOMEM;
 }
 
-int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
+int UpdateFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
 {
   struct FastRingDescriptor* descriptor;
   uint32_t condition;
@@ -704,7 +704,7 @@ int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
         }
 
         descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
-        descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_POLL_FLAGS(flags);
+        descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS;
         atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
         return 0;
       }
@@ -728,7 +728,7 @@ int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
       if (likely(LockSubmittedRingDescriptor(descriptor)))
       {
         io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS | RING_POLL_FLAGS(flags));
+        io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
         atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
         SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
         return 0;
@@ -833,13 +833,13 @@ void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction funct
   }
 }
 
-int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure)
+int SetFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure)
 {
   int result;
 
   result = (flags == 0ULL) ?
     RemoveFastRingPoll(ring, handle) :
-    ModifyFastRingPoll(ring, handle, flags);
+    UpdateFastRingPoll(ring, handle, flags);
 
   result = (result == -EBADF) && (flags != 0ULL) ?
     AddFastRingPoll(ring, handle, flags, function, closure) :
@@ -877,21 +877,30 @@ struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int 
 
 static int __attribute__((hot)) HandleWatchEvent(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
+  uint32_t condition;
+
   if (likely(( completion != NULL) &&
              (~completion->user_data & RING_DESC_OPTION_IGNORE)))
   {
-    if (likely(~atomic_fetch_or_explicit(&descriptor->data.watch.condition, RING_CONDITION_GUARD, memory_order_release) & RING_CONDITION_REMOVE))
+    do condition = atomic_load_explicit(&descriptor->data.watch.condition, memory_order_relaxed);
+    while (!(atomic_compare_exchange_weak_explicit(&descriptor->data.watch.condition, &condition,
+              condition & RING_CONDITION_MASK | completion->flags & IORING_CQE_F_MORE | RING_CONDITION_GUARD,
+              memory_order_release, memory_order_relaxed)));
+
+    if (likely(~condition & RING_CONDITION_REMOVE))
     {
       //
       descriptor->data.watch.function(descriptor, completion->res);
     }
 
-    if (likely(~atomic_fetch_and_explicit(&descriptor->data.watch.condition, ~RING_CONDITION_GUARD, memory_order_acq_rel) & RING_CONDITION_REMOVE))
+    if (likely((~atomic_fetch_and_explicit(&descriptor->data.watch.condition, ~RING_CONDITION_GUARD, memory_order_acq_rel) & RING_CONDITION_REMOVE) &&
+               (~completion->flags & IORING_CQE_F_MORE)))
     {
       if (likely(LockPendingRingDescriptor(descriptor)))
       {
         io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, descriptor->data.watch.flags);
+        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, descriptor->data.watch.mask);
+        descriptor->submission.len = descriptor->data.watch.flags;
         PrepareFastRingDescriptor(descriptor, 0);
         return 1;
       }
@@ -899,32 +908,36 @@ static int __attribute__((hot)) HandleWatchEvent(struct FastRingDescriptor* desc
       if (likely(LockSubmittedRingDescriptor(descriptor)))
       {
         io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, descriptor->data.watch.flags);
+        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, descriptor->data.watch.mask);
+        descriptor->submission.len = descriptor->data.watch.flags;
         SubmitFastRingDescriptor(descriptor, 0);
         return 1;
       }
     }
   }
 
-  return 0;
+  return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
-struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, uint32_t flags, HandleFastRingWatchFunction function, void* closure)
+struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, uint32_t mask, uint32_t flags, HandleFastRingWatchFunction function, void* closure)
 {
   struct FastRingDescriptor* descriptor;
 
   if (likely((handle   >= 0) &&
-             (flags    != 0) &&
+             (mask     != 0) &&
              (ring     != NULL) &&
              (function != NULL) &&
              (descriptor = AllocateFastRingDescriptor(ring, HandleWatchEvent, closure))))
   {
-    descriptor->data.watch.flags    = flags;
-    descriptor->data.watch.handle   = handle;
-    descriptor->data.watch.function = function;
-    atomic_store_explicit(&descriptor->data.watch.condition, 0, memory_order_relaxed);
     io_uring_initialize_sqe(&descriptor->submission);
-    io_uring_prep_poll_add(&descriptor->submission, handle, flags);
+    io_uring_prep_poll_add(&descriptor->submission, handle, mask);
+    descriptor->data.watch.function = function;
+    descriptor->data.watch.handle   = handle;
+    descriptor->data.watch.flags    = flags & (IORING_POLL_ADD_MULTI | IORING_POLL_ADD_LEVEL);
+    descriptor->data.watch.mask     = mask;
+    descriptor->submission.len      = descriptor->data.watch.flags;
+    atomic_store_explicit(&descriptor->data.watch.condition, 0, memory_order_relaxed);
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     SubmitFastRingDescriptor(descriptor, 0);
     return descriptor;
   }
@@ -932,33 +945,54 @@ struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, u
   return NULL;
 }
 
-void UpdateFastRingWatch(struct FastRingDescriptor* descriptor, uint32_t flags)
+void UpdateFastRingWatch(struct FastRingDescriptor* descriptor, uint32_t mask)
 {
-  if (likely((flags != 0) &&
+  uint32_t condition;
+
+  if (likely((mask != 0) &&
              (descriptor != NULL) &&
-             (descriptor->data.watch.flags != flags)))
+             (descriptor->data.watch.mask != mask)))
   {
-    descriptor->data.watch.flags = flags;
+    descriptor->data.watch.mask = mask;
+    condition = atomic_load_explicit(&descriptor->data.watch.condition, memory_order_acquire);
 
-    if (atomic_load_explicit(&descriptor->data.watch.condition, memory_order_acquire) & RING_CONDITION_GUARD)
+    if (likely((~condition & RING_CONDITION_GUARD) &&
+               ( condition & IORING_CQE_F_MORE)))
     {
-      // We are inside a call to HandleWatchEvent()
-      return;
+      if (likely(LockPendingRingDescriptor(descriptor)))
+      {
+        if (likely(descriptor->submission.opcode == IORING_OP_POLL_ADD))
+        {
+          descriptor->submission.poll32_events = __io_uring_prep_poll_mask(mask);
+          descriptor->submission.len           = descriptor->data.watch.flags;
+          atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
+          return;
+        }
+
+        descriptor->submission.poll32_events = __io_uring_prep_poll_mask(mask);
+        descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS;
+        atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
+        return;
+      }
+
+      if (likely(LockSubmittedRingDescriptor(descriptor)))
+      {
+        io_uring_initialize_sqe(&descriptor->submission);
+        io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, mask, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
+        atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+        SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+        return;
+      }
     }
 
-    if (likely(LockPendingRingDescriptor(descriptor)))
+    if (likely((~condition & IORING_CQE_F_MORE) &&
+               (LockSubmittedRingDescriptor(descriptor))))
     {
-      descriptor->submission.poll32_events = __io_uring_prep_poll_mask(flags);
-      atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
-      return;
-    }
-
-    if (likely(LockSubmittedRingDescriptor(descriptor)))
-    {
-      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, flags, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
-      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, mask);
+      descriptor->submission.len = descriptor->data.watch.flags;
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      SubmitFastRingDescriptor(descriptor, 0);
       return;
     }
   }
@@ -967,7 +1001,8 @@ void UpdateFastRingWatch(struct FastRingDescriptor* descriptor, uint32_t flags)
 void RemoveFastRingWatch(struct FastRingDescriptor* descriptor)
 {
   if (likely((descriptor != NULL) &&
-             (~atomic_fetch_or_explicit(&descriptor->data.watch.condition, RING_CONDITION_REMOVE, memory_order_acq_rel) & RING_CONDITION_GUARD)))
+             (~atomic_fetch_or_explicit(&descriptor->data.watch.condition, RING_CONDITION_REMOVE, memory_order_acq_rel) & RING_CONDITION_GUARD) &&
+             (ReleaseFastRingDescriptor(descriptor) > 0)))
   {
     if (LockPendingRingDescriptor(descriptor))
     {
@@ -988,31 +1023,31 @@ void RemoveFastRingWatch(struct FastRingDescriptor* descriptor)
 
     if (LockSubmittedRingDescriptor(descriptor))
     {
-      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     }
   }
 }
 
-struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRingDescriptor* descriptor, int handle, uint32_t flags, HandleFastRingWatchFunction function, void* closure)
+struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRingDescriptor* descriptor, int handle, uint32_t mask, uint32_t flags, HandleFastRingWatchFunction function, void* closure)
 {
-  if ((flags      == 0) &&
+  if ((mask == 0) &&
       (descriptor != NULL))
   {
     RemoveFastRingWatch(descriptor);
     return NULL;
   }
 
-  if ((flags      != 0) &&
+  if ((mask != 0) &&
       (descriptor != NULL))
   {
-    UpdateFastRingWatch(descriptor, flags);
+    UpdateFastRingWatch(descriptor, mask);
     return descriptor;
   }
 
-  return AddFastRingWatch(ring, handle, flags, function, closure);
+  return AddFastRingWatch(ring, handle, mask, flags, function, closure);
 }
 
 // Timeout
@@ -1322,7 +1357,7 @@ void PrepareFastRingBuffer(struct FastRingBufferProvider* provider, struct io_ur
 uint8_t* GetFastRingBuffer(struct FastRingBufferProvider* provider, struct io_uring_cqe* completion)
 {
   return
-    likely((completion != NULL) && (completion->flags & IORING_CQE_F_BUFFER)) ? 
+    likely((completion != NULL) && (completion->flags & IORING_CQE_F_BUFFER)) ?
     (uint8_t*)provider->map[completion->flags >> IORING_CQE_BUFFER_SHIFT] :
     NULL;
 }
@@ -1346,7 +1381,7 @@ void AdvanceFastRingBuffer(struct FastRingBufferProvider* provider, struct io_ur
 
     tail  = atomic_load_explicit((_Atomic __u16*)&provider->data->tail, memory_order_relaxed);
     tail &= provider->registration.ring_entries - 1;
-  
+
     buffer       = provider->data->bufs + tail;
     buffer->addr = provider->map[index];
     buffer->len  = provider->length;

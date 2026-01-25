@@ -111,7 +111,8 @@ struct FastRingPollData
 struct FastRingWatchData
 {
   int handle;
-  uint64_t flags;
+  uint32_t mask;
+  uint32_t flags;
   ATOMIC(uint32_t) condition;
   HandleFastRingWatchFunction function;
 };
@@ -284,20 +285,20 @@ void ReleaseFastRing(struct FastRing* ring);
 #define RING_POLL_HANGUP  (uint64_t)POLLHUP
 
 int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
-int ModifyFastRingPoll(struct FastRing* ring, int handle, uint64_t flags);
+int UpdateFastRingPoll(struct FastRing* ring, int handle, uint64_t flags);
 int RemoveFastRingPoll(struct FastRing* ring, int handle);
 void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction function, void* closure);
 
-int ManageFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
+int SetFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
 struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int handle);
 
 // Watch
 
-struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, uint32_t flags, HandleFastRingWatchFunction function, void* closure);
+struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, uint32_t mask, uint32_t flags, HandleFastRingWatchFunction function, void* closure);
 void UpdateFastRingWatch(struct FastRingDescriptor* descriptor, uint32_t flags);
 void RemoveFastRingWatch(struct FastRingDescriptor* descriptor);
 
-struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRingDescriptor* descriptor, int handle, uint32_t flags, HandleFastRingWatchFunction function, void* closure);
+struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRingDescriptor* descriptor, int handle, uint32_t mask, uint32_t flags, HandleFastRingWatchFunction function, void* closure);
 
 // Timeout
 

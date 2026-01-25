@@ -54,7 +54,7 @@ static dbus_bool_t AddWatch(DBusWatch* watch, void* data)
     (((flags & DBUS_WATCH_ERROR)    != 0) * POLLERR) |
     (((flags & DBUS_WATCH_HANGUP)   != 0) * POLLHUP);
 
-  if (descriptor = AddFastRingWatch(core->ring, handle, flags, HandleWatchEvent, watch))
+  if (descriptor = AddFastRingWatch(core->ring, handle, flags, 0, HandleWatchEvent, watch))
   {
     dbus_watch_set_data(watch, descriptor, NULL);
     return TRUE;

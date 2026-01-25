@@ -51,7 +51,7 @@ static AvahiWatch* HandleiWatchNew(const AvahiPoll* poll, int handle, AvahiWatch
     private->events     = events;
     private->closure    = closure;
     private->function   = function;
-    private->descriptor = SetFastRingWatch(private->ring, NULL, handle, mask, HandleWatchEvent, private);
+    private->descriptor = SetFastRingWatch(private->ring, NULL, handle, mask, 0, HandleWatchEvent, private);
 
     if (private->descriptor == NULL)
     {
@@ -78,7 +78,7 @@ static void HandleWatchUpdate(AvahiWatch* watch, AvahiWatchEvent events)
       (((events & AVAHI_WATCH_HUP) != 0) * POLLHUP);
 
     private->events     = events;
-    private->descriptor = SetFastRingWatch(private->ring, private->descriptor, private->handle, mask, HandleWatchEvent, private);
+    private->descriptor = SetFastRingWatch(private->ring, private->descriptor, private->handle, mask, 0, HandleWatchEvent, private);
   }
 }
 
