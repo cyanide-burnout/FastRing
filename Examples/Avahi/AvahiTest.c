@@ -266,7 +266,7 @@ int main()
 
   printf("Started\n");
 
-  browser = avahi_service_browser_new(client, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC, "_http._tcp", NULL, 0, HandleBrowserEvent, client);
+  browser = avahi_service_browser_new(client, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC, "_dummy._tcp", NULL, 0, HandleBrowserEvent, client);
   timeout = SetFastRingTimeout(ring, NULL, 10000, TIMEOUT_FLAG_REPEAT, HandleTimeoutCompletion, &context);
 
   while ((atomic_load_explicit(&state, memory_order_relaxed) == STATE_RUNNING) &&
