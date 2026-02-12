@@ -1,89 +1,131 @@
 # FastRing
 
-Event multiplexing library for io_uring
+`FastRing` is a set of high-performance asynchronous I/O modules built around `io_uring` (Linux).
+It is designed for reactive networking workloads and low-overhead event handling.
 
-This is extract of my libraries I am using in my projects https://brandmeister.network and https://tetrapack.online
+This repository includes:
+- the core event/descriptor engine (`Ring/FastRing.*`)
+- networking and protocol adapters (`FastSocket`, `FastBIO`, `Fetch`, `CURLWSCore`, `Resolver`, etc.)
+- supplementary modules (`Supplimentary/`)
+- runnable examples (`Examples/`)
 
-The library solves following problems:
-- Submission/complition multiplexing
-- Submission queue boundary control
-- Events and handlers tracking, submission ordering
-- Emulation of classic poll-based approach including handle watch and timers
+## What It Solves
 
-## FastRing
+FastRing provides:
+- `SQE/CQE` multiplexing
+- submission/completion queue flow control
+- descriptor lifecycle tracking
+- `poll/watch/timeout/event` primitives with an event-loop style API
 
-TBD
+## Requirements
 
-## FastBuffer
+- Linux with `io_uring` support (recommended: kernel >= 5.13)
+- `liburing` (some modules require >= 2.6)
+- `pthread`
+- optional dependencies by module:
+  - `openssl`
+  - `libcurl`
+  - `libwebsockets`
+  - `glib-2.0` / `libuv`
+  - `avahi-client`
+  - `dbus-1`
+  - `c-ares`
+  - `protobuf-c`
+  - `systemd` (watchdog)
 
-Fast buffer pool implementation, specifically designed for use with FastRing.
-See usage examples in FastBIO and FastSocket.
+## Repository Layout
 
-## CoRing
+- `Ring/` - core library and adapters
+- `Supplimentary/` - extra modules (gRPC/H2O/KCP/XMPP, etc.)
+- `Examples/` - example applications with per-folder Makefiles
+- `Documentations/` - API and integration notes
 
-That is a small adapter to use in C++ coroutines with my Compromise library (https://github.com/cyanide-burnout/Compromise)
+## Documentations
 
-## FastGLoop
+- Documentation index: `Documentations/README.md`
+- `FastRing` API: `Documentations/FastRing.md`
+- `FastSocket` API: `Documentations/FastSocket.md`
 
-Adapter to incorporate Glib 2.0 main loop into FastRing. It creates green-thread / fiber for GLib by using ucontext.h.
+## Quick Start (FastRing Core)
 
-- *CreateFastGLoop* - creates a new instance of FastGLoop
-- *ReleaseFastGLoop* - destroys FastGLoop
-- *StopFastGLoop* - you optionally can call it before ReleaseFastGLoop when you need to make extra actions before destruction of GMainLoop.
+Typical lifecycle:
+1. Create a ring: `CreateFastRing()`
+2. Register operations (`poll/watch/timeout`) or submit custom SQEs via descriptor API
+3. Drive the loop: `WaitForFastRing()`
+4. Release resources: `ReleaseFastRing()`
 
-`struct FastGLoop` provides two attributes for be used in user code:
-- `GMainLoop* loop`
-- `GMainContext* context`
+Key APIs (`Ring/FastRing.h`):
+- lifecycle: `CreateFastRing`, `ReleaseFastRing`, `WaitForFastRing`
+- descriptors: `AllocateFastRingDescriptor`, `PrepareFastRingDescriptor`, `SubmitFastRingDescriptor`, `ReleaseFastRingDescriptor`
+- poll: `AddFastRingPoll`, `UpdateFastRingPoll`, `RemoveFastRingPoll`, `SetFastRingPoll`
+- watch: `AddFastRingWatch`, `UpdateFastRingWatch`, `RemoveFastRingWatch`, `SetFastRingWatch`
+- timeout: `SetFastRingTimeout`, `SetFastRingCertainTimeout`, `SetFastRingPreciseTimeout`
+- event: `CreateFastRingEvent`, `SubmitFastRingEvent`
+- registered resources: `AddFastRingRegisteredFile`, `RemoveFastRingRegisteredFile`, `AddFastRingRegisteredBuffer`, `UpdateFastRingRegisteredBuffer`
 
-## ThreadCall
+## Building Examples
 
-Make a call to a handler running FastRing from any other thread
+There is no single top-level build target in this repo.
+Build examples from their own directories under `Examples/*`.
 
-- *CreateThreadCall* - creates a new ThreadCall
-- *HoldThreadCall* - should be used by caller to increment weight (kind of reference counter) to hold the object
-- *ReleaseThreadCall* - decrements weight, releases ThreadCall
-- *FreeThreadCall* - simplified form of ReleaseThreadCall for caller, useful for callbacks
-- *MakeVariadicThreadCall* / *MakeThreadCall* - makes a call
+Example:
 
-## FastSemaphore
+```bash
+cd Examples/CURLWS
+make
+./curlwstest
+```
 
-Reactive backend for glibc's sem_t
+Other example targets:
+- `Examples/Avahi`
+- `Examples/H2H3Server`
+- `Examples/gRPCClient`
+- `Examples/gRPCServer`
 
-- *SubmitFastSemaphoreWait* - registers an asynchronous handler to be called when a token becomes available, replaces sem_wait()
-- *CancelFastSemaphoreWait* - cancels a previously registered asynchronous handler
-- *SubmitFastSemaphorePost* - posts token to the semaphore, can be used instead of sem_post() to avoid a synchronous syscall futex_wake()
+Dependencies for each example are defined in its local `Makefile` via `pkg-config`.
 
-*FastSemaphoreFunction* can return 1 to continue receiving tokens or 0 to stop receiving tokens
+## Module Overview
 
-## FastSocket
+### Core (`Ring/`)
 
-Generic socket I/O through FastRing
+- `FastRing` - core `io_uring` engine: submit/complete, poll/watch/timeout, descriptor lifecycle
+- `FastBuffer` - buffer pool and buffer registration helpers
+- `FastSocket` - asynchronous socket I/O on top of FastRing
+- `FastBIO` - async OpenSSL BIO transport adapter
+- `SSLSocket` - TLS socket layer built on OpenSSL
+- `ThreadCall` - cross-thread calls into the ring handler thread
+- `FastSemaphore` - reactive `sem_t` integration (glibc internals + io_uring futex ops)
+- `FastGLoop` - `GLib` loop integration
+- `FastUVLoop` - `libuv` loop integration
+- `Fetch` - asynchronous wrapper over `libcurl` multi interface
+- `CURLWSCore` - recommended WebSocket client adapter
+- `LWSCore` - deprecated WebSocket adapter (kept for compatibility)
+- `FastAvahiPoll` - Avahi poll adapter for FastRing
+- `DBusCore` - D-Bus integration
+- `Resolver` - c-ares DNS resolver integration
+- `LuaPoll` - Lua/LuaJIT bindings
+- `WatchDog` - systemd watchdog helper
+- `RingProfiler` - profiling helpers for ring activity
+- `CoRing` - C++ coroutine adapter
 
-## FastBIO / SSLSocket
+### Supplementary (`Supplimentary/`)
 
-Asynchronous TLS and BIO on top of OpenSSL
+- `H2OCore` - H2O HTTP/2/HTTP/3 integration layer
+- `PicoBundle` - picotls/certificate bundle helper
+- `ProtoBuf` - protobuf-c support helpers
+- `gRPC` - shared gRPC-related types/utilities
+- `gRPCClient` - gRPC client implementation
+- `gRPCServer` - gRPC server implementation
+- `KCPAdapter` - KCP/FastRing adapter layer
+- `KCPService` - KCP service implementation
+- `XMPPServer` - XMPP server module
 
-## DBusCore
+## Limitations
 
-D-BUS adapter for FastRing
+- Linux-only target platform
+- some modules depend on specific libc/liburing behavior
+- low-level API: descriptor and buffer lifetime must be managed carefully
 
-## WatchDog
+## License
 
-Watchdog implementation for systemd
-
-## LuaPoll
-
-Bindings to liblua / luajit. Please read LuaPoll.txt
-
-## Resolver
-
-Bindings to DNS resolution library C-ARES
-
-## LWSCore
-
-WebSocket client library on top of libwebsockets, it uses main loop integration over Glib 2.0
-
-## Fetch
-
-CURL wrapper with asynchronous fetch using CURL's multi interface.
-
+See `LICENSE`.
