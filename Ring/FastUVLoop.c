@@ -7,7 +7,7 @@ static int HandlePollCompletion(struct FastRingDescriptor* descriptor, struct io
   struct FastUVLoop* loop;
 
   if ((completion != NULL) &&
-      (~completion->flags & RING_DESC_OPTION_IGNORE))
+      (~completion->user_data & RING_DESC_OPTION_IGNORE))
   {
     loop = (struct FastUVLoop*)descriptor->closure;
 

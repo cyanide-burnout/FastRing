@@ -510,7 +510,14 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
   size_t length;
 
   if (unlikely((socket  == NULL) ||
-               (message == NULL)))
+               (message == NULL) ||
+               (message->msg_iovlen     != 0)    &&
+               (message->msg_iov        == NULL) ||
+               (message->msg_controllen != 0)    &&
+               (message->msg_control    == NULL) ||
+               (message->msg_namelen    != 0) &&
+               ((message->msg_name      == NULL) ||
+                (message->msg_namelen   >  sizeof(struct sockaddr_storage)))))
   {
     // Cannot proceed a call
     return -EINVAL;
@@ -590,7 +597,12 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   struct FastRingDescriptor* descriptor;
   struct FastBuffer* buffer;
 
-  if (unlikely(socket == NULL))
+  if (unlikely((socket   == NULL) ||
+               (size     != 0)    &&
+               (data     == NULL) ||
+               (length   != 0)    &&
+               ((address == NULL) ||
+                (length   > sizeof(struct sockaddr_storage)))))
   {
     // Cannot proceed a call
     return -EINVAL;

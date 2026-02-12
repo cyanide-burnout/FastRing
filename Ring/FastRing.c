@@ -31,6 +31,10 @@
 #define RING_POLL_FLAGS(flags)  ((~flags >> RING_POLL_FLAGS_SHIFT) & (IORING_POLL_ADD_MULTI | IORING_POLL_ADD_LEVEL))
 #endif
 
+#ifndef IORING_ENTER_NO_IOWAIT
+#define io_uring_set_iowait(ring, value)
+#endif
+
 // Supplementary
 
 static __attribute__((constructor)) void Initialize()
@@ -537,10 +541,10 @@ int IsFastRingThread(struct FastRing* ring)
 
 struct FastRing* CreateFastRing(uint32_t length)
 {
+  pthread_mutexattr_t attribute;
   struct FastRing* ring;
   struct utsname name;
   struct rlimit limit;
-  pthread_mutexattr_t attribute;
 
   if ((uname(&name) < 0) ||
       (name.release[1] == '.') &&
@@ -553,23 +557,23 @@ struct FastRing* CreateFastRing(uint32_t length)
   memset(&limit, 0, sizeof(struct rlimit));
   getrlimit(RLIMIT_NOFILE, &limit);
 
-  ring = (struct FastRing*)calloc(1, sizeof(struct FastRing));
-
-  if (ring != NULL)
+  if (ring = (struct FastRing*)calloc(1, sizeof(struct FastRing)))
   {
     length += (length == 0) * limit.rlim_cur;
-    length  = 1 << (32 - __builtin_clz(length - 1));  // Rounding up to next power of 2
+    length  = (length <= 1) ? length : (1 << (32 - __builtin_clz(length - 1)));  // Rounding up to next power of 2
     length  = ((length == 0) || (length > RING_MAXIMUM_LENGTH)) ? RING_MAXIMUM_LENGTH : length;
 
     ring->parameters.flags      = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE;
     ring->parameters.cq_entries = length * RING_COMPLETION_RATIO;
 
-    io_uring_queue_init_params(length, &ring->ring, &ring->parameters);
-    io_uring_ring_dontfork(&ring->ring);
+    if (io_uring_queue_init_params(length, &ring->ring, &ring->parameters) < 0)
+    {
+      free(ring);
+      return NULL;
+    }
 
-#ifdef IORING_ENTER_NO_IOWAIT
+    io_uring_ring_dontfork(&ring->ring);
     io_uring_set_iowait(&ring->ring, 0);
-#endif
 
     ring->limit = limit.rlim_cur / FILE_REGISTRATION_RATIO;
     ring->limit = ((ring->limit == 0) || (ring->limit > FILE_MAXIMUM_COUNT)) ? FILE_MAXIMUM_COUNT : ring->limit;
