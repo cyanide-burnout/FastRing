@@ -559,9 +559,9 @@ struct FastRing* CreateFastRing(uint32_t length)
 
   if (ring = (struct FastRing*)calloc(1, sizeof(struct FastRing)))
   {
-    length += (length == 0) * limit.rlim_cur;
-    length  = (length <= 1) ? length : (1 << (32 - __builtin_clz(length - 1)));  // Rounding up to next power of 2
-    length  = ((length == 0) || (length > RING_MAXIMUM_LENGTH)) ? RING_MAXIMUM_LENGTH : length;
+    length = (length != 0) ? length : limit.rlim_cur;
+    length = (length <= 1) ? length : (1 << (32 - __builtin_clz(length - 1)));  // Rounding up to next power of 2
+    length = (length == 0) || (length > RING_MAXIMUM_LENGTH) ? RING_MAXIMUM_LENGTH : length;
 
     ring->parameters.flags      = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE;
     ring->parameters.cq_entries = length * RING_COMPLETION_RATIO;

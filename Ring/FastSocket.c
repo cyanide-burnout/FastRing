@@ -438,7 +438,8 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
                (descriptor->submission.opcode != IORING_OP_POLL_ADD) &&
                (descriptor->submission.opcode != IORING_OP_URING_CMD)))
   {
-    // Cannot proceed a call
+    ReleaseFastRingDescriptor(descriptor);
+    ReleaseFastBuffer(buffer);
     return -EINVAL;
   }
 
