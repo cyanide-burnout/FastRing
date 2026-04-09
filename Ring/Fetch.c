@@ -142,7 +142,7 @@ static int HandleTimerOperation(CURLM* multi, long timeout, void* data)
 
   fetch             = (struct Fetch*)data;
   fetch->descriptor = SetFastRingTimeout(fetch->ring, fetch->descriptor, timeout, 0, HandleTimeoutEvent, fetch);
-  
+
   return 0;
 }
 
@@ -272,7 +272,7 @@ static void HandleFlushEvent(void* closure, int reason)
 struct Fetch* CreateFetch(struct FastRing* ring)
 {
   struct Fetch* fetch;
- 
+
   if (fetch = (struct Fetch*)calloc(1, sizeof(struct Fetch)))
   {
     fetch->ring  = ring;
@@ -327,7 +327,7 @@ int GetFetchTransmissionCount(struct Fetch* fetch)
 
   count = 0;
 
-  if ((fetch != 0) &&
+  if ((fetch != NULL) &&
       (list   = curl_multi_get_handles(fetch->multi)))
   {
     handle = list;
@@ -375,7 +375,7 @@ struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, str
     {
       curl_easy_setopt(easy, CURLOPT_READDATA, transmission);
       curl_easy_setopt(easy, CURLOPT_WRITEDATA, transmission);
-      curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);      
+      curl_easy_setopt(easy, CURLOPT_HEADERDATA, transmission);
     }
 
     curl_multi_add_handle(fetch->multi, transmission->easy);
