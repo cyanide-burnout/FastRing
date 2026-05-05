@@ -2,6 +2,10 @@
 
 #include <malloc.h>
 #include <string.h>
+#include <signal.h>
+
+_Static_assert((FAST_BUFFER_ALIGNMENT             % __BIGGEST_ALIGNMENT__) == 0, "FAST_BUFFER_ALIGNMENT must be aligned to __BIGGEST_ALIGNMENT__");
+_Static_assert((offsetof(struct FastBuffer, data) % __BIGGEST_ALIGNMENT__) == 0, "FastBuffer.data must be aligned to __BIGGEST_ALIGNMENT__");
 
 struct FastBufferPool* CreateFastBufferPool(struct FastRing* ring)
 {
@@ -76,10 +80,18 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
 
   if (buffer != NULL)
   {
+    if ((buffer->magic != FAST_BUFFER_MAGIC) ||
+        (buffer->state != FAST_BUFFER_STATE_FREE))
+    {
+      // Most probable the memory or logic is corrupted
+      raise(SIGABRT);
+    }
+
     if (size <= buffer->size)
     {
       buffer->length = 0;
       buffer->next   = NULL;
+      buffer->state  = FAST_BUFFER_STATE_ALLOCATED;
       atomic_store_explicit(&buffer->count, 1, memory_order_release);
       return buffer;
     }
@@ -99,6 +111,8 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
     buffer->length = 0;
     buffer->status = FAST_BUFFER_STATUS_ADDED;
     buffer->index  = INT32_MIN;
+    buffer->magic  = FAST_BUFFER_MAGIC;
+    buffer->state  = FAST_BUFFER_STATE_ALLOCATED;
     atomic_store_explicit(&buffer->count, 1, memory_order_release);
     TryRegisterFastBuffer(buffer, option);
     return buffer;
@@ -119,17 +133,28 @@ void ReleaseFastBuffer(struct FastBuffer* buffer)
   uint32_t tag;
   struct FastBufferPool* pool;
 
-  if ((buffer != NULL) &&
-      (atomic_fetch_sub_explicit(&buffer->count, 1, memory_order_relaxed) == 1))
+  if (buffer != NULL)
   {
-    pool = buffer->pool;
-    tag  = atomic_fetch_add_explicit(&buffer->tag, 1, memory_order_relaxed) + 1;
+    if ((buffer->magic != FAST_BUFFER_MAGIC) ||
+        (buffer->state != FAST_BUFFER_STATE_ALLOCATED))
+    {
+      // Most probable the memory or logic is corrupted
+      raise(SIGABRT);
+    }
 
-    do buffer->next = atomic_load_explicit(&pool->heap, memory_order_relaxed);
-    while (!atomic_compare_exchange_weak_explicit(&pool->heap, &buffer->next, ADD_ABA_TAG(buffer, tag, FAST_BUFFER_ALIGNMENT), memory_order_release, memory_order_relaxed));
+    if (atomic_fetch_sub_explicit(&buffer->count, 1, memory_order_relaxed) == 1)
+    {
+      buffer->state = FAST_BUFFER_STATE_FREE;
 
-    // Decrease pool reference count and release when required
-    ReleaseFastBufferPool(pool);
+      pool = buffer->pool;
+      tag  = atomic_fetch_add_explicit(&buffer->tag, 1, memory_order_relaxed) + 1;
+
+      do buffer->next = atomic_load_explicit(&pool->heap, memory_order_relaxed);
+      while (!atomic_compare_exchange_weak_explicit(&pool->heap, &buffer->next, ADD_ABA_TAG(buffer, tag, FAST_BUFFER_ALIGNMENT), memory_order_release, memory_order_relaxed));
+
+      // Decrease pool reference count and release when required
+      ReleaseFastBufferPool(pool);
+    }
   }
 }
 
@@ -140,19 +165,6 @@ void PrepareFastBuffer(struct FastRingDescriptor* descriptor, struct FastBuffer*
     descriptor->submission.ioprio    |= IORING_RECVSEND_FIXED_BUF;
     descriptor->submission.buf_index  = buffer->index;
   }
-}
-
-int CatchFastBuffer(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
-{
-  if ((descriptor->submission.opcode < IORING_OP_SEND_ZC) ||
-      (completion == NULL) ||
-      (completion->flags & IORING_CQE_F_NOTIF))
-  {
-    ReleaseFastBuffer(FAST_BUFFER(descriptor->submission.addr));
-    descriptor->closure = NULL;
-  }
-
-  return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
 void* AllocateRingFastBuffer(size_t size, void* closure)

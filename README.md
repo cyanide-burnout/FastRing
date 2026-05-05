@@ -120,6 +120,16 @@ Dependencies for each example are defined in its local `Makefile` via `pkg-confi
 - `KCPService` - KCP service implementation
 - `XMPPServer` - XMPP server module
 
+## kTLS
+
+FastBIO can expose a Linux kTLS-capable transport to OpenSSL/libssl. TLS state remains owned by libssl; FastBIO implements the required BIO control hooks and maps the transport to FastRing/io_uring.
+
+RX uses `recvmsg_multishot` to preserve `TLS_GET_RECORD_TYPE` metadata and synthesizes TLS record headers expected by libssl. TX uses `sendmsg` and `TLS_SET_RECORD_TYPE` for control records. `setsockopt(TCP_ULP/TLS_TX/TLS_RX)` is submitted asynchronously through io_uring.
+
+kTLS is opportunistic. Unsupported ciphers, directions, kernels or socket states fall back to the normal userspace TLS path.
+
+Important: kTLS-capable FastBIO sockets never use regular io_uring zerocopy sends. A prior `SEND_ZC`/`SENDMSG_ZC` on the same TCP socket can make kTLS appear to enable while preventing kTLS traffic from flowing. kTLS sendfile/`TLS_TX_ZEROCOPY_RO` is a separate path.
+
 ## Limitations
 
 - Linux-only target platform

@@ -16,8 +16,11 @@ extern "C"
 #define SSL_ROLE_SERVER  SSL_ERROR_WANT_ACCEPT
 #define SSL_ROLE_CLIENT  SSL_ERROR_WANT_CONNECT
 
-#define SSL_FLAG_ENTER   POLLPRI  // 
-#define SSL_FLAG_READ    POLLIN   //  
+#define SSL_OPTION_VERIFY_MASK    (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT | SSL_VERIFY_CLIENT_ONCE)  // 0x07
+#define SSL_OPTION_OP_MASK        (SSL_OP_ENABLE_KTLS)                                                          // 0x08
+
+#define SSL_FLAG_ENTER   POLLPRI  //
+#define SSL_FLAG_READ    POLLIN   //
 #define SSL_FLAG_WRITE   POLLOUT  // POLLOUT requested
 #define SSL_FLAG_REMOVE  POLLERR  // Connection removed
 #define SSL_FLAG_ACTIVE  POLLHUP  // Connection established

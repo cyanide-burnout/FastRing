@@ -5,31 +5,57 @@
 // https://stackoverflow.com/questions/18179128/how-to-manage-the-error-queue-in-openssl-ssl-get-error-and-err-get-error
 // https://www.arangodb.com/2014/07/started-hate-openssl/
 
-#include <unistd.h>
+#include <errno.h>
 #include <malloc.h>
 #include <string.h>
-#include <errno.h>
-
 #include <openssl/err.h>
 
-static void AppendBuffer(struct SSLSocket* socket, const void* data, size_t length)
+#define BUFFER_GRANULARITY  2048
+
+_Static_assert((BUFFER_GRANULARITY & (BUFFER_GRANULARITY - 1)) == 0, "BUFFER_GRANULARITY must be power of two");
+
+static int CallEventFunction(struct SSLSocket* socket, int event, int parameter1, void* parameter2)
+{
+  if (socket->function != NULL)
+  {
+    // Function can be not installed yet or already detached
+    return socket->function(socket->closure, socket->connection, event, parameter1, parameter2);
+  }
+
+  return -1;
+}
+
+static int AppendBuffer(struct SSLSocket* socket, const void* data, size_t length)
 {
   size_t size;
+  uint8_t* buffer;
 
   size = socket->length + length;
 
   if (size > socket->size)
   {
+    size   = (size + BUFFER_GRANULARITY - 1) & ~(BUFFER_GRANULARITY - 1);
+    buffer = (uint8_t*)realloc(socket->buffer, size);
+
+    if (buffer == NULL)
+    {
+      errno = ENOMEM;
+      return -1;
+    }
+
     socket->size   = size;
-    socket->buffer = (uint8_t*)realloc(socket->buffer, socket->size);
+    socket->buffer = buffer;
   }
 
   memcpy(socket->buffer + socket->length, data, length);
-  socket->length = size;
+  socket->length += length;
+
+  return 0;
 }
 
 static int TransmitPendingData(struct SSLSocket* socket)
 {
+  int count;
   int result;
   uint8_t* buffer;
 
@@ -39,8 +65,10 @@ static int TransmitPendingData(struct SSLSocket* socket)
   {
     // In case of retry SSL_write should point to the same data
     // (thanks SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER) with the same length (which is <batch>)
-    socket->batch += socket->length * (socket->batch == 0);
-    result         = SSL_write(socket->connection, buffer, socket->batch);
+    count         = socket->length <= INT_MAX ? socket->length : INT_MAX;
+    socket->batch = socket->batch  != 0       ? socket->batch  : count;
+
+    result = SSL_write(socket->connection, buffer, socket->batch);
 
     if (result > 0)
     {
@@ -62,7 +90,7 @@ static int TransmitPendingData(struct SSLSocket* socket)
   return result;
 }
 
-static void HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
+static int HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
 {
   switch (SSL_get_error(socket->connection, result))
   {
@@ -82,29 +110,27 @@ static void HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
     case SSL_ERROR_NONE:
       break;
 
-    case SSL_ERROR_ZERO_RETURN:
-      socket->state &= ~SSL_FLAG_ACTIVE;
-      socket->function(socket->closure, socket->connection, SSL_EVENT_DISCONNECTED, 0, NULL);
+    case SSL_ERROR_SYSCALL:
+      socket->state |= flag;
       break;
 
     case SSL_ERROR_SSL:
-      // if (ERR_GET_REASON(error) == SSL_R_UNEXPECTED_EOF_WHILE_READING)
-      // The SSL_ERROR_SYSCALL with errno value of 0 indicates unexpected EOF from the peer
-      // This will be properly reported as SSL_ERROR_SSL with reason code SSL_R_UNEXPECTED_EOF_WHILE_READING in the OpenSSL 3.0
       socket->state &= ~SSL_FLAG_ACTIVE;
-      socket->function(socket->closure, socket->connection, SSL_EVENT_FAILED, ERR_get_error(), NULL);
-      break;
+      CallEventFunction(socket, SSL_EVENT_FAILED, ERR_get_error(), NULL);
+      return -1;
 
-   case SSL_ERROR_SYSCALL:
-      socket->state |= flag;
-      break;
+    case SSL_ERROR_ZERO_RETURN:
+      socket->state &= ~SSL_FLAG_ACTIVE;
+      CallEventFunction(socket, SSL_EVENT_DISCONNECTED, 0, NULL);
+      return -1;
   }
+
+  return 0;
 }
 
 static int HandleIOAction(struct SSLSocket* socket, int action)
 {
   int result;
-  struct FastRingDescriptor* descriptor;
 
   switch (action)
   {
@@ -128,7 +154,7 @@ static int HandleIOAction(struct SSLSocket* socket, int action)
       (~socket->state & SSL_FLAG_REMOVE))
   {
     socket->state |= SSL_FLAG_ACTIVE;
-    socket->function(socket->closure, socket->connection, SSL_EVENT_CONNECTED, 0, NULL);
+    CallEventFunction(socket, SSL_EVENT_CONNECTED, 0, NULL);
   }
 
   return result;
@@ -142,10 +168,12 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
   socket         = (struct SSLSocket*)engine->closure;
   socket->state |= SSL_FLAG_ENTER;
 
+  ERR_clear_error();
+
   if ((event & POLLERR) ||
       (event & POLLHUP))
   {
-    socket->function(socket->closure, socket->connection, SSL_EVENT_DISCONNECTED, parameter, NULL);
+    CallEventFunction(socket, SSL_EVENT_DISCONNECTED, parameter, NULL);
     goto Final;
   }
 
@@ -164,7 +192,7 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
         (~socket->state & SSL_FLAG_REMOVE))
     {
       socket->state &= ~SSL_FLAG_READ;
-      result         = socket->function(socket->closure, socket->connection, SSL_EVENT_RECEIVED, 0, NULL);
+      result         = CallEventFunction(socket, SSL_EVENT_RECEIVED, 0, NULL);
       HandleIOResult(socket, result, 0);
     }
 
@@ -186,7 +214,7 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
 
   Final:
 
-  socket->state ^= SSL_FLAG_ENTER;
+  socket->state &= ~SSL_FLAG_ENTER;
 
   if (socket->state & SSL_FLAG_REMOVE)
   {
@@ -204,7 +232,7 @@ static int HandleVerifyRequest(int condition, X509_STORE_CTX* context)
       (socket     = (struct SSLSocket*)SSL_get_app_data(connection)))
   {
     // Function can be called after destruction
-    return socket->function(socket->closure, connection, SSL_EVENT_GREETED, condition, context);
+    return CallEventFunction(socket, SSL_EVENT_GREETED, condition, context);
   }
 
   return 0;
@@ -215,42 +243,49 @@ struct SSLSocket* CreateSSLSocket(struct FastRing* ring, struct FastRingBufferPr
   BIO* engine;
   struct SSLSocket* socket;
 
-  socket = (struct SSLSocket*)calloc(1, sizeof(struct SSLSocket));
-  engine = CreateFastBIO(ring, provider, inbound, outbound, handle, granularity, limit, HandleBIOEvent, socket);
+  socket = NULL;
+  engine = NULL;
 
-  socket->connection = SSL_new(context);
-  socket->function   = function;
-  socket->closure    = closure;
-  socket->role       = role;
-
-  SSL_set_bio(socket->connection, engine, engine);
-  SSL_set_mode(socket->connection, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-  SSL_set_options(socket->connection, SSL_OP_IGNORE_UNEXPECTED_EOF);
-  SSL_set_read_ahead(socket->connection, 1);
-
-  if (option >= SSL_VERIFY_NONE)
+  if ((socket = (struct SSLSocket*)calloc(1, sizeof(struct SSLSocket))) &&
+      (engine = CreateFastBIO(ring, provider, inbound, outbound, handle, option & SSL_OPTION_OP_MASK, granularity, limit, HandleBIOEvent, socket)) &&
+      (socket->connection = SSL_new(context)))
   {
-    SSL_set_app_data(socket->connection, socket);
-    SSL_set_verify(socket->connection, option, HandleVerifyRequest);
+    SSL_set_bio(socket->connection, engine, engine);
+    SSL_set_mode(socket->connection, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    SSL_set_options(socket->connection, SSL_OP_IGNORE_UNEXPECTED_EOF | option & SSL_OPTION_OP_MASK);
+    SSL_set_read_ahead(socket->connection, 1);
+
+    if (option & SSL_OPTION_VERIFY_MASK)
+    {
+      SSL_set_app_data(socket->connection, socket);
+      SSL_set_verify(socket->connection, option & SSL_OPTION_VERIFY_MASK, HandleVerifyRequest);
+    }
+
+    socket->function = function;
+    socket->closure  = closure;
+    socket->role     = role;
+
+    ERR_clear_error();
+    BIO_ctrl(engine, FASTBIO_CTRL_TOUCH, 0, NULL);
+
+    return socket;
   }
 
-  ERR_clear_error();
-  HandleIOAction(socket, role);
-
-  return socket;
+  BIO_free(engine);
+  free(socket);
+  return NULL;
 }
 
 int TransmitSSLSocketData(struct SSLSocket* socket, const void* data, size_t length)
 {
+  int count;
   int result;
   BIO* engine;
-  const uint8_t* buffer;
-  struct FastRingDescriptor* descriptor;
 
   if ((socket->length != 0) ||
       (~socket->state & SSL_FLAG_ACTIVE))
   {
-    AppendBuffer(socket, data, length);
+    result = AppendBuffer(socket, data, length);
     goto Final;
   }
 
@@ -262,7 +297,8 @@ int TransmitSSLSocketData(struct SSLSocket* socket, const void* data, size_t len
 
   do
   {
-    result = SSL_write(socket->connection, data, length);
+    count  = length < INT_MAX ? length : INT_MAX;
+    result = SSL_write(socket->connection, data, count);
 
     if (result > 0)
     {
@@ -277,21 +313,28 @@ int TransmitSSLSocketData(struct SSLSocket* socket, const void* data, size_t len
   {
     // Keep the data and its length (SSL_write specific)
     // please see TransmitPendingData() for the details
-    socket->batch = length;
-    AppendBuffer(socket, data, length);
+    socket->batch = count;
+
+    if (AppendBuffer(socket, data, length) < 0)
+    {
+      socket->batch = 0;
+      result        = -1;
+      goto Final;
+    }
   }
 
-  HandleIOResult(socket, result, SSL_FLAG_WRITE);
-
-  Final:
-
-  if ((~socket->state & SSL_FLAG_ENTER) &&
-      ((socket->state & SSL_FLAG_WRITE) ||
-       (socket->state & SSL_FLAG_READ)  ||
-       (socket->length != 0)))
+  if (HandleIOResult(socket, result, SSL_FLAG_WRITE) == 0)
   {
-    engine = SSL_get_wbio(socket->connection);
-    BIO_ctrl(engine, FASTBIO_CTRL_TOUCH, 0, NULL);
+    Final:
+
+    if ((~socket->state & SSL_FLAG_ENTER) &&
+        ((socket->state & SSL_FLAG_WRITE) ||
+         (socket->state & SSL_FLAG_READ)  ||
+         (socket->length != 0)))
+    {
+      engine = SSL_get_wbio(socket->connection);
+      BIO_ctrl(engine, FASTBIO_CTRL_TOUCH, 0, NULL);
+    }
   }
 
   return result;
@@ -301,6 +344,9 @@ void ReleaseSSLSocket(struct SSLSocket* socket)
 {
   if (socket != NULL)
   {
+    socket->function = NULL;
+    socket->closure  = NULL;
+
     if (socket->state & SSL_FLAG_ENTER)
     {
       socket->state |= SSL_FLAG_REMOVE;

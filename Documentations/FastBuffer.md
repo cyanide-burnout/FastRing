@@ -20,7 +20,6 @@ struct FastBuffer* HoldFastBuffer(struct FastBuffer* buffer);
 void ReleaseFastBuffer(struct FastBuffer* buffer);
 
 void PrepareFastBuffer(struct FastRingDescriptor* descriptor, struct FastBuffer* buffer);
-int CatchFastBuffer(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 
 void* AllocateRingFastBuffer(size_t size, void* closure);
 void ReleaseRingFastBuffer(void* buffer);
@@ -31,4 +30,3 @@ void ReleaseRingFastBuffer(void* buffer);
 - Use `FAST_BUFFER_REGISTER` to request fixed-buffer registration.
 - `HoldFastBuffer()` / `ReleaseFastBuffer()` control ownership.
 - `PrepareFastBuffer()` sets fixed-buffer fields in SQE when `buffer->index >= 0`.
-
