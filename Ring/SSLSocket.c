@@ -1,10 +1,5 @@
 #include "SSLSocket.h"
 
-// Important note about handling OpenSSL's error queue:
-// https://github.com/openssl/openssl/issues/8470#issuecomment-550973323
-// https://stackoverflow.com/questions/18179128/how-to-manage-the-error-queue-in-openssl-ssl-get-error-and-err-get-error
-// https://www.arangodb.com/2014/07/started-hate-openssl/
-
 #include <errno.h>
 #include <malloc.h>
 #include <string.h>
@@ -83,7 +78,7 @@ static int TransmitPendingData(struct SSLSocket* socket)
   if ((socket->length > 0) &&
       (socket->buffer != buffer))
   {
-    // Move the rest of data to the beginning of buffer to fit new data to the end fo buffer
+    // Move remaining data to the beginning of the buffer to fit new data at the end
     memmove(socket->buffer, buffer, socket->length);
   }
 
@@ -100,16 +95,7 @@ static int HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
       break;
 
     case SSL_ERROR_WANT_WRITE:
-      socket->state |= SSL_FLAG_WRITE;
-      break;
-
     case SSL_ERROR_WANT_READ:
-      socket->state |= SSL_FLAG_READ;
-      break;
-
-    case SSL_ERROR_NONE:
-      break;
-
     case SSL_ERROR_SYSCALL:
       socket->state |= flag;
       break;
@@ -131,6 +117,7 @@ static int HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
 static int HandleIOAction(struct SSLSocket* socket, int action)
 {
   int result;
+  BIO* engine;
 
   switch (action)
   {
@@ -154,6 +141,8 @@ static int HandleIOAction(struct SSLSocket* socket, int action)
       (~socket->state & SSL_FLAG_REMOVE))
   {
     socket->state |= SSL_FLAG_ACTIVE;
+    engine         = SSL_get_wbio(socket->connection);
+    BIO_ctrl(engine, FASTBIO_CTRL_ENSURE, 0, NULL);
     CallEventFunction(socket, SSL_EVENT_CONNECTED, 0, NULL);
   }
 
@@ -179,6 +168,8 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
 
   do
   {
+    engine->flags &= ~FASTBIO_FLAG_POLL_PROGRESS;
+
     if ((~socket->state & SSL_FLAG_ACTIVE) &&
         (~socket->state & SSL_FLAG_REMOVE))
     {
@@ -193,7 +184,7 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
     {
       socket->state &= ~SSL_FLAG_READ;
       result         = CallEventFunction(socket, SSL_EVENT_RECEIVED, 0, NULL);
-      HandleIOResult(socket, result, 0);
+      HandleIOResult(socket, result, SSL_FLAG_READ);
     }
 
     if (((socket->length != 0) ||
@@ -210,7 +201,18 @@ static void HandleBIOEvent(struct FastBIO* engine, int event, int parameter)
          (~socket->state & SSL_FLAG_REMOVE)      &&
          (~engine->outbound.condition & POLLOUT) &&
          ((engine->inbound.length          != 0) ||
-          (socket->length                  != 0)));
+          (socket->length                  != 0) ||
+          (engine->flags & FASTBIO_FLAG_POLL_PROGRESS)));
+
+  if ((event & POLLOUT) &&
+      (socket->length        == 0)       &&
+      (engine->outbound.head == NULL)    &&
+      ( socket->state & SSL_FLAG_ACTIVE) &&
+      (~socket->state & SSL_FLAG_REMOVE))
+  {
+    // Socket is ready to accept more data from the owner
+    CallEventFunction(socket, SSL_EVENT_DRAINED, 0, NULL);
+  }
 
   Final:
 
@@ -311,8 +313,7 @@ int TransmitSSLSocketData(struct SSLSocket* socket, const void* data, size_t len
 
   if (result <= 0)
   {
-    // Keep the data and its length (SSL_write specific)
-    // please see TransmitPendingData() for the details
+    // Preserve the failed SSL_write() length for retry; see TransmitPendingData()
     socket->batch = count;
 
     if (AppendBuffer(socket, data, length) < 0)

@@ -20,16 +20,27 @@ extern "C"
 #define SSL_OPTION_OP_MASK        (SSL_OP_ENABLE_KTLS)                                                          // 0x08
 
 #define SSL_FLAG_ENTER   POLLPRI  //
-#define SSL_FLAG_READ    POLLIN   //
-#define SSL_FLAG_WRITE   POLLOUT  // POLLOUT requested
+#define SSL_FLAG_READ    POLLIN   // Read requested
+#define SSL_FLAG_WRITE   POLLOUT  // Write requested
 #define SSL_FLAG_REMOVE  POLLERR  // Connection removed
 #define SSL_FLAG_ACTIVE  POLLHUP  // Connection established
 
 #define SSL_EVENT_FAILED        0
 #define SSL_EVENT_GREETED       1
-#define SSL_EVENT_RECEIVED      2
-#define SSL_EVENT_CONNECTED     3
-#define SSL_EVENT_DISCONNECTED  4
+#define SSL_EVENT_DRAINED       2
+#define SSL_EVENT_RECEIVED      3
+#define SSL_EVENT_CONNECTED     4
+#define SSL_EVENT_DISCONNECTED  5
+
+#define IterateSSLSocketData(connection, buffer, size, length, result, code)    \
+  do                                                                            \
+  {                                                                             \
+    result  = SSL_read(connection, (uint8_t*)buffer + length, size - length);   \
+    length += (result > 0) * result;                                            \
+    code;                                                                       \
+  }                                                                             \
+  while ((result > 0) &&                                                        \
+         (SSL_pending(connection) > 0));
 
 typedef int (*HandleSSLSocketEventFunction)(void* closure, SSL* connection, int event, int parameter1, void* parameter2);
 
