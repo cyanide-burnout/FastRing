@@ -141,7 +141,7 @@ static int HandleIOAction(struct SSLSocket* socket, int action)
       (~socket->state & SSL_FLAG_REMOVE))
   {
     socket->state |= SSL_FLAG_ACTIVE;
-    engine         = SSL_get_wbio(socket->connection);
+    engine         = SSL_get_rbio(socket->connection);
     BIO_ctrl(engine, FASTBIO_CTRL_ENSURE, 0, NULL);
     CallEventFunction(socket, SSL_EVENT_CONNECTED, 0, NULL);
   }

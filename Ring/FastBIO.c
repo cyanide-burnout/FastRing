@@ -845,6 +845,7 @@ static long HandleBIOControl(BIO* handle, int command, long argument1, void* arg
       return !!(engine->flags & FASTBIO_FLAG_KTLS_RECEIVE);
 
     case FASTBIO_CTRL_ENSURE:
+      engine->flags &= ~(FASTBIO_FLAG_KTLS_AVAILABLE * !(engine->flags & (FASTBIO_FLAG_KTLS_SEND | FASTBIO_FLAG_KTLS_RECEIVE)));
       EnsureAsynchronousReceive(engine);
       return 0;
 
@@ -1012,18 +1013,8 @@ BIO* CreateFastBIO(struct FastRing* ring, struct FastRingBufferProvider* provide
     engine->outbound.limit       = ring->ring.cq.ring_entries / 2;
     engine->outbound.pool        = outbound;
 
-    if ((limit > 0) &&
-        (limit < engine->outbound.limit))
-    {
-      // Use pre-defined limit for IORING_OP_SENDMSG SQEs
-      engine->outbound.limit = limit;
-    }
-
-    if (~options & SSL_OP_ENABLE_KTLS)
-    {
-      // Disable kTLS for this BIO when zero-copy must remain available
-      engine->flags &= ~FASTBIO_FLAG_KTLS_AVAILABLE;
-    }
+    engine->outbound.limit  = ((limit > 0) && (limit < engine->outbound.limit)) ? limit : engine->outbound.limit;  // Use pre-defined limit for IORING_OP_SENDMSG SQEs
+    engine->flags          &= ~(FASTBIO_FLAG_KTLS_AVAILABLE * !(options & SSL_OP_ENABLE_KTLS));                    // Disable kTLS for this BIO when zero-copy must remain available
 
     io_uring_prep_poll_add(&descriptors[0]->submission, handle, POLLIN | POLLERR | POLLHUP);
     io_uring_prep_recvmsg_multishot(&descriptors[1]->submission, handle, &descriptors[1]->data.socket.message, 0);
