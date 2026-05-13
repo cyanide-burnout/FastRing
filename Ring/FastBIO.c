@@ -218,16 +218,13 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
     AdvanceFastRingBuffer(engine->inbound.provider, completion, NULL, NULL);
 
     if ((completion->res == -EKEYEXPIRED) &&
-        (engine->flags & FASTBIO_FLAG_KTLS_RECEIVE) &&
-        (buffer = AllocateFastBuffer(engine->inbound.pool, 0, 0)))
+        (engine->flags & FASTBIO_FLAG_KTLS_ONCE))
     {
-      buffer->reserved          = -completion->res;
-      engine->inbound.condition = ~completion->flags;
-
-      AppendInboundQueue(engine, buffer);
-      CallHandlerFunction(engine, POLLIN, engine->inbound.length);
-
-      engine->inbound.condition = 0;
+      // EKEYEXPIRED is treated as a transient kTLS RX boundary, not a fatal error;
+      // We stop this receive cycle and let OpenSSL consume/process TLS 1.3 KeyUpdate,
+      // then re-arm io_uring_prep_recvmsg_multishot() after keys are updated to preserve strict in-order reads
+      // https://github.com/openssl/openssl/issues/31138
+      engine->flags &= ~FASTBIO_FLAG_KTLS_ONCE;
       goto Continue;
     }
 
@@ -517,7 +514,7 @@ static int SetKernelReceiver(struct FastBIO* engine, struct tls_crypto_info* inf
     return 0;
   }
 
-  engine->flags |= FASTBIO_FLAG_KTLS_RECEIVE;
+  engine->flags |= FASTBIO_FLAG_KTLS_RECEIVE | FASTBIO_FLAG_KTLS_ONCE;
   EnsureAsynchronousReceive(engine);
   return 1;
 }
@@ -575,16 +572,6 @@ static int HandleBIORead(BIO* handle, char* destination, int size)
   {
     BIO_clear_retry_flags(handle);
     errno = EBADF;
-    return -1;
-  }
-
-  if (unlikely((buffer = engine->inbound.tail) &&
-               (buffer->length == 0)))
-  {
-    errno                = buffer->reserved;
-    engine->inbound.tail = buffer->next;
-    ReleaseFastBuffer(buffer);
-    BIO_set_retry_read(handle);
     return -1;
   }
 
@@ -650,10 +637,9 @@ static int HandleBIORead(BIO* handle, char* destination, int size)
     size = engine->inbound.length;
   }
 
-  while ((buffer = engine->inbound.tail) &&
-         (buffer->length != 0) &&
-         (size > 0))
+  while (size > 0)
   {
+    buffer  = engine->inbound.tail;
     output  = io_uring_recvmsg_validate(buffer->data, buffer->length, message);
     length  = io_uring_recvmsg_payload_length(output, buffer->length, message);
     source  = (char*)io_uring_recvmsg_payload(output, message);
