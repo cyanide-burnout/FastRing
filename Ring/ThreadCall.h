@@ -45,7 +45,6 @@ struct ThreadCall
   int index;
   int handle;
   int feature;
-  ATOMIC(int) count;
   ATOMIC(int) weight;
   ATOMIC(void*) stack;
 };

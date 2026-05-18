@@ -10,6 +10,12 @@
 
 #define ALIGNMENT  64ULL
 
+#if (__BYTE_ORDER == __LITTLE_ENDIAN) || (UINTPTR_MAX != UINT64_MAX)
+#define LATCH(address)  ((uint32_t*)(address) + 0)
+#else
+#define LATCH(address)  ((uint32_t*)(address) + 1)
+#endif
+
 // futex(address, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, value, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
 // futex(address, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, count, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
 
@@ -47,15 +53,18 @@ static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallStat
 {
   uint64_t count;
 
+  // Keep published stack latch non-zero for futex wait on NULL
+  atomic_fetch_add_explicit(&state->tag, !(state->tag & (ALIGNMENT - 1)), memory_order_relaxed);
+
   do state->next = atomic_load_explicit(&call->stack, memory_order_relaxed);
   while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, state->tag, ALIGNMENT), memory_order_release, memory_order_relaxed));
 
-  if (atomic_fetch_add_explicit(&call->count, 1, memory_order_relaxed) == 0)
+  if (state->next == NULL)
   {
 #ifdef TC_FEATURE_RING_FUTEX
     if (call->feature == TC_FEATURE_RING_FUTEX)
     {
-      while (futex((uint32_t*)&call->count, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
+      while (futex(LATCH(&call->stack), FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
       return;
     }
 #endif
@@ -157,10 +166,8 @@ static int HandleThreadCallCompletion(struct FastRingDescriptor* descriptor, str
 
   if (call = (struct ThreadCall*)descriptor->closure)
   {
-    while ((atomic_load_explicit(&call->count, memory_order_relaxed) > 0) &&
-           (state = PeekThreadCallState(call)))
+    while (state = PeekThreadCallState(call))
     {
-      atomic_fetch_sub_explicit(&call->count, 1, memory_order_relaxed);
       call->function(call->closure, state->arguments);
       PostThreadCallResult(call, state, TC_RESULT_CALLED, TC_WAKE_LAZY);
     }
@@ -205,7 +212,7 @@ struct ThreadCall* CreateThreadCall(struct FastRing* ring, HandleThreadCallFunct
 
   if (call->feature == TC_FEATURE_RING_FUTEX)
   {
-    io_uring_prep_futex_wait(&descriptor->submission, (uint32_t*)&call->count, 0, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
+    io_uring_prep_futex_wait(&descriptor->submission, LATCH(&call->stack), 0, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32 | FUTEX2_PRIVATE, 0);
     SubmitFastRingDescriptor(descriptor, 0);
     return call;
   }
