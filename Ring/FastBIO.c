@@ -996,7 +996,7 @@ BIO* CreateFastBIO(struct FastRing* ring, struct FastRingBufferProvider* provide
     engine->inbound.provider     = provider;
     engine->inbound.pool         = inbound;
     engine->outbound.granularity = granularity;
-    engine->outbound.limit       = ring->ring.cq.ring_entries / 2;
+    engine->outbound.limit       = ring->ring.sq.ring_entries / 2;
     engine->outbound.pool        = outbound;
 
     engine->outbound.limit  = ((limit > 0) && (limit < engine->outbound.limit)) ? limit : engine->outbound.limit;  // Use pre-defined limit for IORING_OP_SENDMSG SQEs

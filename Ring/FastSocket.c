@@ -325,7 +325,7 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
     socket->inbound.descriptor = AllocateFastRingDescriptor(ring, HandleInboundCompletion, socket);
     socket->inbound.provider   = provider;
     socket->inbound.pool       = inbound;
-    socket->outbound.limit     = ring->ring.cq.ring_entries / 2;
+    socket->outbound.limit     = ring->ring.sq.ring_entries / 2;
     socket->outbound.pool      = outbound;
     socket->outbound.mode      = mode;
 
