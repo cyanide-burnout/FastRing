@@ -3,6 +3,7 @@
 Module-level API documentation:
 
 - `FastRing`: `Documentations/FastRing.md`
+- `Latch`: `Documentations/Latch.md`
 - `FastSocket`: `Documentations/FastSocket.md`
 - `FastBuffer`: `Documentations/FastBuffer.md`
 - `FastBIO`: `Documentations/FastBIO.md`

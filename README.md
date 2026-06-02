@@ -44,6 +44,7 @@ FastRing provides:
 
 - Documentation index: `Documentations/README.md`
 - `FastRing` API: `Documentations/FastRing.md`
+- `Latch` API: `Documentations/Latch.md`
 - `FastSocket` API: `Documentations/FastSocket.md`
 
 ## Quick Start (FastRing Core)
@@ -110,6 +111,7 @@ Dependencies for each example are defined in its local `Makefile` via `pkg-confi
 
 ### Supplementary (`Supplimentary/`)
 
+- `Latch` - shared-memory latch service for cross-process write exclusion
 - `H2OCore` - H2O HTTP/2/HTTP/3 integration layer
 - `PicoBundle` - picotls/certificate bundle helper
 - `ProtoBuf` - protobuf-c support helpers
@@ -119,6 +121,14 @@ Dependencies for each example are defined in its local `Makefile` via `pkg-confi
 - `KCPAdapter` - KCP/FastRing adapter layer
 - `KCPService` - KCP service implementation
 - `XMPPServer` - XMPP server module
+
+## Latch
+
+`Latch` is a shared-memory lock service for temporarily blocking data mutation while a critical section is in progress.
+It is intended for cases where the main loop needs to force a deterministic, idempotent phase around shared state.
+
+The component is split between `Supplimentary/LatchServer.*`, which serves the latch through `FastRing`, and `Supplimentary/LatchClient.*`, which acquires and releases it from cooperating workers or processes.
+Detailed API and behavior are documented in `Documentations/Latch.md`.
 
 ## kTLS
 
