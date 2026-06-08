@@ -2,10 +2,13 @@
 
 #include <errno.h>
 #include <malloc.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
+
+#define LATCH_TIMEOUT  100  // milliseconds
 
 static inline int __attribute__((always_inline)) futex(uint32_t* address1, int operation, uint32_t value1, const struct timespec* timeout, uint32_t* address2, uint32_t value2)
 {
@@ -15,6 +18,7 @@ static inline int __attribute__((always_inline)) futex(uint32_t* address1, int o
 static int HandleCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct LatchServer* server;
+  struct timespec time;
   struct Latch* latch;
   uint64_t temporary;
   uint64_t value;
@@ -37,10 +41,28 @@ static int HandleCompletion(struct FastRingDescriptor* descriptor, struct io_uri
         }
       }
 
-      while (value = atomic_load_explicit(&latch->value, memory_order_acquire))
+      while (((value = atomic_load_explicit(&latch->value, memory_order_acquire)) & LATCH_STATE_MASK) == LATCH_STATE_LOCK_GRANTED)
       {
-        // Keep waiting; FUTEX_WAIT may return EAGAIN/EINTR spuriously
-        futex(LATCH(&latch->value), FUTEX_WAIT_BITSET, (uint32_t)value, NULL, NULL, FUTEX_BITSET_MATCH_ANY);
+        clock_gettime(CLOCK_MONOTONIC, &time);
+        time.tv_nsec += LATCH_TIMEOUT * 1000000L;
+
+        if (time.tv_nsec >= 1000000000L)
+        {
+          time.tv_sec  += 1;
+          time.tv_nsec -= 1000000000L;
+        }
+
+        if ((futex(LATCH(&latch->value), FUTEX_WAIT_BITSET, (uint32_t)value, &time, NULL, FUTEX_BITSET_MATCH_ANY) < 0) && (errno == ETIMEDOUT) &&
+            (kill(value >> LATCH_PID_SHIFT, 0)                                                                    < 0) && (errno == ESRCH))
+        {
+          temporary = value;
+
+          if (atomic_compare_exchange_strong_explicit(&latch->value, &temporary, 0ULL, memory_order_acq_rel, memory_order_acquire))
+          {
+            // Client process disappeared after grant; release the latch on its behalf
+            while (futex(LATCH(&latch->value), FUTEX_WAKE_BITSET, INT32_MAX, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
+          }
+        }
       }
     }
 

@@ -18,7 +18,6 @@ static inline int __attribute__((always_inline)) futex(uint32_t* address1, int o
 int LockLatch(struct LatchClient* client, struct timespec* timeout)
 {
   struct Latch* latch;
-  pid_t identifier;
   uint64_t request;
   uint64_t grant;
   uint64_t value;
@@ -27,9 +26,10 @@ int LockLatch(struct LatchClient* client, struct timespec* timeout)
   if ((client != NULL) &&
       (latch   = client->latch))
   {
-    identifier = gettid();
-    grant      = ((uint64_t)identifier << LATCH_ID_SHIFT) | LATCH_STATE_LOCK_GRANTED;
-    request    = ((uint64_t)identifier << LATCH_ID_SHIFT) | LATCH_STATE_LOCK_REQUESTED;
+    value    = (((uint64_t)getpid() & LATCH_PID_MASK) << LATCH_PID_SHIFT);
+    value   |= (((uint64_t)gettid() & LATCH_TID_MASK) << LATCH_TID_SHIFT);
+    grant    = value | LATCH_STATE_LOCK_GRANTED;
+    request  = value | LATCH_STATE_LOCK_REQUESTED;
 
     for ( ; ; )
     {
@@ -37,7 +37,7 @@ int LockLatch(struct LatchClient* client, struct timespec* timeout)
 
       if (value == grant)
       {
-        client->identifier = identifier;
+        client->value = value;
         return 0;
       }
 
@@ -60,6 +60,11 @@ int LockLatch(struct LatchClient* client, struct timespec* timeout)
           // Revert pending lock request on timeout/error
           while (futex(LATCH(&latch->value), FUTEX_WAKE_BITSET, INT32_MAX, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
         }
+        else if (value == grant)
+        {
+          client->value = value;
+          return 0;
+        }
 
         return error;
       }
@@ -72,14 +77,13 @@ int LockLatch(struct LatchClient* client, struct timespec* timeout)
 void UnlockLatch(struct LatchClient* client)
 {
   struct Latch* latch;
-  uint64_t value;
 
   if ((client != NULL)          &&
       (latch   = client->latch) &&
-      (value   = atomic_load_explicit(&latch->value, memory_order_relaxed)) &&
-      ((value &  LATCH_STATE_MASK) == LATCH_STATE_LOCK_GRANTED)             &&
-      ((value >> LATCH_ID_SHIFT)   == client->identifier))
+      (client->value != 0ULL)   &&
+      (client->value == atomic_load_explicit(&latch->value, memory_order_relaxed)))
   {
+    client->value = 0ULL;
     atomic_store_explicit(&latch->value, 0, memory_order_relaxed);
     while (futex(LATCH(&latch->value), FUTEX_WAKE_BITSET, INT32_MAX, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
   }

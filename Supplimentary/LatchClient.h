@@ -14,7 +14,7 @@ extern "C"
 struct LatchClient
 {
   int handle;
-  pid_t identifier;
+  uint64_t value;
   struct Latch* latch;
 };
 
