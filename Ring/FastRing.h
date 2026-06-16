@@ -283,6 +283,11 @@ void ReleaseFastRing(struct FastRing* ring);
 #define RING_POLL_WRITE   (uint64_t)POLLOUT
 #define RING_POLL_ERROR   (uint64_t)POLLERR
 #define RING_POLL_HANGUP  (uint64_t)POLLHUP
+#define RING_POLL_REPEAT  (1ULL << 63)
+
+// Poll API descriptors with RING_POLL_REPEAT are automatically re-armed after
+// callback, unless removed, completed as kernel multishot (CQE_F_MORE), or
+// triggered by terminal HUP/ERR events.
 
 int AddFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
 int UpdateFastRingPoll(struct FastRing* ring, int handle, uint64_t flags);
@@ -303,7 +308,7 @@ struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRi
 // Timeout
 
 #ifndef IORING_TIMEOUT_MULTISHOT
-#define TIMEOUT_FLAG_REPEAT  (1ULL << 32)
+#define TIMEOUT_FLAG_REPEAT  (1ULL << 63)
 #else
 #define TIMEOUT_FLAG_REPEAT  IORING_TIMEOUT_MULTISHOT
 #endif
