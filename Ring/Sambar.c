@@ -1,6 +1,7 @@
 #include "Sambar.h"
 
 #include <malloc.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -53,17 +54,36 @@ static void HandleEventChange(struct smb2_context* context, t_socket handle, int
   }
 }
 
-void AttachSambarOpaque(struct SambarOpaque* opaque, struct FastRing* ring, struct smb2_context* context)
+void AttachSambarOpaque(struct SambarOpaque* opaque, struct FastRing* ring, struct smb2_context* context, int force)
 {
+  int handle;
+  uint64_t mask;
+
   opaque->ring    = ring;
   opaque->timeout = SetFastRingTimeout(ring, opaque->timeout, SAMBAR_TIMEOUT_INTERVAL, TIMEOUT_FLAG_REPEAT, HandleTimeoutEvent, context);
 
   smb2_set_opaque(context, opaque);
   smb2_fd_event_callbacks(context, HandleDescriptorChange, HandleEventChange);
+
+  if (force != 0)
+  {
+    handle  = smb2_get_fd(context);
+    mask    = smb2_which_events(context);
+    mask   |= (mask != 0ULL) * (RING_POLL_ERROR | RING_POLL_HANGUP | RING_POLL_SHOT | RING_POLL_REPEAT);
+    SetFastRingPoll(opaque->ring, handle, mask, HandlePollEvent, context);
+  }
 }
 
-void DetachSambarOpaque(struct SambarOpaque* opaque)
+void DetachSambarOpaque(struct SambarOpaque* opaque, struct smb2_context* context)
 {
+  int handle;
+
+  if (context != NULL)
+  {
+    handle = smb2_get_fd(context);
+    SetFastRingPoll(opaque->ring, handle, 0ULL, NULL, NULL);
+  }
+
   opaque->timeout = SetFastRingTimeout(opaque->ring, opaque->timeout, -1, 0, NULL, NULL);
 }
 
@@ -80,31 +100,46 @@ void* GetSambarClosure(struct smb2_context* context, int offset)
   return NULL;
 }
 
-static void HandleAcceptEvent(int handle, uint32_t events, void* closure, uint64_t options)
+static int HandleAcceptCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  struct SambarServer* server;
+  struct SambarListener* listener;
   struct smb2_context* context;
 
-  server = (struct SambarServer*)closure;
-
-  if ((events & (POLLERR | POLLHUP)) == 0)
+  if ((completion != NULL) &&
+      (listener = (struct SambarListener*)descriptor->closure))
   {
-    while ((smb2_serve_port_async(handle, 0, &context) == 0) &&
-           (context != NULL))
+    if (completion->res >= 0)
     {
-      // libsmb2 hides accept here and returns a ready smb2_context for each pending connection
-      server->function(context, server->closure);
+      if (context = smb2_init_context())
+      {
+        // libsmb2 stores its transport fd in the first int-sized field of the opaque context
+        // This code is a complete copy of smb2_serve_port_async() behavior
+        *(int*)context = completion->res;
+        listener->function(context, listener->closure);
+      }
+      else
+      {
+        // Failed to initialize smb2_context
+        close(completion->res);
+      }
     }
+
+    descriptor->data.socket.length = sizeof(struct sockaddr_storage);
+    SubmitFastRingDescriptor(descriptor, 0);
+    return 1;
   }
+
+  return 0;
 }
 
-struct SambarServer* CreateSambarServer(struct FastRing* ring, uint16_t port, HandleSambarAcceptFunction function, void* closure)
+struct SambarListener* OpenSambarListener(struct FastRing* ring, uint16_t port, smb2_client_connection function, void* closure)
 {
-  struct sockaddr_in6 address;
-  struct SambarServer* server;
   int value;
+  struct sockaddr_in6 address;
+  struct SambarListener* listener;
+  struct FastRingDescriptor* descriptor;
 
-  if (server = (struct SambarServer*)calloc(1, sizeof(struct SambarServer)))
+  if (listener = (struct SambarListener*)calloc(1, sizeof(struct SambarListener)))
   {
     memset(&address, 0, sizeof(struct sockaddr_in6));
 
@@ -112,42 +147,45 @@ struct SambarServer* CreateSambarServer(struct FastRing* ring, uint16_t port, Ha
     address.sin6_port   = htons(port);
     value               = 1;
 
-    server->handle = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP);
+    listener->handle = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP);
 
-    if ((server->handle < 0) ||
-        (setsockopt(server->handle, SOL_SOCKET,  SO_REUSEADDR,     &value, sizeof(int)) < 0) ||
-        (setsockopt(server->handle, SOL_SOCKET,  SO_REUSEPORT,     &value, sizeof(int)) < 0) ||
-        (setsockopt(server->handle, SOL_TCP,     TCP_NODELAY,      &value, sizeof(int)) < 0) ||
-        (setsockopt(server->handle, IPPROTO_TCP, TCP_DEFER_ACCEPT, &value, sizeof(int)) < 0) ||
-        (bind(server->handle, (struct sockaddr*)&address, sizeof(struct sockaddr_in6))  < 0) ||
-        (listen(server->handle, SOMAXCONN) < 0))
+    if ((listener->handle < 0) ||
+        (setsockopt(listener->handle, SOL_SOCKET,  SO_REUSEADDR,     &value, sizeof(int)) < 0) ||
+        (setsockopt(listener->handle, SOL_SOCKET,  SO_REUSEPORT,     &value, sizeof(int)) < 0) ||
+        (setsockopt(listener->handle, SOL_TCP,     TCP_NODELAY,      &value, sizeof(int)) < 0) ||
+        (setsockopt(listener->handle, IPPROTO_TCP, TCP_DEFER_ACCEPT, &value, sizeof(int)) < 0) ||
+        (bind(listener->handle, (struct sockaddr*)&address, sizeof(struct sockaddr_in6))  < 0) ||
+        (listen(listener->handle, SOMAXCONN) < 0)                                              ||
+        !(descriptor = AllocateFastRingDescriptor(ring, HandleAcceptCompletion, listener)))
     {
-      close(server->handle);
-      free(server);
+      close(listener->handle);
+      free(listener);
       return NULL;
     }
 
-    server->ring     = ring;
-    server->closure  = closure;
-    server->function = function;
+    listener->closure  = closure;
+    listener->function = function;
+    listener->accept   = descriptor;
 
-    if (SetFastRingPoll(ring, server->handle, RING_POLL_READ | RING_POLL_SHOT | RING_POLL_REPEAT | RING_POLL_ERROR | RING_POLL_HANGUP, HandleAcceptEvent, server) != 0)
-    {
-      close(server->handle);
-      free(server);
-      return NULL;
-    }
+    descriptor->data.socket.length = sizeof(struct sockaddr_storage);
+    io_uring_prep_accept(&descriptor->submission, listener->handle, (struct sockaddr*)&descriptor->data.socket.address, &descriptor->data.socket.length, SOCK_CLOEXEC | SOCK_NONBLOCK);
+    SubmitFastRingDescriptor(descriptor, 0);
   }
 
-  return server;
+  return listener;
 }
 
-void ReleaseSambarServer(struct SambarServer* server)
+void CloseSambarListener(struct SambarListener* listener)
 {
-  if (server != NULL)
+  if (listener != NULL)
   {
-    RemoveFastRingPoll(server->ring, server->handle);
-    close(server->handle);
-    free(server);
+    if (listener->accept != NULL)
+    {
+      listener->accept->function = NULL;
+      listener->accept->closure  = NULL;
+    }
+
+    close(listener->handle);
+    free(listener);
   }
 }
