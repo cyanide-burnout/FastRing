@@ -236,6 +236,7 @@ int smb2_disconnect_tree_id(struct smb2_context* smb2, uint32_t tree_id);
 #define AUTHENTICATION_MESSAGE 3U
 #define SOMBRERO_PIPE_NAME     "echo"
 #define SOMBRERO_SHARE_NAME    "IPC$"
+#define SOMBRERO_IPC_TREE_ID   1U
 #define SOMBRERO_ROOT_ACCESS   0x101f01ffU
 #define PAD_TO_64BIT(length)   (((length) + 0x07U) & 0xfffffff8U)
 #define FS_TOTAL_UNITS         0x100000ULL
@@ -428,6 +429,16 @@ static void CreateSigningKey(struct smb2_context* context)
 static struct SombreroSession* GetSombreroSession(struct smb2_context* context)
 {
   return context != NULL ? GetSambarData(context, struct SombreroSession, sambar) : NULL;
+}
+
+static int ValidateIpcTree(const struct SombreroSession* session, const struct smb2_context* context)
+{
+  if ((session == NULL) ||
+      (context == NULL) ||
+      (!session->tree_connected))
+    return -ENOENT;
+
+  return context->hdr.sync.tree_id == SOMBRERO_IPC_TREE_ID ? 0 : -ENOENT;
 }
 
 static void FreeSombreroHandles(struct SombreroSession* session)
@@ -1015,6 +1026,22 @@ static const char* GetCommandName(uint16_t command)
   return "UNKNOWN";
 }
 
+static void TraceReply(struct smb2_context* context, struct smb2_pdu* pdu)
+{
+  if ((context == NULL) ||
+      (pdu == NULL))
+    return;
+
+  fprintf(stderr,
+          "Sombrero[%p]: reply command=%s status=0x%x session=%llu tree=%u message=%llu\n",
+          (void*)context,
+          GetCommandName(pdu->header.command),
+          (unsigned)pdu->header.status,
+          (unsigned long long)pdu->header.session_id,
+          (unsigned)pdu->header.sync.tree_id,
+          (unsigned long long)pdu->header.message_id);
+}
+
 static void TraceState(const char* stage, struct smb2_context* context)
 {
   uint16_t pdu_command;
@@ -1076,7 +1103,11 @@ static void FreeConnectData(struct smb2_context* context, struct connect_data* d
 
 static void QueueReply(struct smb2_context* context, struct smb2_pdu* pdu)
 {
-  if (pdu != NULL)  smb2_queue_pdu(context, pdu);
+  if (pdu != NULL)
+  {
+    TraceReply(context, pdu);
+    smb2_queue_pdu(context, pdu);
+  }
 }
 
 static struct smb2_pdu* MakeErrorReply(struct smb2_context* context, uint8_t command, int status, void* cb_data)
@@ -1181,7 +1212,7 @@ static void HandleGeneralRequest(struct smb2_context* context, int status, void*
         memset(&reply, 0, sizeof(reply));
         result = server->handlers->tree_connect_cmd(server, context, (struct smb2_tree_connect_request*)command_data, &reply);
 
-        if (result == 0)      pdu = smb2_cmd_tree_connect_reply_async(context, &reply, 0, NULL, cb_data);
+        if (result == 0)      pdu = smb2_cmd_tree_connect_reply_async(context, &reply, SOMBRERO_IPC_TREE_ID, NULL, cb_data);
         else if (result < 0)  pdu = MakeErrorReply(context, SMB2_TREE_CONNECT, MapErrnoToStatus(SMB2_TREE_CONNECT, result), cb_data);
       }
       else
@@ -1194,7 +1225,7 @@ static void HandleGeneralRequest(struct smb2_context* context, int status, void*
       result = ((server->handlers != NULL) && (server->handlers->tree_disconnect_cmd != NULL)) ? server->handlers->tree_disconnect_cmd(server, context, context->hdr.sync.tree_id) : 0;
 
       if (result == 0)      pdu = smb2_cmd_tree_disconnect_reply_async(context, NULL, cb_data);
-      else if (result < 0)  pdu = MakeErrorReply(context, SMB2_TREE_DISCONNECT, SMB2_STATUS_NOT_IMPLEMENTED, cb_data);
+      else if (result < 0)  pdu = MakeErrorReply(context, SMB2_TREE_DISCONNECT, MapErrnoToStatus(SMB2_TREE_DISCONNECT, result), cb_data);
 
       smb2_disconnect_tree_id(context, context->hdr.sync.tree_id);
       break;
@@ -1843,7 +1874,7 @@ static int HandlePipeTreeConnect(struct smb2_server* server, struct smb2_context
   reply->share_flags      = SMB2_SHAREFLAG_NO_CACHING;
   reply->maximal_access   = SOMBRERO_ROOT_ACCESS;
   session->tree_connected = 1;
-  fprintf(stderr, "Sombrero[%p]: tree_connect accepted IPC$\n", (void*)context);
+  fprintf(stderr, "Sombrero[%p]: tree_connect accepted IPC$ tree_id=%u\n", (void*)context, SOMBRERO_IPC_TREE_ID);
   return 0;
 }
 
@@ -1853,6 +1884,12 @@ static int HandlePipeTreeDisconnect(struct smb2_server* server, struct smb2_cont
 
   if ((server == NULL) || ((session = GetSombreroSession(context)) == NULL))
     return -EINVAL;
+
+  if (tree_id != SOMBRERO_IPC_TREE_ID)
+  {
+    fprintf(stderr, "Sombrero[%p]: tree_disconnect rejected tree_id=%u\n", (void*)context, tree_id);
+    return -ENOENT;
+  }
 
   FreeSombreroHandles(session);
   session->tree_connected = 0;
@@ -1868,14 +1905,23 @@ static int HandlePipeCreate(struct smb2_server* server, struct smb2_context* con
 
   if ((server == NULL) ||
       ((session = GetSombreroSession(context)) == NULL) ||
-      (request == NULL) ||
-      (!session->tree_connected))
+      (request == NULL))
   {
     fprintf(stderr,
             "Sombrero[%p]: create rejected tree=%u name=%s\n",
             (void*)context,
             session != NULL ? session->tree_connected : 0U,
             (request != NULL) && (request->name != NULL) ? request->name : "(null)");
+    return -ENOENT;
+  }
+
+  if (ValidateIpcTree(session, context) < 0)
+  {
+    fprintf(stderr,
+            "Sombrero[%p]: create rejected inactive tree request_tree=%u name=%s\n",
+            (void*)context,
+            (unsigned)context->hdr.sync.tree_id,
+            request->name != NULL ? request->name : "(null)");
     return -ENOENT;
   }
 
@@ -1923,6 +1969,9 @@ static int HandlePipeClose(struct smb2_server* server, struct smb2_context* cont
       ((handle = FindSombreroHandle(session, request->file_id)) == NULL))
     return -ENOENT;
 
+  if (ValidateIpcTree(session, context) < 0)
+    return -ENOENT;
+
   FillPipeCloseReply(handle, reply);
   RemoveSombreroHandle(session, handle);
   return 0;
@@ -1937,7 +1986,7 @@ static int HandlePipeFlush(struct smb2_server* server, struct smb2_context* cont
     return -EINVAL;
 
   session = GetSombreroSession(context);
-  return session != NULL ? 0 : -EINVAL;
+  return ValidateIpcTree(session, context);
 }
 
 static int HandlePipeRead(struct smb2_server* server, struct smb2_context* context, struct smb2_read_request* request, struct smb2_read_reply* reply)
@@ -1953,6 +2002,9 @@ static int HandlePipeRead(struct smb2_server* server, struct smb2_context* conte
       ((session = GetSombreroSession(context)) == NULL) ||
       (request == NULL) ||
       ((handle = FindSombreroHandle(session, request->file_id)) == NULL))
+    return -ENOENT;
+
+  if (ValidateIpcTree(session, context) < 0)
     return -ENOENT;
 
   node = GetNodeByHandle(handle);
@@ -2004,6 +2056,9 @@ static int HandlePipeWrite(struct smb2_server* server, struct smb2_context* cont
       ((handle = FindSombreroHandle(session, request->file_id)) == NULL))
     return -ENOENT;
 
+  if (ValidateIpcTree(session, context) < 0)
+    return -ENOENT;
+
   node = GetNodeByHandle(handle);
 
   if (node != SOMBRERO_NODE_PIPE)
@@ -2025,10 +2080,13 @@ static int HandlePipeWrite(struct smb2_server* server, struct smb2_context* cont
 
 static int HandlePipeLock(struct smb2_server* server, struct smb2_context* context, struct smb2_lock_request* request)
 {
+  struct SombreroSession* session;
+
   if ((server == NULL) || (request == NULL))
     return -EINVAL;
 
-  return GetSombreroSession(context) != NULL ? 0 : -EINVAL;
+  session = GetSombreroSession(context);
+  return ValidateIpcTree(session, context);
 }
 
 static int HandlePipeIoctl(struct smb2_server* server, struct smb2_context* context, struct smb2_ioctl_request* request, struct smb2_ioctl_reply* reply)
@@ -2041,6 +2099,9 @@ static int HandlePipeIoctl(struct smb2_server* server, struct smb2_context* cont
   enum SombreroNodeType node;
 
   if ((server == NULL) || ((session = GetSombreroSession(context)) == NULL) || (request == NULL))
+    return -ENOENT;
+
+  if (ValidateIpcTree(session, context) < 0)
     return -ENOENT;
 
   memset(reply, 0, sizeof(struct smb2_ioctl_reply));
@@ -2082,14 +2143,20 @@ static int HandlePipeIoctl(struct smb2_server* server, struct smb2_context* cont
 
 static int HandlePipeCancel(struct smb2_server* server, struct smb2_context* context)
 {
+  struct SombreroSession* session;
+
   if (server == NULL)  return -EINVAL;
-  return GetSombreroSession(context) != NULL ? 0 : -EINVAL;
+  session = GetSombreroSession(context);
+  return ValidateIpcTree(session, context);
 }
 
 static int HandlePipeEcho(struct smb2_server* server, struct smb2_context* context)
 {
+  struct SombreroSession* session;
+
   if (server == NULL)  return -EINVAL;
-  return GetSombreroSession(context) != NULL ? 0 : -EINVAL;
+  session = GetSombreroSession(context);
+  return ValidateIpcTree(session, context);
 }
 
 static int HandlePipeQueryInfo(struct smb2_server* server, struct smb2_context* context, struct smb2_query_info_request* request, struct smb2_query_info_reply* reply)
@@ -2103,6 +2170,9 @@ static int HandlePipeQueryInfo(struct smb2_server* server, struct smb2_context* 
       (request == NULL) ||
       (reply == NULL))
     return -EINVAL;
+
+  if (ValidateIpcTree(session, context) < 0)
+    return -ENOENT;
 
   handle = request->info_type == SMB2_0_INFO_FILESYSTEM ? NULL : FindSombreroHandle(session, request->file_id);
 

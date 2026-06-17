@@ -1,7 +1,7 @@
 #ifndef SOMBRERO_H
 #define SOMBRERO_H
 
-#include "Sambar.h"
+#include "SambarAdapter.h"
 
 #include <time.h>
 #include <stdint.h>

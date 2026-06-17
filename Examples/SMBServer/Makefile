@@ -24,8 +24,8 @@ DEPENDENCIES := \
 
 OBJECTS := \
 	../../Ring/FastRing.o \
-	../../Ring/Sambar.o \
-	../../Supplimentary/Sombrero.o \
+	../../Ring/SambarAdapter.o \
+	Sombrero.o \
 	SMBServer.o \
 	/usr/lib/$(ARCHITECTURE)-linux-gnu/libsmb2.a
 

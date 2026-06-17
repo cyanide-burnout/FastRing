@@ -1,5 +1,6 @@
-#include "Sambar.h"
+#include "SambarAdapter.h"
 
+#include <fcntl.h>
 #include <malloc.h>
 #include <string.h>
 #include <unistd.h>
@@ -177,12 +178,14 @@ struct SambarListener* OpenSambarListener(struct FastRing* ring, uint16_t port, 
 
 void CloseSambarListener(struct SambarListener* listener)
 {
+  struct FastRingDescriptor* descriptor;
+
   if (listener != NULL)
   {
-    if (listener->accept != NULL)
+    if (descriptor = listener->accept)
     {
-      listener->accept->function = NULL;
-      listener->accept->closure  = NULL;
+      descriptor->function = NULL;
+      descriptor->closure  = NULL;
     }
 
     close(listener->handle);

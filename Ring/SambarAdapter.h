@@ -1,5 +1,5 @@
-#ifndef SAMBAR_H
-#define SAMBAR_H
+#ifndef SAMBARADAPTER_H
+#define SAMBARADAPTER_H
 
 #include "FastRing.h"
 
