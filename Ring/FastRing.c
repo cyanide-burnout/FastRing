@@ -716,7 +716,15 @@ int UpdateFastRingPoll(struct FastRing* ring, int handle, uint64_t flags)
       pthread_mutex_unlock(&ring->files.lock);
 
       descriptor->data.poll.flags = flags;
-      condition = atomic_load_explicit(&descriptor->data.poll.condition, memory_order_relaxed);
+      condition = atomic_load_explicit(&descriptor->data.poll.condition, memory_order_acquire);
+
+      if (unlikely((flags      & RING_POLL_REPEAT)     &&
+                   ( condition & RING_CONDITION_GUARD) &&
+                   (~condition & IORING_CQE_F_MORE)))
+      {
+        // Called re-entrantly from within the HandlePollEvent() callback (RING_CONDITION_GUARD is held)
+        return 0;
+      }
 
       if (unlikely(LockPendingRingDescriptor(descriptor)))
       {
