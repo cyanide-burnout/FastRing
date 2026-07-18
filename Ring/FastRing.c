@@ -1129,14 +1129,33 @@ static int __attribute__((hot)) HandleTimeoutEvent(struct FastRingDescriptor* de
                  (descriptor->data.timeout.flags & TIMEOUT_FLAG_REPEAT) &&
                  (~completion->flags & IORING_CQE_F_MORE)))
     {
+      if (likely(LockPendingRingDescriptor(descriptor)))
+      {
+        if (unlikely(atomic_load_explicit(&descriptor->data.timeout.condition, memory_order_acquire) & RING_CONDITION_REMOVE))
+        {
+          atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
+          return 0;
+        }
+
+        io_uring_initialize_sqe(&descriptor->submission);
+        io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);
+        PrepareFastRingDescriptor(descriptor, 0);
+        return 0;
+      }
+
       if (likely(LockSubmittedRingDescriptor(descriptor)))
       {
+        if (unlikely(atomic_load_explicit(&descriptor->data.timeout.condition, memory_order_acquire) & RING_CONDITION_REMOVE))
+        {
+          atomic_store_explicit(&descriptor->state, RING_DESC_STATE_SUBMITTED, memory_order_release);
+          return 0;
+        }
+
         io_uring_initialize_sqe(&descriptor->submission);
         io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);
         SubmitFastRingDescriptor(descriptor, 0);
+        return 1;
       }
-
-      return 1;
     }
   }
 
@@ -1158,50 +1177,66 @@ static void UpdateTimeout(struct FastRingDescriptor* descriptor)
 {
   uint32_t condition;
 
-  condition = atomic_load_explicit(&descriptor->data.timeout.condition, memory_order_acquire);
-
-  if (likely(((~condition & RING_CONDITION_GUARD) ||
-              ( condition & IORING_CQE_F_MORE))   &&
-             (LockSubmittedRingDescriptor(descriptor))))
+  for ( ; ; )
   {
-    io_uring_initialize_sqe(&descriptor->submission);
-    io_uring_prep_timeout_update(&descriptor->submission, &descriptor->data.timeout.interval, descriptor->identifier, descriptor->data.timeout.flags & IORING_TIMEOUT_ABS);
-    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+    condition = atomic_load_explicit(&descriptor->data.timeout.condition, memory_order_acquire);
+
+    if (unlikely(LockPendingRingDescriptor(descriptor)))
+    {
+      atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
+      return;
+    }
+
+    if (( condition & RING_CONDITION_GUARD) &&
+        (~condition & IORING_CQE_F_MORE))
+    {
+      // Handler is re-arming a non-multishot timeout itself and will pick up the interval.
+      return;
+    }
+
+    if (likely(LockSubmittedRingDescriptor(descriptor)))
+    {
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_timeout_update(&descriptor->submission, &descriptor->data.timeout.interval, descriptor->identifier, descriptor->data.timeout.flags & IORING_TIMEOUT_ABS);
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      return;
+    }
   }
 }
 
 static void RemoveTimeout(struct FastRingDescriptor* descriptor)
 {
-  uint32_t condition;
+  atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+  atomic_fetch_or_explicit(&descriptor->data.timeout.condition, RING_CONDITION_REMOVE, memory_order_release);
 
-  condition = atomic_fetch_or_explicit(&descriptor->data.timeout.condition, RING_CONDITION_REMOVE, memory_order_acq_rel);
-
-  if (likely((~condition & RING_CONDITION_GUARD) ||
-             ( condition & IORING_CQE_F_MORE)))
+  for ( ; ; )
   {
-    if (unlikely(LockPendingRingDescriptor(descriptor)))
+    if (LockPendingRingDescriptor(descriptor))
     {
-      if (unlikely(descriptor->submission.opcode == IORING_OP_TIMEOUT))
+      if (descriptor->submission.opcode == IORING_OP_TIMEOUT)
       {
         io_uring_initialize_sqe(&descriptor->submission);
         io_uring_prep_nop(&descriptor->submission);
         PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+        ReleaseFastRingDescriptor(descriptor);
         return;
       }
 
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
       PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      ReleaseFastRingDescriptor(descriptor);
       return;
     }
 
-    if (unlikely(LockSubmittedRingDescriptor(descriptor)))
+    if (LockSubmittedRingDescriptor(descriptor))
     {
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      ReleaseFastRingDescriptor(descriptor);
       return;
     }
   }
