@@ -96,10 +96,10 @@ static int HandleIOResult(struct SSLSocket* socket, int result, uint32_t flag)
 
     case SSL_ERROR_WANT_WRITE:
     case SSL_ERROR_WANT_READ:
-    case SSL_ERROR_SYSCALL:
       socket->state |= flag;
       break;
 
+    case SSL_ERROR_SYSCALL:
     case SSL_ERROR_SSL:
       socket->state &= ~SSL_FLAG_ACTIVE;
       CallEventFunction(socket, SSL_EVENT_FAILED, ERR_get_error(), NULL);

@@ -39,7 +39,8 @@ struct FastGLoop
   uint32_t cycle;                         // Current cycle number
   uint32_t length;                        // Files array length in elements
   struct FastGLoopPoolData* files;        // Files to track
-  struct FastRingDescriptor* descriptor;  // Timeout escriptor
+  struct FastRingFlusher* flusher;        // Pending flusher
+  struct FastRingDescriptor* descriptor;  // Timeout descriptor
 
   struct __kernel_timespec timeout;       // |
   GPollFD* entries;                       // |- Arguments passed to GPollFunc

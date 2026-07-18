@@ -24,6 +24,7 @@ static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_urin
 {
   // Syntax: function(handle, flags, arguments)
 
+  int result;
   int handler;
   struct Context* context;
 
@@ -39,6 +40,8 @@ static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_urin
   lua_getfield(context->state, LUA_REGISTRYINDEX, "LuaPoll");
   lua_getfield(context->state, -1, "HandlerIndex");
 
+  handler = lua_tointeger(context->state, -1);
+
   lua_pushlightuserdata(context->state, context);
   lua_gettable(context->state, -3);
 
@@ -53,11 +56,8 @@ static int HandlePollEvent(struct FastRingDescriptor* descriptor, struct io_urin
   lua_pushinteger(context->state, descriptor->submission.fd);
   lua_pushinteger(context->state, completion->res);
   lua_getfield(context->state, -4, "arguments");
-
-  handler = lua_tointeger(context->state, -5);
-
-  lua_pcall(context->state, 3, 0, handler);
-  lua_pop(context->state, 3);
+  result = lua_pcall(context->state, 3, 0, handler);
+  lua_pop(context->state, 3 + !!result);
 
   if (context->poll != NULL)
   {
@@ -75,6 +75,7 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
   //         arguments, status = coroutine.yield(interval)
   //         arguments, status = coroutine.yield(handle, flags, interval)
 
+  int result;
   int status;
   int handle;
   uint32_t flags;
@@ -150,8 +151,8 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
     lua_getfield(context->state, -1, "HandlerFunction");
     lua_xmove(context->state, thread, 1);
     lua_pushvalue(thread, -2);
-    lua_call(thread, 1, 0);
-    lua_pop(thread, 1);
+    result = lua_pcall(thread, 1, 0, 0);
+    lua_pop(thread, 1 + !!result);
   }
 
   if ((status == LUA_YIELD) &&

@@ -46,6 +46,7 @@ struct FastBuffer
 struct FastBufferPool
 {
   struct FastRing* ring;            //
+  ATOMIC(uint32_t) lock;            // Allocation pop spinlock
   ATOMIC(uint32_t) count;           // Reference count
   ATOMIC(struct FastBuffer*) heap;  // Stack of available buffers
 };

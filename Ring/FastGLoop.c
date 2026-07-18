@@ -76,7 +76,7 @@ static void HandleRequest(struct FastGLoop* loop)
         data->result  = 0;
         data->current = 0;
         data->cycle   = loop->cycle;
-        *(top ++)     = entry->fd; 
+        *(top ++)     = entry->fd;
       }
 
       data->current |= entry->events;
@@ -168,11 +168,11 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
     if (condition && !loop->condition)
     {
       loop->condition = TRUE;
-      SetFastRingFlushHandler(loop->ring, HandleFlush, loop);
+      loop->flusher   = SetFastRingFlushHandler(loop->ring, HandleFlush, loop);
     }
   }
-  
-  return 0;  
+
+  return 0;
 }
 
 static void HandleFlush(void* closure, int reason)
@@ -187,6 +187,7 @@ static void HandleFlush(void* closure, int reason)
   {
     loop            = (struct FastGLoop*)closure;
     loop->condition = FALSE;
+    loop->flusher   = NULL;
 
     entry = loop->entries;
     limit = loop->entries + loop->count;
@@ -303,6 +304,8 @@ void ReleaseFastGLoop(struct FastGLoop* loop)
       JumpToLoop(loop);
     }
 
+    RemoveFastRingFlushHandler(loop->ring, loop->flusher);
+
     g_main_loop_unref(loop->loop);
     g_main_context_unref(loop->context);
     free(loop->fibers[FIBER_LOOP].uc_stack.ss_sp);
@@ -313,14 +316,12 @@ void ReleaseFastGLoop(struct FastGLoop* loop)
 
 void TouchFastGLoop(struct FastGLoop* loop)
 {
-  struct FastRingDescriptor* descriptor;
-
   if ((loop  != NULL) &&
       (state == NULL) &&
       (!loop->condition))
   {
     loop->condition = TRUE;
-    SetFastRingFlushHandler(loop->ring, HandleFlush, loop);
+    loop->flusher   = SetFastRingFlushHandler(loop->ring, HandleFlush, loop);
   }
 }
 

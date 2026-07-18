@@ -12,11 +12,11 @@
 
 static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  if ((completion == NULL) ||
-      (completion->res != 0) &&
-      (completion->res != -EBADF))
+  if (completion == NULL)
   {
-    // Error may occure during closing
+    // Close operation has not been executed (ring teardown): the kernel closes
+    // the descriptor on IORING_OP_CLOSE regardless of the reported result, so a
+    // manual close is only needed when the operation never ran
     close(descriptor->submission.fd);
   }
 
@@ -211,6 +211,40 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   return 1;
 }
 
+static void HandleOutboundFlush(void* closure, int reason)
+{
+  struct FastSocketOutboundBatch* batch;
+  struct FastSocket* socket;
+
+  socket                      = (struct FastSocket*)closure;
+  socket->outbound.condition &= ~POLLIN;
+
+  if (likely((~socket->outbound.condition & POLLOUT) &&
+             (batch = socket->outbound.tail)))
+  {
+    socket->outbound.condition            |= POLLOUT;
+    socket->outbound.tail                  = batch->next;
+    *((uintptr_t*)&socket->outbound.head) *= (uintptr_t)(socket->outbound.tail != NULL);
+
+    SubmitFastRingDescriptorRange(batch->tail, batch->head);
+    ReleaseOutboundBatch(&socket->outbound, batch);
+  }
+
+  ReleaseSocketInstance(socket, 0);
+}
+
+static inline void __attribute__((always_inline)) ScheduleOutboundFlush(struct FastSocket* socket)
+{
+  socket->count ++;
+  socket->outbound.condition |= POLLIN;
+
+  if (unlikely(SetFastRingFlushHandler(socket->ring, HandleOutboundFlush, socket) == NULL))
+  {
+    //
+    HandleOutboundFlush(socket, RING_REASON_COMPLETE);
+  }
+}
+
 static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct FastSocketOutboundBatch* batch;
@@ -258,6 +292,14 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     else
     {
       socket->outbound.condition &= ~POLLOUT;
+
+      if (unlikely(( socket->outbound.tail      != NULL) &&
+                   (~socket->outbound.condition &  POLLIN)))
+      {
+        //
+        ScheduleOutboundFlush(socket);
+      }
+
       CallHandlerFunction(socket, POLLOUT, 0);
     }
   }
@@ -286,28 +328,6 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   }
 
   return 1;
-}
-
-static void HandleOutboundFlush(void* closure, int reason)
-{
-  struct FastSocketOutboundBatch* batch;
-  struct FastSocket* socket;
-
-  socket                      = (struct FastSocket*)closure;
-  socket->outbound.condition &= ~POLLIN;
-
-  if (likely((~socket->outbound.condition & POLLOUT) &&
-             (batch = socket->outbound.tail)))
-  {
-    socket->outbound.condition            |= POLLOUT;
-    socket->outbound.tail                  = batch->next;
-    *((uintptr_t*)&socket->outbound.head) *= (uintptr_t)(socket->outbound.tail != NULL);
-
-    SubmitFastRingDescriptorRange(batch->tail, batch->head);
-    ReleaseOutboundBatch(&socket->outbound, batch);
-  }
-
-  ReleaseSocketInstance(socket, 0);
 }
 
 struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBufferProvider* provider, struct FastBufferPool* inbound, struct FastBufferPool* outbound, int handle, struct msghdr* message, int flags, int mode, uint32_t limit, HandleFastSocketEvent function, void* closure)
@@ -493,9 +513,7 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
 
   if (unlikely(~socket->outbound.condition & POLLIN))
   {
-    socket->count ++;
-    socket->outbound.condition |= POLLIN;
-    SetFastRingFlushHandler(socket->ring, HandleOutboundFlush, socket);
+    ScheduleOutboundFlush(socket);
   }
 
   return 0;

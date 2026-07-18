@@ -25,8 +25,10 @@ void ReleaseFastBufferPool(struct FastBufferPool* pool)
   struct FastBuffer* heap;
 
   if ((pool != NULL) &&
-      (atomic_fetch_sub_explicit(&pool->count, 1, memory_order_relaxed) == 1))
+      (atomic_fetch_sub_explicit(&pool->count, 1, memory_order_release) == 1))
   {
+    atomic_thread_fence(memory_order_acquire);
+
     heap = atomic_load_explicit(&pool->heap, memory_order_acquire);
     heap = REMOVE_ABA_TAG(struct FastBuffer, heap, FAST_BUFFER_ALIGNMENT);
 
@@ -72,11 +74,25 @@ struct FastBuffer* AllocateFastBuffer(struct FastBufferPool* pool, uint32_t size
   struct FastBuffer* buffer;
 
   tag = 0;
+
   atomic_fetch_add_explicit(&pool->count, 1, memory_order_relaxed);
+
+  while (atomic_exchange_explicit(&pool->lock, 1, memory_order_acquire))
+  {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+  }
 
   do pointer = atomic_load_explicit(&pool->heap, memory_order_acquire);
   while ((buffer = REMOVE_ABA_TAG(struct FastBuffer, pointer, FAST_BUFFER_ALIGNMENT)) &&
          (!atomic_compare_exchange_weak_explicit(&pool->heap, &pointer, buffer->next, memory_order_acquire, memory_order_relaxed)));
+
+  atomic_store_explicit(&pool->lock, 0, memory_order_release);
 
   if (buffer != NULL)
   {
@@ -142,8 +158,10 @@ void ReleaseFastBuffer(struct FastBuffer* buffer)
       raise(SIGABRT);
     }
 
-    if (atomic_fetch_sub_explicit(&buffer->count, 1, memory_order_relaxed) == 1)
+    if (atomic_fetch_sub_explicit(&buffer->count, 1, memory_order_release) == 1)
     {
+      atomic_thread_fence(memory_order_acquire);
+
       buffer->state = FAST_BUFFER_STATE_FREE;
 
       pool = buffer->pool;

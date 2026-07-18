@@ -5,7 +5,8 @@
 struct Watch
 {
   int handle;
-  AvahiWatchEvent events;
+  AvahiWatchEvent events;      // Subscribed event mask
+  AvahiWatchEvent result;      // Events reported by the last completion (for watch_get_events)
   AvahiWatchCallback function;
   void* closure;
 
@@ -16,11 +17,10 @@ struct Watch
 static void HandleWatchEvent(struct FastRingDescriptor* descriptor, int result)
 {
   struct Watch* private;
-  AvahiWatchEvent events;
 
   if (private = (struct Watch*)descriptor->closure)
   {
-    events =
+    private->result =
       ((result > 0) *
        ((((result & POLLIN)  != 0) * AVAHI_WATCH_IN)    |
         (((result & POLLOUT) != 0) * AVAHI_WATCH_OUT)   |
@@ -28,7 +28,7 @@ static void HandleWatchEvent(struct FastRingDescriptor* descriptor, int result)
         (((result & POLLHUP) != 0) * AVAHI_WATCH_HUP))) |
       ((result < 0) * AVAHI_WATCH_ERR);
 
-    private->function((AvahiWatch*)private, private->handle, events, private->closure);
+    private->function((AvahiWatch*)private, private->handle, private->result, private->closure);
   }
 }
 
@@ -86,7 +86,9 @@ static AvahiWatchEvent HandleWatchGetEvents(AvahiWatch* watch)
 {
   struct Watch* private;
 
-  return (private = (struct Watch*)watch) ? private->events : (AvahiWatchEvent)0;
+  private = (struct Watch*)watch;
+
+  return private->result;
 }
 
 static void HandleWatchFree(AvahiWatch* watch)
@@ -134,7 +136,7 @@ static AvahiTimeout* HandleTimeoutNew(const AvahiPoll* poll, const struct timeva
     private->ring       = (struct FastRing*)poll->userdata;
     private->closure    = closure;
     private->function   = function;
-    private->descriptor = SetFastRingCertainTimeout(private->ring, NULL, (struct timeval*)value, 0, HandleTimeoutCompletion, private);
+    private->descriptor = SetFastRingCertainTimeout(private->ring, NULL, (struct timeval*)value, IORING_TIMEOUT_ABS | IORING_TIMEOUT_REALTIME, HandleTimeoutCompletion, private);
   }
 
   return (AvahiTimeout*)private;
@@ -147,7 +149,7 @@ static void HandleTimeoutUpdate(AvahiTimeout* timeout, const struct timeval* val
   if (private = (struct Timeout*)timeout)
   {
     //
-    private->descriptor = SetFastRingCertainTimeout(private->ring, private->descriptor, (struct timeval*)value, 0, HandleTimeoutCompletion, private);
+    private->descriptor = SetFastRingCertainTimeout(private->ring, private->descriptor, (struct timeval*)value, IORING_TIMEOUT_ABS | IORING_TIMEOUT_REALTIME, HandleTimeoutCompletion, private);
   }
 }
 

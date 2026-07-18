@@ -168,7 +168,7 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
     }
   }
 
-  if (length > transmission->capacity)
+  if (length >= transmission->capacity)
   {
     pointer                = transmission->buffer;
     transmission->capacity = (length + ALLOCATION_SIZE) & ~(ALLOCATION_SIZE - 1);
@@ -327,7 +327,7 @@ int GetFetchTransmissionCount(struct Fetch* fetch)
 
   count = 0;
 
-  if ((fetch != NULL) &&
+  if ((fetch != 0) &&
       (list   = curl_multi_get_handles(fetch->multi)))
   {
     handle = list;

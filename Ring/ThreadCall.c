@@ -9,6 +9,7 @@
 #include <linux/futex.h>
 
 #define ALIGNMENT  64ULL
+#define CORK       ((void*)1)
 
 #if (__BYTE_ORDER == __LITTLE_ENDIAN) || (UINTPTR_MAX != UINT64_MAX)
 #define LATCH(address)  ((uint32_t*)(address) + 0)
@@ -43,8 +44,16 @@ static struct ThreadCallState* PeekThreadCallState(struct ThreadCall* call)
   struct ThreadCallState* state;
 
   do pointer = atomic_load_explicit(&call->stack, memory_order_acquire);
-  while ((state = REMOVE_ABA_TAG(struct ThreadCallState, pointer, ALIGNMENT)) &&
+  while ((pointer != CORK) &&
+         (state = REMOVE_ABA_TAG(struct ThreadCallState, pointer, ALIGNMENT)) &&
          (!atomic_compare_exchange_weak_explicit(&call->stack, &pointer, state->next, memory_order_acquire, memory_order_relaxed)));
+
+  if (pointer == CORK)
+  {
+    // Stack was corked by ReleaseThreadCall(TC_ROLE_HANDLER) mid-loop: the CAS failed
+    // and state still points at an entry now owned by the teardown drain, not popped here
+    state = NULL;
+  }
 
   return state;
 }
@@ -56,8 +65,15 @@ static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallStat
   // Keep published stack latch non-zero for futex wait on NULL
   atomic_fetch_add_explicit(&state->tag, !(state->tag & (ALIGNMENT - 1)), memory_order_relaxed);
 
-  do state->next = atomic_load_explicit(&call->stack, memory_order_relaxed);
-  while (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, state->tag, ALIGNMENT), memory_order_release, memory_order_relaxed));
+  do state->next = atomic_load_explicit(&call->stack, memory_order_acquire);
+  while ((state->next != CORK) &&
+         (!atomic_compare_exchange_weak_explicit(&call->stack, &state->next, ADD_ABA_TAG(state, state->tag, ALIGNMENT), memory_order_release, memory_order_relaxed)));
+
+  if (state->next == CORK)
+  {
+    atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_release);
+    return;
+  }
 
   if (state->next == NULL)
   {
@@ -81,6 +97,8 @@ static void SubmitThreadCallState(struct ThreadCall* call, struct ThreadCallStat
 
 static void MakeInternalThreadCall(struct ThreadCall* call, struct ThreadCallState* state)
 {
+  atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_relaxed);
+
   if ((call != NULL) &&
       (atomic_load_explicit(&call->weight, memory_order_relaxed) > TC_ROLE_HANDLER))
   {
@@ -249,6 +267,7 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
 {
   int weight;
   uint32_t tag;
+  void* pointer;
   struct ThreadCallState* state;
   struct FastRingDescriptor* descriptor;
 
@@ -258,9 +277,13 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
 
     if (role == TC_ROLE_HANDLER)
     {
-      while (state = PeekThreadCallState(call))
+      pointer = atomic_exchange_explicit(&call->stack, CORK, memory_order_acq_rel);
+
+      while ((pointer != CORK) &&
+             (state = REMOVE_ABA_TAG(struct ThreadCallState, pointer, ALIGNMENT)))
       {
-        tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
+        pointer = state->next;
+        tag     = atomic_load_explicit(&state->tag, memory_order_relaxed);
         atomic_store_explicit(&state->result, TC_RESULT_CANCELED, memory_order_release);
 
         while ((tag == atomic_load_explicit(&state->tag, memory_order_relaxed)) &&

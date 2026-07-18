@@ -25,11 +25,11 @@ _Static_assert(sizeof(struct tls12_crypto_info_aria_gcm_256)      <= sizeof(unio
 
 static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  if ((completion == NULL) ||
-      (completion->res != 0) &&
-      (completion->res != -EBADF))
+  if (completion == NULL)
   {
-    // Error may occur while closing
+    // Close operation has not been executed (ring teardown): the kernel closes
+    // the descriptor on IORING_OP_CLOSE regardless of the reported result, so a
+    // manual close is only needed when the operation never ran
     close(descriptor->submission.fd);
   }
 
@@ -305,7 +305,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   }
 
   if (( descriptor->data.socket.number == 0ULL) &&
-      (~descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) &&
+      ((descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) == 0) &&
       ( engine->outbound.condition   & POLLOUT))
   {
     // In case of TCP the kernel may occupy a buffer for much longer,
@@ -344,7 +344,7 @@ static int HandleOptionCompletion(struct FastRingDescriptor* descriptor, struct 
     goto Continue;
   }
 
-  if ((~descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) &&
+  if (((descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) == 0) &&
       ( engine->outbound.condition   & POLLOUT))
   {
     engine->outbound.condition &= ~POLLOUT;
@@ -481,7 +481,12 @@ static int SetKernelTransmitter(struct FastBIO* engine, struct tls_crypto_info* 
   {
     engine->outbound.tail = descriptors[0];
     engine->outbound.head = descriptors[1];
-    SetFastRingFlushHandler(engine->ring, FlushOutboundQueue, engine);
+
+    if (unlikely(SetFastRingFlushHandler(engine->ring, FlushOutboundQueue, engine) == NULL))
+    {
+      // Flusher could not be registered (OOM): submit synchronously so the queue is not stranded
+      FlushOutboundQueue(engine, RING_REASON_COMPLETE);
+    }
   }
   else
   {
@@ -772,7 +777,12 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
   {
     engine->outbound.tail = descriptor;
     engine->outbound.head = descriptor;
-    SetFastRingFlushHandler(engine->ring, FlushOutboundQueue, engine);
+
+    if (unlikely(SetFastRingFlushHandler(engine->ring, FlushOutboundQueue, engine) == NULL))
+    {
+      // Flusher could not be registered (OOM): submit synchronously so the queue is not stranded
+      FlushOutboundQueue(engine, RING_REASON_COMPLETE);
+    }
   }
   else
   {
