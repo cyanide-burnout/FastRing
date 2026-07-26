@@ -41,13 +41,12 @@ CoRing::CoRing(struct FastRing* ring) :
 
 CoRing::~CoRing()
 {
-  struct FastRingDescriptor* descriptor;
-
   for (auto descriptor : submitted)
   {
-    // Unbind callback to prevent segmentation fault
     descriptor->function = nullptr;
     descriptor->closure  = nullptr;
+
+    cancel(descriptor);
   }
 
   for (auto descriptor : allocated)
@@ -85,6 +84,18 @@ void CoRing::submit()
   }
 
   allocated.clear();
+}
+
+void CoRing::cancel(struct FastRingDescriptor* other) noexcept
+{
+  struct FastRingDescriptor* descriptor;
+
+  if (descriptor = AllocateFastRingDescriptor(ring, nullptr, nullptr))
+  {
+    io_uring_initialize_sqe(&descriptor->submission);
+    io_uring_prep_cancel64(&descriptor->submission, other->identifier, 0);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+  }
 }
 
 bool CoRing::update(CoRingEvent& event)

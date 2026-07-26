@@ -47,6 +47,7 @@ class CoRing : public Compromise::Emitter<CoRingEvent>
     std::set<struct FastRingDescriptor*> submitted;
     std::vector<struct FastRingDescriptor*> allocated;
 
+    void cancel(struct FastRingDescriptor* other) noexcept;
     bool update(CoRingEvent& event) final;
     static int invoke(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
 };
