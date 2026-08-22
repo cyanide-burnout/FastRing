@@ -11,10 +11,11 @@ struct FastBufferPool* CreateFastBufferPool(struct FastRing* ring)
 {
   struct FastBufferPool* pool;
 
-  pool        = (struct FastBufferPool*)calloc(1, sizeof(struct FastBufferPool));
-  pool->ring  = ring;
-
-  atomic_store_explicit(&pool->count, 1, memory_order_relaxed);
+  if (pool = (struct FastBufferPool*)calloc(1, sizeof(struct FastBufferPool)))
+  {
+    pool->ring = ring;
+    atomic_store_explicit(&pool->count, 1, memory_order_relaxed);
+  }
 
   return pool;
 }
