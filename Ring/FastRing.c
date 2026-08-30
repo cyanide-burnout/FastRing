@@ -614,11 +614,10 @@ void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor)
 {
   if (likely(descriptor != NULL))
   {
-    descriptor->function = NULL;
-    descriptor->closure  = NULL;
-
     if (unlikely(LockPendingRingDescriptor(descriptor)))
     {
+      descriptor->function = NULL;
+      descriptor->closure  = NULL;
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_nop(&descriptor->submission);
       PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
@@ -627,10 +626,18 @@ void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor)
 
     if (likely(LockSubmittedRingDescriptor(descriptor)))
     {
+      descriptor->function = NULL;
+      descriptor->closure  = NULL;
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      return;
+    }
+
+    if (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_ALLOCATED)
+    {
+      ReleaseFastRingDescriptor(descriptor);
       return;
     }
   }

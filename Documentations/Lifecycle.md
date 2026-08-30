@@ -163,11 +163,13 @@ Doing it by hand is a trap, twice over:
   and flushers keep running, so it looks like a hang rather than a crash.
 
 `DiscardFastRingDescriptor()` claims the state with the same primitives the submission
-loop uses, so neither hazard applies. **Call it from the ring thread**: it excludes the
-submission loop, not completion handling. `HandleCompletedRingDescriptor()` reads
-`function`, calls it and may drop the last reference without claiming the state, so a
-CQE reaped in parallel can recycle the descriptor under the call. On the ring thread the
-two cannot overlap.
+loop uses, and detaches the handler only after that claim, so neither hazard applies.
+
+**Call it from the ring thread.** The claim excludes the submission loop, not completion
+handling: `HandleCompletedRingDescriptor()` reads `function`, calls it and may drop the
+last reference without ever claiming the state, so a CQE reaped in parallel could recycle
+the descriptor under the call. On the ring thread the two cannot overlap, because the
+same thread is the one reaping completions.
 
 A raw descriptor owned by a module therefore has the same teardown rule as the built-in
 APIs: abandon it from the ring thread. Doing it from another thread requires the owner to

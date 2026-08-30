@@ -243,14 +243,22 @@ explicit `ReleaseFastRingDescriptor()` for the case where the operation may alre
 have been handed to the kernel: the owner is going away, but the descriptor cannot be
 recycled until io_uring is done with it.
 
-What it does:
+What it does, in this order:
 
-- clears `function` and `closure`, so no completion reaches the owner any more;
-- claims the descriptor state atomically, then either
+- claims the descriptor state — a CAS for a submission still sitting in the pending
+  queue, a spinlock for one the submission loop has already taken;
+- under that claim, clears `function` and `closure`, so no completion reaches the owner
+  any more and the submission loop never observes a half-updated descriptor;
+- then either
   - rewrites the still-queued submission in place as `IORING_OP_NOP`, when it has not
     reached the kernel yet, or
-  - submits a cancellation — `IORING_OP_TIMEOUT_REMOVE` for a timeout, `IORING_OP_ASYNC_CANCEL`
-    for everything else — when the operation is already in flight.
+  - submits an `IORING_OP_ASYNC_CANCEL`, when the operation is already in flight. That
+    covers timeouts as well: `io_try_cancel()` falls through to `io_timeout_cancel()`.
+
+If neither claim succeeds the descriptor carries no operation at all. One that was
+allocated but never submitted is released outright — no completion will ever arrive to
+do it, and leaving it in `RING_DESC_STATE_ALLOCATED` would lose the slot for good. In
+any other state the call does nothing.
 
 **Call it from the ring thread.** The state is claimed with the same primitives the
 submission loop itself uses, so the call is safe against that loop — but *not* against

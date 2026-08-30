@@ -268,11 +268,13 @@ void ReleaseFastRing(struct FastRing* ring);
 
 // Detaches a descriptor from its owner during teardown: the handler is dropped and the operation
 // is either cancelled or, when its submission has not reached the kernel yet, rewritten in place.
-// The state is claimed atomically, so the call is safe against the submission loop. It is NOT
-// safe against completion handling: that path reads function and releases the descriptor without
-// claiming the state, so a concurrent CQE may recycle the descriptor under the call. Has to be
-// made from the ring thread, and expects a descriptor carrying a single operation. The remaining
-// reference is dropped by the completion
+// The state is claimed first -- a CAS for a submission still queued, a spinlock for one already
+// taken by the kernel -- and the handler is detached under that claim, so the submission loop
+// never observes a half-updated descriptor. A descriptor that was allocated but never submitted
+// carries nothing to cancel and is released outright, as no completion will ever arrive to do it.
+// Completion handling does not claim the state at all, hence the call has to be made from the ring
+// thread. Expects a descriptor carrying a single operation, and the remaining reference is dropped
+// by the completion
 void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor);
 
 // Poll
