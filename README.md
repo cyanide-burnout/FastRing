@@ -19,7 +19,7 @@ FastRing provides:
 
 ## Requirements
 
-- Linux with `io_uring` support (recommended: kernel >= 5.13)
+- Linux with `io_uring` support
 - `liburing` (some modules require >= 2.6)
 - `pthread`
 - optional dependencies by module:
@@ -32,6 +32,20 @@ FastRing provides:
   - `c-ares`
   - `protobuf-c`
   - `systemd` (watchdog)
+  - `libsmb2` (SMB2 adapter)
+
+### Tested Platforms
+
+There is no formally maintained kernel compatibility matrix. The reference targets
+are the stable Debian kernels:
+
+- Debian 12 (bookworm) is the origin of the project and the oldest supported baseline.
+- Debian 13 (trixie) is the current target; recent changes are written against the
+  Debian 13 kernel series.
+
+Older kernels may work but are not exercised. Individual features degrade
+independently: kTLS, multishot receive, `msg_ring`, futex operations and zerocopy
+sends each have their own kernel requirements and fall back when unavailable.
 
 ## Repository Layout
 
@@ -43,6 +57,7 @@ FastRing provides:
 ## Documentations
 
 - Documentation index: `Documentations/README.md`
+- Descriptor lifecycle and concurrency rules: `Documentations/Lifecycle.md`
 - `FastRing` API: `Documentations/FastRing.md`
 - `Latch` API: `Documentations/Latch.md`
 - `FastSocket` API: `Documentations/FastSocket.md`
@@ -78,12 +93,17 @@ make
 ```
 
 Other example targets:
-- `Examples/Avahi`
-- `Examples/H2H3Server`
+- `Examples/AAA` - RADIUS client over `FastSocket`
+- `Examples/Avahi` - Avahi service discovery
+- `Examples/H2H3Server` - HTTP/2 and HTTP/3 server on `H2OCore`
+- `Examples/SMBClient` - SMB2 named pipe client on `SambarAdapter`
+- `Examples/SMBServer` - SMB2 server on `SambarAdapter`
+- `Examples/SSL` - TLS socket
 - `Examples/gRPCClient`
 - `Examples/gRPCServer`
 
 Dependencies for each example are defined in its local `Makefile` via `pkg-config`.
+See `Examples/README.md` for what each example demonstrates and what it needs.
 
 ## Module Overview
 
@@ -106,7 +126,7 @@ Dependencies for each example are defined in its local `Makefile` via `pkg-confi
 - `Resolver` - c-ares DNS resolver integration
 - `LuaPoll` - Lua/LuaJIT bindings
 - `WatchDog` - systemd watchdog helper
-- `RingProfiler` - profiling helpers for ring activity
+- `SambarAdapter` - libsmb2 (SMB2) adapter, experimental
 - `CoRing` - C++ coroutine adapter
 
 ### Supplementary (`Supplimentary/`)

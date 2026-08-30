@@ -2,6 +2,9 @@
 
 This document describes the public C API from `Ring/FastRing.h`.
 
+Ownership, reference counting, reentrancy and shutdown rules are documented
+separately in `Documentations/Lifecycle.md`.
+
 ## Conventions
 
 - Integer return codes use `errno` style:
@@ -15,6 +18,16 @@ This document describes the public C API from `Ring/FastRing.h`.
 
 - `CreateFastRing()` captures the processing thread id.
 - `WaitForFastRing()` should run in the owner thread loop.
+- The ring is created with `IORING_SETUP_SINGLE_ISSUER`: only the owner thread may
+  enter the kernel through it.
+
+```c
+int IsFastRingThread(struct FastRing* ring);
+```
+
+Returns `1` when called from the ring thread, `0` from any other thread, and `-1` if
+the ring has no recorded thread. See `Documentations/Lifecycle.md` for the full table
+of which calls are allowed from which thread.
 
 ## Lifecycle
 
@@ -26,15 +39,22 @@ int WaitForFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask);
 
 - `CreateFastRing(length)`:
   - `length == 0` means auto-size from `RLIMIT_NOFILE`.
-  - queue length is rounded to power-of-two.
+  - queue length is rounded to power-of-two and capped at `16384`.
+  - the completion queue is sized at 4x the submission queue.
+  - registers a sparse file table of `RLIMIT_NOFILE / 2` entries (capped at `1 << 20`).
   - returns `NULL` on init failure.
 - `ReleaseFastRing()`:
   - releases ring resources, descriptors, flush handlers, registered file/buffer metadata.
+  - calls every live handler with `RING_REASON_RELEASED` first; see `Documentations/Lifecycle.md`.
 - `WaitForFastRing(interval_ms, mask)`:
   - submits pending SQEs, handles CQEs, optionally waits.
   - `interval` is milliseconds.
   - `mask` is passed to `io_uring_submit_and_wait_timeout`.
   - returns `0` on timeout (`-ETIME` is normalized), negative on error.
+  - does not wait when there is at least one SQE or CQE ready to be processed.
+
+In C++, `CreateSharedFastRing(length = 0)` returns a
+`std::shared_ptr<struct FastRing>` bound to `ReleaseFastRing`.
 
 ## Descriptor API
 
@@ -55,8 +75,32 @@ int ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor);
 - `SubmitFastRingDescriptor()` prepares and enqueues one descriptor.
 - `SubmitFastRingDescriptorRange()` enqueues a prepared chain.
 - `ReleaseFastRingDescriptor()` decrements references and recycles when count reaches `0`.
+  It returns the remaining reference count, or `-1` for a `NULL` descriptor.
+  Normally the release is performed automatically by the return value of the
+  completion handler; call it explicitly only in the cases described in
+  `Documentations/Lifecycle.md`.
 
-Completion callback:
+### Descriptor states
+
+`descriptor->state` holds one of `RING_DESC_STATE_FREE`, `RING_DESC_STATE_ALLOCATED`,
+`RING_DESC_STATE_PENDING`, `RING_DESC_STATE_LOCKED`, `RING_DESC_STATE_SUBMITTED`.
+Transitions and their meaning are described in `Documentations/Lifecycle.md`.
+
+### Submission options
+
+The `option` argument of `PrepareFastRingDescriptor()`, `SubmitFastRingDescriptor()`
+and `SubmitFastRingEvent()` is masked with `RING_DESC_OPTION_MASK` and encoded into
+`user_data`, so it is returned in `completion->user_data`:
+
+- `RING_DESC_OPTION_IGNORE` - marks a housekeeping completion (cancel, poll update,
+  timeout update, or a NOP replacing a cancelled request). Built-in Poll, Watch and
+  Timeout handlers do not invoke the user callback for such completions.
+- `RING_DESC_OPTION_USER1`, `RING_DESC_OPTION_USER2` - available to modules to
+  distinguish several submissions sharing one descriptor and one handler.
+
+Pass `0` for a normal submission.
+
+### Completion callback
 
 ```c
 int (*HandleFastRingCompletionFunction)(
@@ -67,12 +111,27 @@ int (*HandleFastRingCompletionFunction)(
 
 Completion reasons:
 - `RING_REASON_COMPLETE`
-- `RING_REASON_INCOMPLETE`
+- `RING_REASON_INCOMPLETE` (chained SQE that will never run; no longer produced by the
+  core, see `Documentations/Lifecycle.md`)
 - `RING_REASON_RELEASED`
+
+Return `0` to drop one reference, non-zero when the descriptor has been re-armed or a
+multishot request is still active. `completion` is `NULL` for `RING_REASON_RELEASED`
+and for chained descriptors completed through `IOSQE_CQE_SKIP_SUCCESS`.
+
+### Condition flags
+
+Poll, Watch and Timeout descriptors keep a `condition` word in `descriptor->data`
+carrying `RING_CONDITION_GUARD`, `RING_CONDITION_UPDATE` and `RING_CONDITION_REMOVE`
+(`RING_CONDITION_MASK` covers all three). These are the mechanism that makes it safe
+to update or remove an operation from inside its own callback; see
+`Documentations/Lifecycle.md`.
 
 ## Flush Handlers
 
 ```c
+typedef void (*HandleFastRingFlushFunction)(void* closure, int reason);
+
 struct FastRingFlusher* SetFastRingFlushHandler(
   struct FastRing* ring,
   HandleFastRingFlushFunction function,
@@ -81,8 +140,94 @@ struct FastRingFlusher* SetFastRingFlushHandler(
 int RemoveFastRingFlushHandler(struct FastRing* ring, struct FastRingFlusher* flusher);
 ```
 
-- Run after CQ processing inside `WaitForFastRing()`.
-- `RemoveFastRingFlushHandler()` returns `0`, `-EPERM`, or `-EBADF`.
+A flusher is a **one-shot callback that runs at the end of the current loop
+iteration**, after every CQE of this pass has been handled. It is the mechanism for
+"do this once more, but not right now": batching work that several completions would
+otherwise each trigger, and getting off a completion handler's stack before touching
+shared state.
+
+### When it runs
+
+```
+WaitForFastRing()
+  submit pending SQEs
+  handle CQEs           <-- completion handlers run here, may arm flushers
+  run flush handlers    <-- here, until none are left
+```
+
+The drain is a `while` loop over the pending stack, so **a flusher armed from inside a
+flusher runs in the same iteration**, not the next one. That is what lets a module
+re-arm itself to make repeated progress — `DBusCore` dispatches one D-Bus message per
+pass and re-arms until the queue is empty, all inside one `WaitForFastRing()` call.
+Re-arming unconditionally is therefore an infinite loop: always stop on a completion
+condition.
+
+Handlers are kept on a stack, so within one iteration they run in reverse arming
+order. Do not depend on ordering between independent modules.
+
+### One-shot, and the idempotent-arm idiom
+
+Being called returns the flusher to the free list, so each `SetFastRingFlushHandler()`
+produces exactly one call. Modules that only want "one pass per iteration" keep the
+handle and check it, which is why the pattern below appears throughout the codebase:
+
+```c
+void TouchModule(struct Module* module)
+{
+  if (module->flusher == NULL)
+  {
+    // arm at most once per cycle
+    module->flusher = SetFastRingFlushHandler(module->ring, HandleFlush, module);
+  }
+}
+
+static void HandleFlush(void* closure, int reason)
+{
+  struct Module* module = (struct Module*)closure;
+
+  module->flusher = NULL;          // clear first: the handler may re-arm below
+
+  if (reason == RING_REASON_COMPLETE)
+    MakeProgress(module);
+}
+```
+
+`CURLWSCore`, `DBusCore`, `FastGLoop`, `FastUVLoop` and `Fetch` all use exactly this
+shape.
+
+### Reasons
+
+- `RING_REASON_COMPLETE` — the normal end-of-iteration call.
+- `RING_REASON_RELEASED` — `ReleaseFastRing()` is tearing the ring down. Both the
+  pending and the free stacks are walked, so a still-armed flusher gets this call
+  before its memory goes away. Release module state here; do not submit anything.
+
+Always branch on `reason`: a handler that does its work unconditionally will run it
+again during shutdown.
+
+### Cancelling
+
+`RemoveFastRingFlushHandler()` cancels an armed flusher by moving it from pending
+straight to free:
+
+- `0` — cancelled, the handler will not be called;
+- `-EPERM` — too late, the flusher is already running or has already run;
+- `-EBADF` — `ring` or `flusher` is `NULL`.
+
+A cancelled flusher is not recycled immediately; the drain loop notices the changed
+state, skips the call and reclaims it. Passing a stale handle of an already-called
+flusher is safe in the sense that it cannot invoke anything, but the object may have
+been reused — so clear the handle in the handler, as above, and cancel only handles
+you know are still armed.
+
+### Rules
+
+- Flush handlers run in the ring thread; `SetFastRingFlushHandler()` and
+  `RemoveFastRingFlushHandler()` themselves are lock-free and may be called from any
+  thread.
+- Do not block: everything after the flush phase, including the next wait, is stalled.
+- Prefer a flusher over doing work directly in a completion handler when the work
+  touches state that other completions in the same batch may also touch.
 
 ## Poll API
 
@@ -104,6 +249,27 @@ void (*HandleFastRingPollFunction)(int handle, uint32_t events, void* closure, u
 Flag helpers:
 - `RING_POLL_READ`, `RING_POLL_WRITE`, `RING_POLL_ERROR`, `RING_POLL_HANGUP`
 - high-bit behavior: `RING_POLL_EDGE`, `RING_POLL_SHOT`
+- `RING_POLL_REPEAT` - re-arm the request in userspace after each callback, unless it
+  was removed, completed as a kernel multishot (`IORING_CQE_F_MORE`), or terminated by
+  `POLLERR` / `POLLHUP`
+
+`RING_POLL_EDGE` maps to `IORING_POLL_ADD_LEVEL` and is compiled out by default:
+level triggering is broken on kernels up to 6.1 (liburing issue 829). Define
+`USE_RING_LEVEL_TRIGGERING` to enable it.
+
+Behavior notes:
+- One poll registration per file descriptor. `AddFastRingPoll()` on a descriptor that
+  already has one overwrites the table entry.
+- `SetFastRingPoll()` combines the three: `flags == 0` removes, an existing
+  registration is updated, and a missing one (`-EBADF`) is added.
+- `UpdateFastRingPoll()` returns `-EBADF` when there is no registration, `-EBUSY`
+  when the descriptor could not be locked.
+- `DestroyFastRingPoll()` removes every registration matching both `function` and
+  `closure`. Use it to tear down all descriptors owned by one object.
+- `GetFastRingPollDescriptor()` returns `NULL` if the descriptor was recycled for a
+  different purpose.
+- Removal is asynchronous: a cancellation request is submitted and the descriptor is
+  freed when it completes.
 
 ## Watch API
 
@@ -120,12 +286,19 @@ Watch callback:
 void (*HandleFastRingWatchFunction)(struct FastRingDescriptor* descriptor, int result);
 ```
 
+- Unlike the Poll API, a watch is addressed by its descriptor, not by the file
+  descriptor, so several watches may exist for one handle.
+- `flags` is masked with `IORING_POLL_ADD_MULTI | IORING_POLL_ADD_LEVEL`.
+- A non-multishot watch is re-armed automatically after each callback.
+- `SetFastRingWatch()` removes when `mask == 0`, updates when a descriptor is given,
+  and adds otherwise.
+
 ## Timeout API
 
 ```c
-struct FastRingDescriptor* SetFastRingTimeout(... int64_t interval_ms, ...);
-struct FastRingDescriptor* SetFastRingCertainTimeout(... struct timeval* interval, ...);
-struct FastRingDescriptor* SetFastRingPreciseTimeout(... struct timespec* interval, ...);
+struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
+struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timeval* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
+struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, struct timespec* interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure);
 ```
 
 Timeout callback:
@@ -134,9 +307,18 @@ Timeout callback:
 void (*HandleFastRingTimeoutFunction)(struct FastRingDescriptor* descriptor);
 ```
 
-- `TIMEOUT_FLAG_REPEAT` enables repeating timeout.
-- Update by passing existing descriptor.
-- Remove by passing negative interval or `NULL` interval.
+- The three functions differ only in how the interval is expressed: milliseconds,
+  `struct timeval`, `struct timespec`.
+- `TIMEOUT_FLAG_REPEAT` enables a repeating timeout. It maps to
+  `IORING_TIMEOUT_MULTISHOT` where the kernel supports it, and to a userspace re-arm
+  otherwise.
+- `flags` is also passed to `io_uring_prep_timeout()`, so `IORING_TIMEOUT_ABS` and the
+  clock selection flags apply.
+- Create by passing `descriptor == NULL`; update by passing an existing descriptor;
+  remove by passing a negative interval (`SetFastRingTimeout`) or `NULL` interval
+  (the other two). Removal returns `NULL`, which is meant to be assigned back over
+  the stored pointer.
+- `function` and `closure` are only used at creation time.
 
 ## Event API
 
@@ -145,21 +327,45 @@ struct FastRingDescriptor* CreateFastRingEvent(struct FastRing* ring, HandleFast
 int SubmitFastRingEvent(struct FastRing* ring, struct FastRingDescriptor* event, uint32_t parameter, int option);
 ```
 
-- `SubmitFastRingEvent()` uses `io_uring msg_ring`.
+- `CreateFastRingEvent()` allocates and prepares a descriptor that is never submitted
+  itself; it only serves as the target identifier for `msg_ring`.
+- `SubmitFastRingEvent()` uses `io_uring msg_ring`. `ring` is the source ring (it may
+  be a different ring, which is how cross-ring wakeups are done), `event` identifies
+  the target, `parameter` is delivered to the target handler as `completion->res`.
+- Returns `0`, or `-EINVAL` when the event is `NULL` or a descriptor cannot be
+  allocated.
 
 ## Buffer Provider API
 
 ```c
-struct FastRingBufferProvider* CreateFastRingBufferProvider(...);
-void ReleaseFastRingBufferProvider(...);
+struct FastRingBufferProvider* CreateFastRingBufferProvider(
+  struct FastRing* ring,
+  uint16_t group,
+  uint16_t count,
+  uint32_t length,
+  CreateRingBufferFunction function,
+  void* closure);
+
+void ReleaseFastRingBufferProvider(struct FastRingBufferProvider* provider, ReleaseRingBufferFunction function);
+
 void PrepareFastRingBuffer(struct FastRingBufferProvider* provider, struct io_uring_sqe* submission);
 uint8_t* GetFastRingBuffer(struct FastRingBufferProvider* provider, struct io_uring_cqe* completion);
 void AdvanceFastRingBuffer(struct FastRingBufferProvider* provider, struct io_uring_cqe* completion, CreateRingBufferFunction function, void* closure);
+
+uint16_t GetFastRingBufferGroup(struct FastRing* ring);
 ```
 
+- `group == 0` allocates a group id through `GetFastRingBufferGroup()`.
+- `count == 0` defaults to the number of CQ entries; the value is rounded up to a
+  power of two.
 - `PrepareFastRingBuffer()` sets `IOSQE_BUFFER_SELECT`.
-- `GetFastRingBuffer()` maps CQE buffer id to address.
-- `AdvanceFastRingBuffer()` returns consumed slot back to the ring.
+- `GetFastRingBuffer()` maps CQE buffer id to address, `NULL` when the completion
+  carries no buffer.
+- `AdvanceFastRingBuffer()` returns consumed slot back to the ring. Passing a
+  `function` installs a fresh buffer and transfers ownership of the old one to the
+  caller; passing `NULL` recycles the same buffer immediately.
+- `ReleaseFastRingBufferProvider()` calls `function` for every buffer; passing `NULL`
+  leaves the buffers to the caller.
 
 ## Registered Files and Buffers
 
@@ -170,5 +376,32 @@ int AddFastRingRegisteredBuffer(struct FastRing* ring, void* address, size_t len
 int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* address, size_t length);
 ```
 
-- File registration returns fixed-file index (`>= 0`) or negative error.
+- File registration returns fixed-file index (`>= 0`) or negative error
+  (`-EBADF`, `-ENOMEM`, `-EOVERFLOW`). Registrations are reference counted per handle.
 - Buffer registration returns buffer index (`>= 0`) or negative error.
+- `UpdateFastRingRegisteredBuffer()` with `address == NULL` unregisters the slot and
+  returns `INT32_MIN`, not the index.
+
+## Tracing
+
+```c
+typedef void (*TraceFastRingFunction)(int action, struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason, void* closure);
+
+struct FastRingTrace
+{
+  void* closure;
+  TraceFastRingFunction function;
+};
+```
+
+Setting `ring->trace` makes the ring report every completion (`RING_TRACE_ACTION_HANDLE`)
+and every descriptor recycle (`RING_TRACE_ACTION_RELEASE`). There is no setter
+function: assign the field directly. This is a debug facility and adds a branch on the
+completion hot path.
+
+## Reserved user_data Values
+
+`user_data` values at or above `RING_DATA_UNDEFINED` are not treated as descriptor
+pointers and are skipped by the completion loop. `RING_DATA_ADDRESS_MASK` extracts the
+descriptor address from `user_data`. Modules that submit raw SQEs outside the
+descriptor API must keep their `user_data` in that reserved range.

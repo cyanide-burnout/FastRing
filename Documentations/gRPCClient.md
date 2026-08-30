@@ -2,66 +2,145 @@
 
 Header: `Supplimentary/gRPCClient.h`
 
-`gRPCClient` provides client-side gRPC transport and protobuf-c service wrapper on top of `Fetch`.
+`gRPCClient` speaks gRPC over `Fetch`/libcurl. It offers two layers:
 
-## Transport Layer API
+- a **transport layer** that exposes gRPC frames directly and supports streaming in
+  both directions;
+- a **protobuf-c service wrapper** that plugs into generated stubs, at the cost of
+  being unary-only.
+
+Status: within this repository the module is exercised only by `Examples/gRPCClient`.
+
+`struct GRPCTransmission` embeds `struct FetchTransmission` as its first member
+(`super`), so a gRPC call is a Fetch transmission driven by the same `Fetch` instance
+and ring. See `Documentations/Fetch.md` and `Documentations/gRPC.md`.
+
+## Methods
 
 ```c
-typedef int (*HandleGRPCEventFunction)(
-  void* closure,
-  struct GRPCTransmission* transmission,
-  int reason,
-  int parameter,
-  char* data,
-  size_t length);
-
-struct GRPCMethod* CreateGRPCMethod(
-  const char* location,
-  const char* package,
-  const char* service,
-  const char* name,
-  const char* token,
-  long timeout,
-  char resolution);
-
-void ReleaseGRPCMethod(struct GRPCMethod* method);
+struct GRPCMethod* CreateGRPCMethod(const char* location, const char* package, const char* service,
+                                    const char* name, const char* token, long timeout, char resolution);
 void HoldGRPCMethod(struct GRPCMethod* method);
+void ReleaseGRPCMethod(struct GRPCMethod* method);
+```
 
-struct GRPCTransmission* MakeGRPCTransmission(
-  struct Fetch* fetch,
-  struct GRPCMethod* method,
-  HandleGRPCEventFunction function,
-  void* closure);
+A `GRPCMethod` is the prepared, reusable description of one RPC endpoint:
 
+- The path is composed as `/<package>.<service>/<name>`, or `/<service>/<name>` when
+  `package` is `NULL`, and applied over `location`.
+- HTTP version defaults to `CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE`, and switches to
+  `CURL_HTTP_VERSION_2TLS` when the scheme is `https`. Plaintext gRPC therefore works
+  without an upgrade round-trip.
+- `token`, when given, becomes an `authorization: Bearer` header.
+- `timeout` with `resolution` becomes the `grpc-timeout` header: `'S'` for seconds,
+  `'m'` for milliseconds, `0` for no timeout header at all.
+- The object is reference counted (`count` starts at `1`). One method can back many
+  concurrent transmissions; `HoldGRPCMethod()` / `ReleaseGRPCMethod()` manage that.
+
+## Transport Layer
+
+```c
+struct GRPCTransmission* MakeGRPCTransmission(struct Fetch* fetch, struct GRPCMethod* method,
+                                             HandleGRPCEventFunction function, void* closure);
 void CancelGRPCTransmission(struct GRPCTransmission* transmission);
+```
 
+### Event callback
+
+```c
+typedef int (*HandleGRPCEventFunction)(void* closure, struct GRPCTransmission* transmission,
+                                       int reason, int parameter, char* data, size_t length);
+```
+
+| Reason | `parameter` | `data` / `length` |
+| --- | --- | --- |
+| `GRPCCLIENT_REASON_FRAME` | Frame flags, i.e. `GRPC_FLAG_COMPRESSED` | One complete message body |
+| `GRPCCLIENT_REASON_STATUS` | gRPC status, or the HTTP/Fetch code on transport failure | Status message text, `length` is `0` |
+
+- **Frames arrive already decompressed.** A `GRPC_FLAG_COMPRESSED` frame is inflated
+  into a scratch buffer before the callback sees it, so `parameter` is informational.
+  Decompression is bounded by `GRPC_FRAME_SIZE_LIMIT`; a frame that expands past it
+  fails the call rather than growing without limit.
+- `data` points into module-owned memory that is reused by the next frame. Decode or
+  copy inside the callback.
+- **`GRPCCLIENT_REASON_STATUS` is delivered exactly once and last.** When the HTTP
+  response code is `200`, `parameter` is the `grpc-status` trailer and `data` the
+  `grpc-message` trailer; otherwise the call never reached gRPC level and `parameter`
+  carries the Fetch completion code with `data` holding its error text.
+- After that callback returns, the transmission and all its frames are freed. Clear
+  any stored pointer inside the `STATUS` branch.
+
+`CancelGRPCTransmission()` aborts an in-flight call; teardown then runs through the
+same path.
+
+### Sending
+
+```c
 struct GRPCFrame* AllocateGRPCFrame(struct GRPCTransmission* transmission, size_t length);
 void TransmitGRPCFrame(struct GRPCFrame* frame);
+
 int TransmitGRPCMessage(struct GRPCTransmission* transmission, const ProtobufCMessage* message, int final);
 ```
 
-Reasons:
-- `GRPCCLIENT_REASON_FRAME`
-- `GRPCCLIENT_REASON_STATUS`
+`TransmitGRPCMessage()` is the normal entry point: it packs `message` into a frame and
+queues it, and when `final` is non-zero also queues the end-of-stream marker. It
+returns the number of frames queued — `2` for a final message, `1` for a non-final
+one, `0` if nothing could be allocated.
+
+```c
+TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 0);   // one more to come
+TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 1);   // last, closes the stream
+```
+
+The raw pair is there for payloads that are not protobuf-c messages, and follows the
+same shape as `CURLWSCore`: allocate, fill `frame->buffer`, set `frame->length`, then
+transmit. Setting `frame->data = NULL` before `TransmitGRPCFrame()` makes the entry an
+**end-of-stream marker** rather than a payload — that is exactly what `final` does.
+`TransmitGRPCFrame()` takes ownership; frames are recycled through a per-transmission
+free list.
 
 ## ProtobufC Service Wrapper
 
 ```c
-typedef void (*HandleGRPCErrorFunction)(
-  void* closure,
-  struct GRPCService* service,
-  const char* method,
-  int status,
-  const char* message);
-
-ProtobufCService* CreateGRPCService(
-  struct Fetch* fetch,
-  const ProtobufCServiceDescriptor* descriptor,
-  const char* location,
-  const char* token,
-  long timeout,
-  char resolution,
-  HandleGRPCErrorFunction function,
-  void* closure);
+ProtobufCService* CreateGRPCService(struct Fetch* fetch, const ProtobufCServiceDescriptor* descriptor,
+                                    const char* location, const char* token, long timeout,
+                                    char resolution, HandleGRPCErrorFunction function, void* closure);
 ```
 
+Returns a `ProtobufCService*` that generated protobuf-c stubs can be called against
+directly:
+
+```c
+ProtobufCService* service = CreateGRPCService(fetch, &demo__echoer__descriptor,
+                                             "http://localhost:50051", NULL, 0, 0, HandleError, NULL);
+
+demo__echoer__unary_echo(service, &request, HandleEchoReply, NULL);   // demo.Echoer/UnaryEcho
+...
+protobuf_c_service_destroy(service);
+```
+
+`GRPCMethod` entries are filled in lazily, one per method of the descriptor, the first
+time each is called.
+
+**Unary calls only.** `ProtobufCClosure` may be invoked once per call by protobuf-c's
+own contract, so the wrapper delivers the first response message and ignores the rest
+of a server stream. Use the transport layer for anything streaming.
+
+Error reporting has two channels:
+
+```c
+typedef void (*HandleGRPCErrorFunction)(void* closure, struct GRPCService* service,
+                                        const char* method, int status, const char* message);
+```
+
+- the reply closure is invoked with a `NULL` message, so a caller that only checks the
+  reply still notices;
+- `function`, when supplied, is called with the method name, status and message.
+
+## Rules
+
+- All callbacks run in the ring thread inside `WaitForFastRing()`.
+- Do not use the transmission pointer after `GRPCCLIENT_REASON_STATUS`.
+- Release methods (`ReleaseGRPCMethod()`) and destroy services
+  (`protobuf_c_service_destroy()`) before releasing the `Fetch` instance; a `Fetch`
+  torn down under live calls completes them with `FETCH_STATUS_INCOMPLETE`.

@@ -31,3 +31,9 @@ struct gRPC
 } __attribute__((packed));
 ```
 
+Frame flags:
+
+- `GRPC_FLAG_COMPRESSED` (`1 << 0`) - the payload is compressed with the encoding
+  negotiated through `grpc-encoding` / `grpc-accept-encoding` (gzip in this
+  implementation). When clear, the payload is the raw protobuf message.
+

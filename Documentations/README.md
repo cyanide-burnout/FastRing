@@ -1,6 +1,10 @@
 # Documentations
 
-Module-level API documentation:
+## Core Concepts
+
+- Descriptor lifecycle, reference counting, reentrancy and thread rules: `Documentations/Lifecycle.md`
+
+## Module-level API documentation
 
 - `FastRing`: `Documentations/FastRing.md`
 - `Latch`: `Documentations/Latch.md`
@@ -18,6 +22,7 @@ Module-level API documentation:
 - `FastAvahiPoll`: `Documentations/FastAvahiPoll.md`
 - `DBusCore`: `Documentations/DBusCore.md`
 - `Resolver`: `Documentations/Resolver.md`
+- `SambarAdapter` (experimental): `Documentations/SambarAdapter.md`
 - `LuaPoll`: `Documentations/LuaPoll.md`
 - `WatchDog`: `Documentations/WatchDog.md`
 - `CoRing`: `Documentations/CoRing.md`
