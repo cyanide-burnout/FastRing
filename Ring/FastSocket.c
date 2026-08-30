@@ -269,6 +269,37 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     goto Continue;
   }
 
+  if (unlikely((completion      != NULL) &&
+               (completion->res >= 0)    &&
+               (completion->res <  descriptor->submission.len) &&
+               ((descriptor->submission.opcode == IORING_OP_WRITE) ||
+                (descriptor->submission.opcode == IORING_OP_WRITE_FIXED))))
+  {
+    // Send opcodes rely on MSG_WAITALL, but IORING_OP_WRITE has no such flag and
+    // the kernel retries a short write only for regular files and block devices
+
+    if ((completion->res > 0) &&
+        (~descriptor->submission.flags & IOSQE_IO_LINK))
+    {
+      // Tail of a batch: nothing has been queued behind, so the remainder still lands in
+      // the right place. The queue stays held until the whole buffer has been written.
+      // A descriptor passed to TransmitFastSocketDescriptor() may carry an explicit file
+      // offset, which has to advance too. FASTSOCKET_MODE_FILE_IO instead uses -1, meaning
+      // the current file position, and that one is maintained by the kernel
+      descriptor->submission.addr += completion->res;
+      descriptor->submission.len  -= completion->res;
+      descriptor->submission.off  += completion->res * (descriptor->submission.off != ~0ULL);
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
+
+    // Mid-batch, or nothing was written at all: the following buffers are already queued
+    // and the remainder would land after them, leaving a gap in the stream. This is the
+    // documented limitation of FASTSOCKET_MODE_FILE_IO on anything but a regular file,
+    // the caller has to create such a socket with limit = 1 to keep every write recoverable
+    CallHandlerFunction(socket, POLLERR, EIO);
+  }
+
   Continue:
 
   if ((~descriptor->submission.flags & IOSQE_IO_LINK) &&
@@ -311,9 +342,13 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     {
       case IORING_OP_SEND:
       case IORING_OP_SEND_ZC:
+        ReleaseFastBuffer(FAST_BUFFER(descriptor->submission.addr));
+        break;
+
       case IORING_OP_WRITE:
       case IORING_OP_WRITE_FIXED:
-        ReleaseFastBuffer(FAST_BUFFER(descriptor->submission.addr));
+        // addr may have been advanced by a short write, the base is kept in the vector
+        ReleaseFastBuffer(FAST_BUFFER(descriptor->data.socket.vector.iov_base));
         break;
 
       case IORING_OP_SENDMSG:
@@ -482,11 +517,26 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
   descriptor->data.number        = 0ULL;
   descriptor->function           = HandleOutboundCompletion;
   descriptor->closure            = socket;
-  descriptor->submission.ioprio |= IORING_RECVSEND_POLL_FIRST *
-    ((descriptor->submission.opcode == IORING_OP_SEND)    ||
-     (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
-     (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
-     (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC));
+  if ((descriptor->submission.opcode == IORING_OP_SEND)    ||
+      (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
+      (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
+      (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC))
+  {
+    // Without MSG_WAITALL a stream socket reports a short send and the rest of the buffer
+    // is silently dropped: it cannot be sent afterwards, because a linked batch has already
+    // queued the following buffers and the remainder would arrive out of order
+    descriptor->submission.ioprio    |= IORING_RECVSEND_POLL_FIRST;
+    descriptor->submission.msg_flags |= MSG_WAITALL;
+  }
+
+  if ((descriptor->submission.opcode == IORING_OP_WRITE) ||
+      (descriptor->submission.opcode == IORING_OP_WRITE_FIXED))
+  {
+    // A short write is resubmitted by HandleOutboundCompletion(), which advances addr,
+    // so the base has to be kept aside for ReleaseFastBuffer()
+    descriptor->data.socket.vector.iov_base = (void*)descriptor->submission.addr;
+  }
+
   PrepareFastRingDescriptor(descriptor, 0);
 
   batch->count  ++;

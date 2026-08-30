@@ -16,7 +16,7 @@ extern "C"
 // Remove thread's default context:  g_main_context_pop_thread_default(loop->context);
 
 #ifdef FASTGLOOP_INTERNAL
-struct FastGLoopPoolData
+struct FastGLoopPollData
 {
   int result;                             // Result value
   uint32_t cycle;                         // Current cycle number
@@ -38,7 +38,7 @@ struct FastGLoop
   int condition;                          // Condition of FastRing's HaundleFlushFunction (installed, need to switch to GMainLoop)
   uint32_t cycle;                         // Current cycle number
   uint32_t length;                        // Files array length in elements
-  struct FastGLoopPoolData* files;        // Files to track
+  struct FastGLoopPollData* files;        // Files to track
   struct FastRingFlusher* flusher;        // Pending flusher
   struct FastRingDescriptor* descriptor;  // Timeout descriptor
 

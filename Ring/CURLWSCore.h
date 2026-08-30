@@ -54,6 +54,7 @@ struct CWSTransmission
   struct CWSMessage* heap;
   struct CWSQueue inbound;
   struct CWSQueue outbound;
+  uint32_t condition;
   int state;
 };
 

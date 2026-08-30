@@ -46,13 +46,13 @@ struct WatchDog* CreateWatchDog(struct FastRing* ring)
   sprintf(buffer, "MAINPID=%u\n", getpid());
   sd_notify(0, buffer);
 
-  interval /= NOTIFICATION_RATIO;
-  state     = (struct WatchDog*)calloc(1, sizeof(struct WatchDog));
-
-  state->ring       = ring;
-  state->state      = STATE_INITIALIZING;
-  state->interval   = interval;
-  state->descriptor = SetFastRingTimeout(state->ring, NULL, state->interval, TIMEOUT_FLAG_REPEAT, HandleTimeout, state);
+  if (state = (struct WatchDog*)calloc(1, sizeof(struct WatchDog)))
+  {
+    state->ring       = ring;
+    state->state      = STATE_INITIALIZING;
+    state->interval   = interval / NOTIFICATION_RATIO;
+    state->descriptor = SetFastRingTimeout(state->ring, NULL, state->interval, TIMEOUT_FLAG_REPEAT, HandleTimeout, state);
+  }
 
   return state;
 }

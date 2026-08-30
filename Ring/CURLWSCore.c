@@ -3,6 +3,11 @@
 #include <malloc.h>
 #include <string.h>
 
+// A handler is allowed to close its own transmission, but CloseCWSTransmission() frees it
+// right away while the queue below is still being walked, so the close is deferred
+#define CWS_CONDITION_GUARD    (1 << 0)
+#define CWS_CONDITION_RELEASE  (1 << 1)
+
 static void HandleFlushEvent(void* closure, int reason)
 {
   struct CWSTransmission* transmission;
@@ -10,8 +15,9 @@ static void HandleFlushEvent(void* closure, int reason)
 
   if (reason == RING_REASON_COMPLETE)
   {
-    transmission          = (struct CWSTransmission*)closure;
-    transmission->flusher = NULL;
+    transmission             = (struct CWSTransmission*)closure;
+    transmission->flusher    = NULL;
+    transmission->condition |= CWS_CONDITION_GUARD;
 
     while (message = transmission->inbound.head)
     {
@@ -28,6 +34,14 @@ static void HandleFlushEvent(void* closure, int reason)
 
       message->next      = transmission->heap;
       transmission->heap = message;
+    }
+
+    transmission->condition &= ~CWS_CONDITION_GUARD;
+
+    if (transmission->condition & CWS_CONDITION_RELEASE)
+    {
+      // Handler has closed the transmission while the queue was being walked
+      CancelFetchTransmission(&transmission->super);
     }
   }
 }
@@ -58,7 +72,6 @@ static void SubmitInboundMessage(struct CWSMessage* message)
 
 static void HandleFetchEvent(struct FetchTransmission* super, CURL* easy, int code, char* data, size_t length, void* parameter1, void* parameter2)
 {
-  struct FastRingDescriptor* descriptor;
   struct CWSTransmission* transmission;
   struct CWSMessage* message;
   int reason;
@@ -100,16 +113,8 @@ static void HandleFetchEvent(struct FetchTransmission* super, CURL* easy, int co
   }
 
 #if (LIBCURL_VERSION_NUM < 0x081000)
-  if (descriptor = transmission->descriptor)
-  {
-    transmission->descriptor = NULL;
-    descriptor->function     = NULL;
-    descriptor->closure      = NULL;
-    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-    io_uring_initialize_sqe(&descriptor->submission);
-    io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
-    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-  }
+  DiscardFastRingDescriptor(transmission->descriptor);
+  transmission->descriptor = NULL;
 #endif
 
   free(transmission->current[0]);
@@ -351,6 +356,13 @@ void CloseCWSTransmission(struct CWSTransmission* transmission)
 {
   if (transmission != NULL)
   {
+    if (transmission->condition & CWS_CONDITION_GUARD)
+    {
+      // Called from a handler, HandleFlushEvent() completes the close
+      transmission->condition |= CWS_CONDITION_RELEASE;
+      return;
+    }
+
     // Resources will be released by HandleFetchEvent()
     CancelFetchTransmission(&transmission->super);
   }
@@ -419,7 +431,7 @@ void TransmitCWSMessage(struct CWSMessage* message)
   }
 
 #if (LIBCURL_VERSION_NUM >= 0x081000)
-  
+
   if (transmission->outbound.head == transmission->outbound.tail)
   {
     curl_easy_pause(transmission->super.easy, CURLPAUSE_SEND_CONT);

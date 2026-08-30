@@ -10,7 +10,8 @@
 #define FIBER_LOOP     0
 #define FIBER_MAIN     1
 
-#define LIST_INCREASE  1024
+#define LIST_INCREASE     1024
+#define DEFAULT_INTERVAL  1000
 
 static void JumpToLoop(struct FastGLoop* loop);
 static void HandleRequest(struct FastGLoop* loop);
@@ -21,7 +22,7 @@ static void HandleFlush(void* closure, int reason);
 
 static int ExpandPollData(struct FastGLoop* loop, int handle)
 {
-  struct FastGLoopPoolData* data;
+  struct FastGLoopPollData* data;
   uint32_t length;
 
   handle ++;
@@ -29,9 +30,9 @@ static int ExpandPollData(struct FastGLoop* loop, int handle)
 
   if ((handle > 0) &&
       (length > loop->length) &&
-      (data = (struct FastGLoopPoolData*)realloc(loop->files, length * sizeof(struct FastGLoopPoolData))))
+      (data = (struct FastGLoopPollData*)realloc(loop->files, length * sizeof(struct FastGLoopPollData))))
   {
-    memset(data + loop->length, 0, (length - loop->length) * sizeof(struct FastGLoopPoolData));
+    memset(data + loop->length, 0, (length - loop->length) * sizeof(struct FastGLoopPollData));
     loop->files  = data;
     loop->length = length;
     return 0;
@@ -46,7 +47,7 @@ static void HandleRequest(struct FastGLoop* loop)
 {
   struct FastRingDescriptor* descriptor;
   struct FastRingDescriptor* other;
-  struct FastGLoopPoolData* data;
+  struct FastGLoopPollData* data;
   GPollFD* entry;
   GPollFD* limit;
   int handle;
@@ -131,7 +132,7 @@ static void HandleRequest(struct FastGLoop* loop)
 
 static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  struct FastGLoopPoolData* data;
+  struct FastGLoopPollData* data;
   struct FastGLoop* loop;
   int condition;
   int handle;
@@ -153,11 +154,11 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
         break;
 
       case IORING_OP_TIMEOUT_REMOVE:
-        if (completion->res == 0)
-        {
-          // Timeout successfully updated
-          break;
-        }
+        // Result is not interesting: an update fails only when the timeout has already
+        // fired, and its own completion reports that separately. This descriptor is not
+        // tracked anywhere, so it must not touch the loop at all -- ReleaseFastGLoop()
+        // has no way to detach it and the loop may be gone by now
+        break;
 
       case IORING_OP_TIMEOUT:
         condition        = TRUE;
@@ -178,7 +179,7 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
 static void HandleFlush(void* closure, int reason)
 {
   struct FastGLoop* loop;
-  struct FastGLoopPoolData* data;
+  struct FastGLoopPollData* data;
 
   GPollFD* entry;
   GPollFD* limit;
@@ -217,13 +218,13 @@ static gboolean HandleTimeout(gpointer data)
 
 static gint HandlePoll(GPollFD* entries, guint count, gint timeout)
 {
-  gint number;
-
   state->entries = entries;
   state->count   = count;
   state->result  = 0;
 
-  // Due to g_timeout_source_new() the timeout should never be less 0
+  // CreateFastGLoop() always attaches a g_timeout_source_new(), so GMainContext never asks
+  // for an infinite poll and the timeout never goes negative here. A negative one would
+  // produce a negative tv_nsec, and the kernel rejects such a timeout with EINVAL
   state->timeout.tv_sec  =  timeout / 1000;
   state->timeout.tv_nsec = (timeout % 1000) * 1000000;
 
@@ -279,13 +280,15 @@ struct FastGLoop* CreateFastGLoop(struct FastRing* ring, int interval)
     loop->loop    = g_main_loop_new(loop->context, TRUE);
     g_main_context_set_poll_func(loop->context, HandlePoll);
 
-    if (interval > 0)
-    {
-      source = g_timeout_source_new(interval);
-      g_source_set_callback(source, HandleTimeout, NULL, NULL);
-      g_source_attach(source, loop->context);
-      g_source_unref(source);
-    }
+    // The source has to be attached unconditionally: without it GMainContext asks for an
+    // infinite poll, HandlePoll() turns -1 into a negative tv_nsec and the timeout is
+    // rejected with EINVAL over and over again
+    interval = (interval > 0) ? interval : DEFAULT_INTERVAL;
+
+    source = g_timeout_source_new(interval);
+    g_source_set_callback(source, HandleTimeout, NULL, NULL);
+    g_source_attach(source, loop->context);
+    g_source_unref(source);
 
     JumpToLoop(loop);
     HandleRequest(loop);
@@ -296,12 +299,28 @@ struct FastGLoop* CreateFastGLoop(struct FastRing* ring, int interval)
 
 void ReleaseFastGLoop(struct FastGLoop* loop)
 {
+  struct FastGLoopPollData* data;
+  struct FastGLoopPollData* limit;
+
   if (loop != NULL)
   {
     if (loop->entries != NULL)
     {
       g_main_loop_quit(loop->loop);
       JumpToLoop(loop);
+    }
+
+    DiscardFastRingDescriptor(loop->descriptor);
+    loop->descriptor = NULL;
+
+    data  = loop->files;
+    limit = loop->files + loop->length;
+
+    while (data < limit)
+    {
+      DiscardFastRingDescriptor(data->descriptor);
+      data->descriptor = NULL;
+      data ++;
     }
 
     RemoveFastRingFlushHandler(loop->ring, loop->flusher);

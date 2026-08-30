@@ -80,6 +80,9 @@ int ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor);
   completion handler; call it explicitly only in the cases described in
   `Documentations/Lifecycle.md`.
 
+To abandon a descriptor whose operation may already be in flight, use the
+[Discard API](#discard-api) rather than releasing it by hand.
+
 ### Descriptor states
 
 `descriptor->state` holds one of `RING_DESC_STATE_FREE`, `RING_DESC_STATE_ALLOCATED`,
@@ -228,6 +231,55 @@ you know are still armed.
 - Do not block: everything after the flush phase, including the next wait, is stalled.
 - Prefer a flusher over doing work directly in a completion handler when the work
   touches state that other completions in the same batch may also touch.
+
+## Discard API
+
+```c
+void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor);
+```
+
+Detaches a descriptor from its owner during teardown. It is the counterpart of an
+explicit `ReleaseFastRingDescriptor()` for the case where the operation may already
+have been handed to the kernel: the owner is going away, but the descriptor cannot be
+recycled until io_uring is done with it.
+
+What it does:
+
+- clears `function` and `closure`, so no completion reaches the owner any more;
+- claims the descriptor state atomically, then either
+  - rewrites the still-queued submission in place as `IORING_OP_NOP`, when it has not
+    reached the kernel yet, or
+  - submits a cancellation — `IORING_OP_TIMEOUT_REMOVE` for a timeout, `IORING_OP_ASYNC_CANCEL`
+    for everything else — when the operation is already in flight.
+
+**Call it from the ring thread.** The state is claimed with the same primitives the
+submission loop itself uses, so the call is safe against that loop — but *not* against
+completion handling. `HandleCompletedRingDescriptor()` reads `function`, invokes it and
+may drop the last reference without ever claiming the state, so a CQE processed in
+parallel can recycle the descriptor while this call still holds the pointer. On the ring
+thread that cannot happen, because the same thread is the one reaping completions.
+
+Even so, the function earns its place: a plain check of `descriptor->state` followed by a
+resubmission is a race against the submission loop, and resubmitting a descriptor that is
+still queued links the pending list onto itself and stalls the ring for good.
+
+Tearing down from another thread needs more than this helper: the caller has to hold a
+reference of its own so the descriptor cannot be recycled, and the owner needs a guard of
+its own so a handler already running does not touch a dying object. That is exactly what
+the `RING_CONDITION_GUARD` / `RING_CONDITION_REMOVE` protocol does for the Poll, Watch and
+Timeout APIs — see `Documentations/Lifecycle.md`.
+
+Reference accounting is handled internally. The queued-submission path consumes the
+reference the pending entry already holds; the cancellation path takes one more, which
+the cancellation completion drops, while the original operation completes with
+`-ECANCELED` and drops the last one. Do not call `ReleaseFastRingDescriptor()` on a
+discarded descriptor.
+
+The function expects a descriptor carrying a **single** operation. If a queued
+submission is not the descriptor's own operation but an update prepared for an earlier
+one — the pattern `UpdateFastRingWatch()` uses — rewriting it as a `NOP` would leave
+that earlier operation armed. Subsystems that keep updates on separate transient
+descriptors, which is the usual arrangement, are unaffected.
 
 ## Poll API
 

@@ -269,7 +269,6 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
   uint32_t tag;
   void* pointer;
   struct ThreadCallState* state;
-  struct FastRingDescriptor* descriptor;
 
   if (call != NULL)
   {
@@ -290,19 +289,10 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
                (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
       }
 
-      if (descriptor = call->descriptor)
-      {
-        atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-        io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
-        SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-
-        descriptor->function = NULL;
-        descriptor->closure  = NULL;
-        call->descriptor     = NULL;
-      }
-
+      DiscardFastRingDescriptor(call->descriptor);
       RemoveFastRingRegisteredFile(call->ring, call->handle);
+
+      call->descriptor = NULL;
     }
 
     if (weight == 0)

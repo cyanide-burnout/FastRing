@@ -331,7 +331,6 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 static int HandleOptionCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   struct FastBIO* engine;
-  struct FastBuffer* buffer;
 
   engine = (struct FastBIO*)descriptor->closure;
 
@@ -762,7 +761,8 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
     descriptor->data.socket.message.msg_controllen = control->cmsg_len;
   }
 
-  io_uring_prep_sendmsg_zc(&descriptor->submission, engine->handle, &descriptor->data.socket.message, 0);
+  // MSG_WAITALL keeps the kernel retrying instead of reporting a short send and dropping the tail
+  io_uring_prep_sendmsg_zc(&descriptor->submission, engine->handle, &descriptor->data.socket.message, MSG_WAITALL);
 
   // Once this socket is kTLS-capable, never use regular SENDMSG_ZC
   descriptor->submission.opcode -= (IORING_OP_SENDMSG_ZC - IORING_OP_SENDMSG) * !!(engine->flags & FASTBIO_FLAG_KTLS_AVAILABLE);
@@ -792,7 +792,7 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
       // Outbound queue can contain non-send descriptors
       // MSG_MORE is used only for the userspace TLS byte-stream path to improve TCP batching
       // Do not set it for kTLS TX: TLS ULP owns recordization/flush semantics
-      engine->outbound.head->submission.msg_flags = MSG_MORE;
+      engine->outbound.head->submission.msg_flags |= MSG_MORE;
     }
 
     engine->outbound.tail->linked            = engine->outbound.count;
@@ -1005,7 +1005,7 @@ BIO* CreateFastBIO(struct FastRing* ring, struct FastRingBufferProvider* provide
     engine->inbound.descriptor   = descriptors[1];
     engine->inbound.provider     = provider;
     engine->inbound.pool         = inbound;
-    engine->outbound.granularity = granularity;
+    engine->outbound.granularity = (granularity > 0) ? granularity : SSL3_RT_MAX_PLAIN_LENGTH;  // Zero would round every outbound allocation down to nothing
     engine->outbound.limit       = ring->ring.sq.ring_entries / 2;
     engine->outbound.pool        = outbound;
 

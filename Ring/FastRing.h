@@ -264,6 +264,17 @@ int IsFastRingThread(struct FastRing* ring);
 struct FastRing* CreateFastRing(uint32_t length);
 void ReleaseFastRing(struct FastRing* ring);
 
+// Discard
+
+// Detaches a descriptor from its owner during teardown: the handler is dropped and the operation
+// is either cancelled or, when its submission has not reached the kernel yet, rewritten in place.
+// The state is claimed atomically, so the call is safe against the submission loop. It is NOT
+// safe against completion handling: that path reads function and releases the descriptor without
+// claiming the state, so a concurrent CQE may recycle the descriptor under the call. Has to be
+// made from the ring thread, and expects a descriptor carrying a single operation. The remaining
+// reference is dropped by the completion
+void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor);
+
 // Poll
 
 #define RING_POLL_FLAGS_SHIFT  32

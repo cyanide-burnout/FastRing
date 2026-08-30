@@ -143,6 +143,37 @@ Consequences a module author has to rely on:
 called from a thread that can be preempted by the ring thread indefinitely — in practice,
 call them from the ring thread or from a thread that does not hold the ring thread back.
 
+### Abandoning a raw descriptor
+
+The rules above cover descriptors owned by the Poll, Watch and Timeout APIs. A module
+that allocates descriptors itself and keeps them in its own structure has to abandon
+them during teardown, and the only supported way to do that is
+`DiscardFastRingDescriptor()` — see `Documentations/FastRing.md`.
+
+Doing it by hand is a trap, twice over:
+
+- Reading `descriptor->state` and acting on the result is a race whenever the owner can
+  be torn down from a thread other than the ring thread. The submission loop may take
+  the descriptor between the read and the write, so the operation ends up in the kernel
+  uncancelled while its submission copy is overwritten.
+- Submitting a descriptor that is still queued corrupts the pending list. The queue is
+  an MPSC list whose push assumes the node is not already in it; re-pushing the tail
+  makes it point at itself, the submission loop stops advancing, and **no SQE is ever
+  submitted by that ring again**. The failure is silent — completions keep being reaped
+  and flushers keep running, so it looks like a hang rather than a crash.
+
+`DiscardFastRingDescriptor()` claims the state with the same primitives the submission
+loop uses, so neither hazard applies. **Call it from the ring thread**: it excludes the
+submission loop, not completion handling. `HandleCompletedRingDescriptor()` reads
+`function`, calls it and may drop the last reference without claiming the state, so a
+CQE reaped in parallel can recycle the descriptor under the call. On the ring thread the
+two cannot overlap.
+
+A raw descriptor owned by a module therefore has the same teardown rule as the built-in
+APIs: abandon it from the ring thread. Doing it from another thread requires the owner to
+hold its own reference and to carry its own guard, the way `RING_CONDITION_GUARD` and
+`RING_CONDITION_REMOVE` work above — the helper alone is not enough.
+
 ## Thread Model
 
 `CreateFastRing()` records `gettid()` of the calling thread. That thread is the ring

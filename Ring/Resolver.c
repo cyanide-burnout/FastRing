@@ -5,6 +5,16 @@
 #include <unistd.h>
 #include <string.h>
 
+#define RESOLVER_CONDITION_GUARD    (1 << 0)
+#define RESOLVER_CONDITION_RELEASE  (1 << 1)
+
+static void DestroyResolver(struct ResolverState* state)
+{
+  SetFastRingTimeout(state->ring, state->descriptor, -1, 0, NULL, NULL);
+  ares_destroy(state->channel);
+  free(state);
+}
+
 static void HandleSocketEvent(int handle, uint32_t flags, void* closure, uint64_t options)
 {
   struct ResolverState* state;
@@ -15,7 +25,16 @@ static void HandleSocketEvent(int handle, uint32_t flags, void* closure, uint64_
   handle1 = handle | ARES_SOCKET_BAD * ((flags & (POLLIN | POLLERR | POLLHUP)) == 0);
   handle2 = handle | ARES_SOCKET_BAD * ((flags & (POLLOUT                   )) == 0);
 
+  state->condition |=  RESOLVER_CONDITION_GUARD;
   ares_process_fd(state->channel, handle1, handle2);
+  state->condition &= ~RESOLVER_CONDITION_GUARD;
+
+  if (state->condition & RESOLVER_CONDITION_RELEASE)
+  {
+    DestroyResolver(state);
+    return;
+  }
+
   UpdateResolverTimer(state);
 }
 
@@ -26,7 +45,16 @@ static void HandleTimerEvent(struct FastRingDescriptor* descriptor)
   state             = (struct ResolverState*)descriptor->closure;
   state->descriptor = NULL;
 
+  state->condition |=  RESOLVER_CONDITION_GUARD;
   ares_process_fd(state->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
+  state->condition &= ~RESOLVER_CONDITION_GUARD;
+
+  if (state->condition & RESOLVER_CONDITION_RELEASE)
+  {
+    DestroyResolver(state);
+    return;
+  }
+
   UpdateResolverTimer(state);
 }
 
@@ -77,10 +105,17 @@ void UpdateResolverTimer(struct ResolverState* state)
 
 void ReleaseResolver(struct ResolverState* state)
 {
-  if (state != NULL)
+  if ((state != NULL) &&
+      (~state->condition & RESOLVER_CONDITION_RELEASE))
   {
-    SetFastRingTimeout(state->ring, state->descriptor, -1, 0, NULL, NULL);
-    ares_destroy(state->channel);
-    free(state);
+    // ares_destroy() reports pending queries as ARES_EDESTRUCTION and a handler may call
+    // this function again, so the flag has to be raised before the channel is destroyed
+    state->condition |= RESOLVER_CONDITION_RELEASE;
+
+    if (~state->condition & RESOLVER_CONDITION_GUARD)
+    {
+      //
+      DestroyResolver(state);
+    }
   }
 }

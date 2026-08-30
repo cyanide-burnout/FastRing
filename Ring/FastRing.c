@@ -12,17 +12,20 @@
 #define unlikely(condition)   __builtin_expect(!!(condition), 0)
 
 // https://github.com/torvalds/linux/blob/6e98b09da931a00bf4e0477d0fa52748bf28fcce/io_uring/io_uring.c#L100
-#define RING_MAXIMUM_LENGTH      16384
-#define RING_COMPLETION_RATIO    4
+#define RING_MAXIMUM_LENGTH        16384
+#define RING_COMPLETION_RATIO      4
 
 // https://github.com/torvalds/linux/blob/6e98b09da931a00bf4e0477d0fa52748bf28fcce/io_uring/rsrc.c#L33
-#define FILE_MAXIMUM_COUNT       (1U << 20)
-#define BUFFER_MAXIMUM_COUNT     (1U << 14)
-#define FILE_REGISTRATION_RATIO  2
+#define FILE_MAXIMUM_COUNT         (1U << 20)
+#define BUFFER_MAXIMUM_COUNT       (1U << 14)
+#define FILE_REGISTRATION_RATIO    2
 
-#define QUEUE_DEFAULT_LENGTH     256
-#define FLUSH_LIST_INCREASE      64
-#define FILE_LIST_INCREASE       1024
+// https://github.com/torvalds/linux/blob/6e98b09da931a00bf4e0477d0fa52748bf28fcce/io_uring/kbuf.c#L560-L565
+#define BUFFER_RING_MAXIMUM_COUNT  (1U << 15)
+
+#define QUEUE_DEFAULT_LENGTH       256
+#define FLUSH_LIST_INCREASE        64
+#define FILE_LIST_INCREASE         1024
 
 #ifndef USE_RING_LEVEL_TRIGGERING
 #define RING_POLL_FLAGS(flags)  ((~flags >> RING_POLL_FLAGS_SHIFT) & (IORING_POLL_ADD_MULTI))
@@ -602,6 +605,34 @@ void ReleaseFastRing(struct FastRing* ring)
     free(ring->files.entries);
     free(ring->files.filters);
     free(ring);
+  }
+}
+
+// Discard
+
+void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor)
+{
+  if (likely(descriptor != NULL))
+  {
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
+
+    if (unlikely(LockPendingRingDescriptor(descriptor)))
+    {
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_nop(&descriptor->submission);
+      PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      return;
+    }
+
+    if (likely(LockSubmittedRingDescriptor(descriptor)))
+    {
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      return;
+    }
   }
 }
 
@@ -1374,12 +1405,14 @@ struct FastRingBufferProvider* CreateFastRingBufferProvider(struct FastRing* rin
   struct io_uring_buf_ring* data;
   struct FastRingBufferProvider* provider;
 
-  alignment  = getpagesize();
-  count     += (count == 0) * ring->ring.cq.ring_entries;     // By default use count of CQE
-  count      = 1 << (32 - __builtin_clz(count - 1));          // Rounding up to next power of 2
-  group      = group ? group : GetFastRingBufferGroup(ring);  // Group number can be predefined
-  provider   = (struct FastRingBufferProvider*)calloc(1, sizeof(struct FastRingBufferProvider) + count * sizeof(uintptr_t));
-  data       = (struct io_uring_buf_ring*)memalign(alignment, sizeof(struct io_uring_buf_ring) + count * sizeof(struct io_uring_buf));
+  // Rounding has to be done out of uint16_t: count of CQE may reach 65536 and overflow it
+  alignment = getpagesize();
+  count     = (count != 0) ?  count : ring->ring.cq.ring_entries;                                       // By default use count of CQE
+  count     = (count != 0) && (count < BUFFER_RING_MAXIMUM_COUNT) ? count : BUFFER_RING_MAXIMUM_COUNT;  //
+  count     = (count <= 1) ? count : (1U << (32 - __builtin_clz(count - 1)));                           // Rounding up to next power of 2
+  group     = group ? group : GetFastRingBufferGroup(ring);                                             // Group number can be predefined
+  provider  = (struct FastRingBufferProvider*)calloc(1, sizeof(struct FastRingBufferProvider) + count * sizeof(uintptr_t));
+  data      = (struct io_uring_buf_ring*)memalign(alignment, sizeof(struct io_uring_buf_ring) + count * sizeof(struct io_uring_buf));
 
   if ((data     == NULL) ||
       (provider == NULL))
@@ -1648,7 +1681,6 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
   __u64 tag;
   int result;
   struct iovec* vector;
-  struct FastRingBufferList* buffers;
 
   result = -EINVAL;
 

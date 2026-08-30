@@ -17,6 +17,7 @@ struct ResolverState
   ares_channel channel;
   struct FastRing* ring;
   struct FastRingDescriptor* descriptor;
+  uint32_t condition;
 };
 
 struct ResolverState* CreateResolver(struct FastRing* ring);

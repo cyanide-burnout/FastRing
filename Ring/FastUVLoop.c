@@ -88,19 +88,10 @@ struct FastUVLoop* CreateFastUVLoop(struct FastRing* ring, int interval)
 
 void ReleaseFastUVLoop(struct FastUVLoop* loop)
 {
-  struct FastRingDescriptor* descriptor;
-
   if (loop != NULL)
   {
-    if (descriptor = loop->poll)
-    {
-      descriptor->closure  = NULL;
-      descriptor->function = NULL;
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
-      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-    }
+    DiscardFastRingDescriptor(loop->poll);
+    loop->poll = NULL;
 
     SetFastRingTimeout(loop->ring, loop->timeout, -1, 0, HandleTimeoutEvent, loop);
     RemoveFastRingFlushHandler(loop->ring, loop->flush);

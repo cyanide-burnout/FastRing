@@ -38,7 +38,9 @@ struct FetchTransmission
 {
   struct Fetch* fetch;
   CURL* easy;
+
   int state;
+  uint32_t condition;
 
   HandleFetchFunction function;
   void* parameter1;

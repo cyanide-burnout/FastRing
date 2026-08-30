@@ -37,7 +37,7 @@ they can be OR-ed into send flags directly.
 | `FASTSOCKET_MODE_REGULAR` | Ordinary `send` / `sendmsg` |
 | `FASTSOCKET_MODE_ZERO_COPY` | `SEND_ZC` / `SENDMSG_ZC`. The payload buffer is pinned until the kernel's zerocopy notification arrives, which is exactly why transmits hold a `FastBuffer` reference |
 | `FASTSOCKET_MODE_AUTO_CORK` | Adds `MSG_MORE`, letting the kernel coalesce successive small writes |
-| `FASTSOCKET_MODE_FILE_IO` | Treats the handle as a file rather than a socket: the inbound side uses `read_multishot` instead of `recv`. Requires liburing >= 2.6 |
+| `FASTSOCKET_MODE_FILE_IO` | Treats the handle as a file rather than a socket: the inbound side uses `read_multishot` instead of `recv`. Requires liburing >= 2.6. **On anything but a regular file this mode requires `limit = 1`** — see below |
 
 Zero-copy is not free: it is a win for payloads large enough to beat the pinning and
 notification overhead, and a loss for small ones. It also interacts with kTLS — see
@@ -82,7 +82,9 @@ Behavior:
 
 `limit` bounds how many send SQEs may be batched before the queue is flushed. It is
 clamped to half the submission queue size, which is also the default when `0` is
-passed. Lower it to bound how much of the ring one socket may occupy.
+passed. Lower it to bound how much of the ring one socket may occupy. With
+`FASTSOCKET_MODE_FILE_IO` it also decides whether short writes are recoverable — see
+[Short writes in `FASTSOCKET_MODE_FILE_IO`](#short-writes-in-fastsocket_mode_file_io).
 
 The socket does not take ownership of `provider`, `inbound` or `outbound` — they are
 usually shared between sockets and must outlive them, or at least be released
@@ -188,6 +190,29 @@ Consequences:
 
 Ordering is preserved throughout — batches are submitted in creation order and the
 descriptors within a batch as a chain.
+
+### Short writes in `FASTSOCKET_MODE_FILE_IO`
+
+Send opcodes carry `MSG_WAITALL`, so the kernel keeps retrying until the whole buffer
+has left. `IORING_OP_WRITE`, which this mode uses, has no such flag, and the kernel
+retries a partial write only for regular files and block devices. On a pipe, a FIFO,
+a tty or any other character device a write may therefore complete with fewer bytes
+than requested.
+
+Such a write is resubmitted for the remainder, but only while nothing has been queued
+behind it — that is, when the descriptor is the tail of its batch. Otherwise the
+following buffers are already linked into the same chain and have been handed to the
+kernel, the remainder would land after them, and the result would be a stream with a
+hole rather than a truncated one. That case is not recoverable and is reported to the
+handler as `POLLERR` with `EIO`.
+
+**A batch of one descriptor makes every write a tail, so pass `limit = 1` whenever
+this mode is used with anything but a regular file.** The cost is one submission per
+buffer instead of a chain, which is normally irrelevant for such descriptors.
+
+The distinction matters in practice: a TUN device is packet-oriented and never reports
+a partial write, so `/dev/net/tun` is unaffected either way. A pipe or a tty is a byte
+stream and is affected.
 
 ## Release
 

@@ -16,6 +16,10 @@
 
 #define ALLOCATION_SIZE  16384
 
+// A handler is free to close its own transmission, but ReleaseFetchTransmission() calls
+// that handler and then frees the object, so the nested call has to be ignored
+#define FETCH_CONDITION_RELEASE  (1 << 0)
+
 _Static_assert((ALLOCATION_SIZE & (ALLOCATION_SIZE - 1)) == 0, "ALLOCATION_SIZE must be power of two");
 
 static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason);
@@ -128,6 +132,9 @@ static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation
       case CURL_POLL_INOUT:  io_uring_prep_poll_add(&descriptor->submission, handle, POLLIN  | POLLOUT | POLLHUP   | POLLRDHUP | POLLERR);  break;
     }
 
+    // Descriptors are recycled, so the re-entrancy marker has to be cleared explicitly
+    descriptor->data.number = 0;
+
     curl_multi_assign(fetch->multi, handle, descriptor);
     SubmitFastRingDescriptor(descriptor, 0);
     return 0;
@@ -200,34 +207,39 @@ static void ReleaseFetchTransmission(struct FetchTransmission* transmission)
   char* error;
   long code;
 
-  fetch = transmission->fetch;
-  code  = 0;
-
-  if (transmission->function != NULL)
+  if (~transmission->condition & FETCH_CONDITION_RELEASE)
   {
-    switch (transmission->state)
+    transmission->condition |= FETCH_CONDITION_RELEASE;
+
+    fetch = transmission->fetch;
+    code  = 0;
+
+    if (transmission->function != NULL)
     {
-      case CURLE_OK:
-        curl_easy_getinfo(transmission->easy, CURLINFO_RESPONSE_CODE, &code);
-        transmission->function(transmission, transmission->easy, code, transmission->buffer, transmission->length, transmission->parameter1, transmission->parameter2);
-        break;
+      switch (transmission->state)
+      {
+        case CURLE_OK:
+          curl_easy_getinfo(transmission->easy, CURLINFO_RESPONSE_CODE, &code);
+          transmission->function(transmission, transmission->easy, code, transmission->buffer, transmission->length, transmission->parameter1, transmission->parameter2);
+          break;
 
-      case FETCH_STATUS_INCOMPLETE:
-      case FETCH_STATUS_CANCELLED:
-        transmission->function(transmission, transmission->easy, transmission->state, NULL, 0, transmission->parameter1, transmission->parameter2);
-        break;
+        case FETCH_STATUS_INCOMPLETE:
+        case FETCH_STATUS_CANCELLED:
+          transmission->function(transmission, transmission->easy, transmission->state, NULL, 0, transmission->parameter1, transmission->parameter2);
+          break;
 
-      default:
-        error = (char*)curl_easy_strerror(transmission->state);
-        transmission->function(transmission, transmission->easy, -transmission->state, error, 0, transmission->parameter1, transmission->parameter2);
-        break;
+        default:
+          error = (char*)curl_easy_strerror(transmission->state);
+          transmission->function(transmission, transmission->easy, -transmission->state, error, 0, transmission->parameter1, transmission->parameter2);
+          break;
+      }
     }
-  }
 
-  curl_multi_remove_handle(fetch->multi, transmission->easy);
-  curl_easy_cleanup(transmission->easy);
-  free(transmission->buffer);
-  free(transmission);
+    curl_multi_remove_handle(fetch->multi, transmission->easy);
+    curl_easy_cleanup(transmission->easy);
+    free(transmission->buffer);
+    free(transmission);
+  }
 }
 
 static void ProceedTransmissionQueue(struct Fetch* fetch)
@@ -297,8 +309,10 @@ void ReleaseFetch(struct Fetch* fetch)
   CURL** handle;
   CURL** list;
 
+  // curl_multi_remove_handle() below recalculates the timeout and re-enters
+  // HandleTimerOperation(), so the field must not be left pointing to a removed descriptor
   RemoveFastRingFlushHandler(fetch->ring, fetch->flusher);
-  SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
+  fetch->descriptor = SetFastRingTimeout(fetch->ring, fetch->descriptor, -1, 0, NULL, NULL);
 
   if (list = curl_multi_get_handles(fetch->multi))
   {
@@ -355,6 +369,7 @@ struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, str
     transmission->fetch      = fetch;
     transmission->easy       = easy;
     transmission->state      = FETCH_STATUS_INCOMPLETE;
+    transmission->condition  = 0;
     transmission->option     = option;
     transmission->function   = function;
     transmission->parameter1 = parameter1;
