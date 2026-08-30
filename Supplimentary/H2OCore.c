@@ -338,7 +338,7 @@ int HasInH2OHeaderByIndex(const h2o_headers_t* headers, const h2o_token_t* token
   ssize_t index;
   h2o_header_t* header;
 
-  if (index = h2o_find_header(headers, token, -1) >= 0)
+  if ((index = h2o_find_header(headers, token, -1)) >= 0)
   {
     header = headers->entries + index;
     return strnstr((char*)header->value.base, needle, header->value.len) != NULL;
