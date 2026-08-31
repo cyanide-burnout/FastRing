@@ -2,7 +2,7 @@
 
 This document describes ownership, reference counting, reentrancy and thread rules
 for `FastRing`. It covers the invariants that are enforced by `Ring/FastRing.c` but
-are not visible from the function signatures in `Documentations/FastRing.md`.
+are not visible from the function signatures in [FastRing.md](FastRing.md).
 
 Read this before writing a module that submits its own SQEs or keeps a
 `struct FastRingDescriptor*` across callbacks.
@@ -21,7 +21,7 @@ A descriptor is always in exactly one of the states stored in `descriptor->state
 
 Normal transitions:
 
-```
+```text
 AllocateFastRingDescriptor()   FREE      -> ALLOCATED
 PrepareFastRingDescriptor()    ALLOCATED -> PENDING
 WaitForFastRing()              PENDING   -> LOCKED -> SUBMITTED
@@ -207,7 +207,7 @@ waiting would mean waiting for the caller itself.
 The rules above cover descriptors owned by the Poll, Watch and Timeout APIs. A module
 that allocates descriptors itself and keeps them in its own structure has to abandon
 them during teardown, and the only supported way to do that is
-`DiscardFastRingDescriptor()` — see `Documentations/FastRing.md`.
+`DiscardFastRingDescriptor()` — see [FastRing.md](FastRing.md).
 
 Doing it by hand is a trap, twice over:
 

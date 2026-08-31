@@ -1,9 +1,13 @@
 # FastRing API Reference
 
-This document describes the public C API from `Ring/FastRing.h`.
+Header: `Ring/FastRing.h`
+
+`FastRing` is the core `io_uring` engine of the library: it owns the ring, multiplexes
+submission and completion, and exposes poll, watch, timeout and event primitives on top
+of a descriptor lifecycle.
 
 Ownership, reference counting, reentrancy and shutdown rules are documented
-separately in `Documentations/Lifecycle.md`.
+separately in [Lifecycle.md](Lifecycle.md).
 
 ## Conventions
 
@@ -26,7 +30,7 @@ int IsFastRingThread(struct FastRing* ring);
 ```
 
 Returns `1` when called from the ring thread, `0` from any other thread, and `-1` if
-the ring has no recorded thread. See `Documentations/Lifecycle.md` for the full table
+the ring has no recorded thread. See [Lifecycle.md](Lifecycle.md) for the full table
 of which calls are allowed from which thread.
 
 ## Lifecycle
@@ -45,7 +49,7 @@ int WaitForFastRing(struct FastRing* ring, uint32_t interval, sigset_t* mask);
   - returns `NULL` on init failure.
 - `ReleaseFastRing()`:
   - releases ring resources, descriptors, flush handlers, registered file/buffer metadata.
-  - calls every live handler with `RING_REASON_RELEASED` first; see `Documentations/Lifecycle.md`.
+  - calls every live handler with `RING_REASON_RELEASED` first; see [Lifecycle.md](Lifecycle.md).
 - `WaitForFastRing(interval_ms, mask)`:
   - submits pending SQEs, handles CQEs, optionally waits.
   - `interval` is milliseconds.
@@ -78,7 +82,7 @@ int ReleaseFastRingDescriptor(struct FastRingDescriptor* descriptor);
   It returns the remaining reference count, or `-1` for a `NULL` descriptor.
   Normally the release is performed automatically by the return value of the
   completion handler; call it explicitly only in the cases described in
-  `Documentations/Lifecycle.md`.
+  [Lifecycle.md](Lifecycle.md).
 
 To abandon a descriptor whose operation may already be in flight, use the
 [Discard API](#discard-api) rather than releasing it by hand.
@@ -87,13 +91,13 @@ To abandon a descriptor whose operation may already be in flight, use the
 
 `descriptor->state` holds one of `RING_DESC_STATE_FREE`, `RING_DESC_STATE_ALLOCATED`,
 `RING_DESC_STATE_PENDING`, `RING_DESC_STATE_LOCKED`, `RING_DESC_STATE_SUBMITTED`.
-Transitions and their meaning are described in `Documentations/Lifecycle.md`.
+Transitions and their meaning are described in [Lifecycle.md](Lifecycle.md).
 
 `descriptor->lock` sits next to it and covers what the state cannot: bit
 `RING_DESC_LOCK_HELD` says that a completion handler is running, and the bits above it
 count writers waiting to claim the state. The two words are the first two of the three
 layers of exclusion a descriptor carries; how they are taken, in which order, and how the
-per-API `condition` word relates to them is described in `Documentations/Lifecycle.md`.
+per-API `condition` word relates to them is described in [Lifecycle.md](Lifecycle.md).
 
 ### Submission options
 
@@ -121,7 +125,7 @@ int (*HandleFastRingCompletionFunction)(
 Completion reasons:
 - `RING_REASON_COMPLETE`
 - `RING_REASON_INCOMPLETE` (chained SQE that will never run; no longer produced by the
-  core, see `Documentations/Lifecycle.md`)
+  core, see [Lifecycle.md](Lifecycle.md))
 - `RING_REASON_RELEASED`
 
 Return `0` to drop one reference, non-zero when the descriptor has been re-armed or a
@@ -136,7 +140,7 @@ to update or remove an operation from inside its own callback. `RING_CONDITION_U
 marks an operation that ended without being re-armed, so that an update arms it anew
 instead of asking to change an entry the kernel no longer has; Poll and Timeout raise it,
 Watch never does because its handler always re-arms. `RING_CONDITION_MASK` covers all
-three. See `Documentations/Lifecycle.md`.
+three. See [Lifecycle.md](Lifecycle.md).
 
 ## Flush Handlers
 
@@ -167,7 +171,7 @@ here.
 
 ### When it runs
 
-```
+```text
 WaitForFastRing()
   submit pending SQEs
   handle CQEs           <-- completion handlers run here, may arm flushers
@@ -309,7 +313,7 @@ the caller's own, so the descriptor cannot be recycled mid-call. Shutting out a 
 that is already running used to be the caller's job as well — that is what the
 `RING_CONDITION_GUARD` / `RING_CONDITION_REMOVE` protocol does for the Poll, Watch and
 Timeout APIs — but the descriptor lock now does it for every descriptor; see
-`Documentations/Lifecycle.md`.
+[Lifecycle.md](Lifecycle.md).
 
 Reference accounting inside the call is handled internally. The queued-submission path
 consumes the reference the pending entry already holds; the cancellation path takes one

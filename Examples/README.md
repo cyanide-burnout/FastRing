@@ -51,7 +51,8 @@ git apply /path/to/FastRing/Supplimentary/h2o.patch
 ```
 
 The patch fixes H2O's own libuv binding for the HTTP/3 path; see
-`Documentations/H2OCore.md`. Without it, HTTP/3 does not work.
+[Documentations/H2OCore.md](../Documentations/H2OCore.md). Without it, HTTP/3 does not
+work.
 
 `H2H3Server` expects a certificate bundle (`bundle.pem`) next to the binary.
 

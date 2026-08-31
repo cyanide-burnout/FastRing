@@ -5,7 +5,7 @@ Header: `Supplimentary/KCPAdapter.h`
 `KCPAdapter` is the ready-made transport binding for `KCPService`: it owns a UDP
 socket, feeds inbound datagrams into the engine, and installs itself as the engine's
 transmitter. With it, an application only deals with conversations and messages — see
-`Documentations/KCPService.md`.
+[KCPService.md](KCPService.md).
 
 ## API
 

@@ -9,7 +9,7 @@ same `Fetch` instance and the same ring.
 
 ## Layering
 
-```
+```text
 FastRing  ->  Fetch (libcurl multi)  ->  CURLWSCore  ->  application
 ```
 
@@ -90,7 +90,7 @@ return value is ignored.
 
 `parameter` on `CWS_REASON_CLOSED` follows the `Fetch` convention exactly — a
 non-negative value is the HTTP response code, a negative one is either `-CURLcode` or
-`FETCH_STATUS_CANCELLED` / `FETCH_STATUS_INCOMPLETE`. See `Documentations/Fetch.md`.
+`FETCH_STATUS_CANCELLED` / `FETCH_STATUS_INCOMPLETE`. See [Fetch.md](Fetch.md).
 
 `data` points into a message buffer owned by the transmission and is only valid for
 the duration of the call. Copy anything that must outlive it.

@@ -3,11 +3,8 @@
 `FastRing` is a set of high-performance asynchronous I/O modules built around `io_uring` (Linux).
 It is designed for reactive networking workloads and low-overhead event handling.
 
-This repository includes:
-- the core event/descriptor engine (`Ring/FastRing.*`)
-- networking and protocol adapters (`FastSocket`, `FastBIO`, `Fetch`, `CURLWSCore`, `Resolver`, etc.)
-- supplementary modules (`Supplimentary/`)
-- runnable examples (`Examples/`)
+At the centre is the event and descriptor engine (`Ring/FastRing.*`). Around it sit
+networking, TLS and protocol adapters, supplementary services, and runnable examples.
 
 ## What It Solves
 
@@ -49,18 +46,10 @@ sends each have their own kernel requirements and fall back when unavailable.
 
 ## Repository Layout
 
-- `Ring/` - core library and adapters
-- `Supplimentary/` - extra modules (gRPC/H2O/KCP/XMPP, etc.)
-- `Examples/` - example applications with per-folder Makefiles
-- `Documentations/` - API and integration notes
-
-## Documentations
-
-- Documentation index: `Documentations/README.md`
-- Descriptor lifecycle and concurrency rules: `Documentations/Lifecycle.md`
-- `FastRing` API: `Documentations/FastRing.md`
-- `Latch` API: `Documentations/Latch.md`
-- `FastSocket` API: `Documentations/FastSocket.md`
+- [`Ring/`](Ring) - core library and adapters
+- [`Supplimentary/`](Supplimentary) - extra modules (gRPC/H2O/KCP/XMPP, etc.)
+- [`Examples/`](Examples) - example applications with per-folder Makefiles
+- [`Documentations/`](Documentations) - API and integration notes
 
 ## Quick Start (FastRing Core)
 
@@ -82,9 +71,7 @@ Key APIs (`Ring/FastRing.h`):
 ## Building Examples
 
 There is no single top-level build target in this repo.
-Build examples from their own directories under `Examples/*`.
-
-Example:
+Build examples from their own directories under `Examples/*`:
 
 ```bash
 cd Examples/CURLWS
@@ -92,73 +79,56 @@ make
 ./curlwstest
 ```
 
-Other example targets:
-- `Examples/AAA` - RADIUS client over `FastSocket`
-- `Examples/Avahi` - Avahi service discovery
-- `Examples/H2H3Server` - HTTP/2 and HTTP/3 server on `H2OCore`
-- `Examples/SMBClient` - SMB2 named pipe client on `SambarAdapter`
-- `Examples/SMBServer` - SMB2 server on `SambarAdapter`
-- `Examples/SSL` - TLS socket
-- `Examples/gRPCClient`
-- `Examples/gRPCServer`
-
 Dependencies for each example are defined in its local `Makefile` via `pkg-config`.
-See `Examples/README.md` for what each example demonstrates and what it needs.
+[Examples/README.md](Examples/README.md) lists every example, what it demonstrates and
+what it needs.
 
 ## Module Overview
 
 ### Core (`Ring/`)
 
-- `FastRing` - core `io_uring` engine: submit/complete, poll/watch/timeout, descriptor lifecycle
-- `FastBuffer` - buffer pool and buffer registration helpers
-- `FastSocket` - asynchronous socket I/O on top of FastRing
-- `FastBIO` - async OpenSSL BIO transport adapter
-- `SSLSocket` - TLS socket layer built on OpenSSL
-- `ThreadCall` - cross-thread calls into the ring handler thread
-- `FastSemaphore` - reactive `sem_t` integration (glibc internals + io_uring futex ops)
-- `FastGLoop` - `GLib` loop integration
-- `FastUVLoop` - `libuv` loop integration
-- `Fetch` - asynchronous wrapper over `libcurl` multi interface
-- `CURLWSCore` - recommended WebSocket client adapter
-- `LWSCore` - deprecated WebSocket adapter (kept for compatibility)
-- `FastAvahiPoll` - Avahi poll adapter for FastRing
-- `DBusCore` - D-Bus integration
-- `Resolver` - c-ares DNS resolver integration
-- `LuaPoll` - Lua/LuaJIT bindings
-- `WatchDog` - systemd watchdog helper
-- `SambarAdapter` - libsmb2 (SMB2) adapter, experimental
-- `CoRing` - C++ coroutine adapter
+- [`FastRing`](Documentations/FastRing.md) - core `io_uring` engine: submit/complete, poll/watch/timeout, descriptor lifecycle
+- [`FastBuffer`](Documentations/FastBuffer.md) - buffer pool and buffer registration helpers
+- [`FastSocket`](Documentations/FastSocket.md) - asynchronous socket I/O on top of FastRing
+- [`FastBIO`](Documentations/FastBIO.md) - async OpenSSL BIO transport adapter
+- [`SSLSocket`](Documentations/SSLSocket.md) - TLS socket layer built on OpenSSL
+- [`ThreadCall`](Documentations/ThreadCall.md) - cross-thread calls into the ring handler thread
+- [`FastSemaphore`](Documentations/FastSemaphore.md) - reactive `sem_t` integration (glibc internals + io_uring futex ops)
+- [`FastGLoop`](Documentations/FastGLoop.md) - `GLib` loop integration
+- [`FastUVLoop`](Documentations/FastUVLoop.md) - `libuv` loop integration
+- [`Fetch`](Documentations/Fetch.md) - asynchronous wrapper over `libcurl` multi interface
+- [`CURLWSCore`](Documentations/CURLWSCore.md) - recommended WebSocket client adapter
+- [`LWSCore`](Documentations/LWSCore.md) - deprecated WebSocket adapter (kept for compatibility)
+- [`FastAvahiPoll`](Documentations/FastAvahiPoll.md) - Avahi poll adapter for FastRing
+- [`DBusCore`](Documentations/DBusCore.md) - D-Bus integration
+- [`Resolver`](Documentations/Resolver.md) - c-ares DNS resolver integration
+- [`LuaPoll`](Documentations/LuaPoll.md) - Lua/LuaJIT bindings
+- [`WatchDog`](Documentations/WatchDog.md) - systemd watchdog helper
+- [`SambarAdapter`](Documentations/SambarAdapter.md) - libsmb2 (SMB2) adapter, experimental
+- [`CoRing`](Documentations/CoRing.md) - C++ coroutine adapter
 
 ### Supplementary (`Supplimentary/`)
 
-- `Latch` - shared-memory latch service for cross-process write exclusion
-- `H2OCore` - H2O HTTP/2/HTTP/3 integration layer
-- `PicoBundle` - picotls/certificate bundle helper
-- `ProtoBuf` - protobuf-c support helpers
-- `gRPC` - shared gRPC-related types/utilities
-- `gRPCClient` - gRPC client implementation
-- `gRPCServer` - gRPC server implementation
-- `KCPAdapter` - KCP/FastRing adapter layer
-- `KCPService` - KCP service implementation
-- `XMPPServer` - XMPP server module
+- [`Latch`](Documentations/Latch.md) - shared-memory latch service for cross-process write exclusion
+- [`H2OCore`](Documentations/H2OCore.md) - H2O HTTP/2/HTTP/3 integration layer
+- [`PicoBundle`](Documentations/PicoBundle.md) - picotls/certificate bundle helper
+- [`ProtoBuf`](Documentations/ProtoBuf.md) - protobuf-c support helpers
+- [`gRPC`](Documentations/gRPC.md) - shared gRPC-related types/utilities
+- [`gRPCClient`](Documentations/gRPCClient.md) - gRPC client implementation
+- [`gRPCServer`](Documentations/gRPCServer.md) - gRPC server implementation
+- [`KCPAdapter`](Documentations/KCPAdapter.md) - KCP/FastRing adapter layer
+- [`KCPService`](Documentations/KCPService.md) - KCP service implementation
+- [`XMPPServer`](Documentations/XMPPServer.md) - XMPP server module
 
-## Latch
+## Documentations
 
-`Latch` is a shared-memory lock service for temporarily blocking data mutation while a critical section is in progress.
-It is intended for cases where the main loop needs to force a deterministic, idempotent phase around shared state.
+Every module has an API reference under `Documentations/`, indexed and grouped by area in
+[Documentations/README.md](Documentations/README.md). Two documents are worth reading
+before the rest:
 
-The component is split between `Supplimentary/LatchServer.*`, which serves the latch through `FastRing`, and `Supplimentary/LatchClient.*`, which acquires and releases it from cooperating workers or processes.
-Detailed API and behavior are documented in `Documentations/Latch.md`.
-
-## kTLS
-
-FastBIO can expose a Linux kTLS-capable transport to OpenSSL/libssl. TLS state remains owned by libssl; FastBIO implements the required BIO control hooks and maps the transport to FastRing/io_uring.
-
-RX uses `recvmsg_multishot` to preserve `TLS_GET_RECORD_TYPE` metadata and synthesizes TLS record headers expected by libssl. TX uses `sendmsg` and `TLS_SET_RECORD_TYPE` for control records. `setsockopt(TCP_ULP/TLS_TX/TLS_RX)` is submitted asynchronously through io_uring.
-
-kTLS is opportunistic. Unsupported ciphers, directions, kernels or socket states fall back to the normal userspace TLS path.
-
-Important: kTLS-capable FastBIO sockets never use regular io_uring zerocopy sends. A prior `SEND_ZC`/`SENDMSG_ZC` on the same TCP socket can make kTLS appear to enable while preventing kTLS traffic from flowing. kTLS sendfile/`TLS_TX_ZEROCOPY_RO` is a separate path.
+- [Descriptor lifecycle and concurrency rules](Documentations/Lifecycle.md) - ownership,
+  reference counting, reentrancy and thread rules
+- [`FastRing` API](Documentations/FastRing.md) - the core engine
 
 ## Limitations
 
@@ -168,4 +138,4 @@ Important: kTLS-capable FastBIO sockets never use regular io_uring zerocopy send
 
 ## License
 
-See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

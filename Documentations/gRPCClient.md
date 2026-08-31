@@ -13,7 +13,7 @@ Status: within this repository the module is exercised only by `Examples/gRPCCli
 
 `struct GRPCTransmission` embeds `struct FetchTransmission` as its first member
 (`super`), so a gRPC call is a Fetch transmission driven by the same `Fetch` instance
-and ring. See `Documentations/Fetch.md` and `Documentations/gRPC.md`.
+and ring. See [Fetch.md](Fetch.md) and [gRPC.md](gRPC.md).
 
 ## Methods
 

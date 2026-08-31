@@ -6,7 +6,7 @@ Header: `Supplimentary/KCPService.h`
 
 It is transport-agnostic on its own: packets come in through `HandleKCPPacket()` and go
 out through a `KCPTransmitter` the caller supplies. `KCPAdapter` is the ready-made
-FastRing/FastSocket binding — see `Documentations/KCPAdapter.md`.
+FastRing/FastSocket binding — see [KCPAdapter.md](KCPAdapter.md).
 
 **External dependency:** this header includes `HashMap.h`, which is not part of the
 FastRing repository. It lives in the consuming project's own common code, so

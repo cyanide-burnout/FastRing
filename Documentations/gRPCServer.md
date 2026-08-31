@@ -95,7 +95,7 @@ invocation exists. **Return `0` to allow.** Any non-zero return is used directly
 the gRPC status of the rejection, so returning `GRPC_STATUS_UNAUTHENTICATED` or
 `GRPC_STATUS_PERMISSION_DENIED` produces the right trailer. The full `h2o_req_t` is
 available, so the `authorization` header can be inspected with the header helpers from
-`Documentations/H2OCore.md`.
+[H2OCore.md](H2OCore.md).
 
 ## Invocation Lifecycle and Replies
 

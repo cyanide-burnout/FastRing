@@ -57,5 +57,5 @@ void release() const;
   allocated but never submitted. Outstanding operations therefore do not call back
   into a destroyed `CoRing`.
 
-See `Documentations/Lifecycle.md` for the underlying reference counting rules.
+See [Lifecycle.md](Lifecycle.md) for the underlying reference counting rules.
 

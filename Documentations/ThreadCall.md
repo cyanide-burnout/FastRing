@@ -193,7 +193,7 @@ The way the ring thread is woken is chosen at construction:
 Completion wakeups prefer `IORING_OP_FUTEX_WAKE` submitted through the ring
 (`TC_WAKE_LAZY`) and fall back to a synchronous `futex()` syscall when that SQE cannot
 be completed — this is what the non-`RING_REASON_COMPLETE` branch of the wakeup
-handler is for, see `Documentations/Lifecycle.md`.
+handler is for, see [Lifecycle.md](Lifecycle.md).
 
 ## Rules
 

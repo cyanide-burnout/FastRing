@@ -28,7 +28,7 @@ void ReleaseDBusCore(struct DBusCore* core);
   the status is `DBUS_DISPATCH_COMPLETE`. Because the flush phase drains its stack to
   the end, that re-arm runs within the same `WaitForFastRing()` iteration — the queue
   is emptied before the loop moves on, one message at a time rather than in a single
-  blocking sweep. See the flush handler section of `Documentations/FastRing.md`.
+  blocking sweep. See the flush handler section of [FastRing.md](FastRing.md).
 
 `ReleaseDBusCore()` removes the flush handler, unhooks all three callback sets and
 drops the connection reference. It does not close or disconnect the connection —

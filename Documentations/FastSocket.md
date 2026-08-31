@@ -1,6 +1,6 @@
 # FastSocket API Reference
 
-This document describes the public C API from `Ring/FastSocket.h`.
+Header: `Ring/FastSocket.h`
 
 `FastSocket` provides asynchronous socket send/receive on top of `FastRing` and `FastBuffer`.
 
@@ -41,7 +41,7 @@ they can be OR-ed into send flags directly.
 
 Zero-copy is not free: it is a win for payloads large enough to beat the pinning and
 notification overhead, and a loss for small ones. It also interacts with kTLS — see
-the kTLS note in the top-level `README.md`.
+the kTLS section of [FastBIO.md](FastBIO.md#ktls).
 
 ## Receive Mode
 
@@ -88,7 +88,7 @@ passed. Lower it to bound how much of the ring one socket may occupy. With
 
 The socket does not take ownership of `provider`, `inbound` or `outbound` — they are
 usually shared between sockets and must outlive them, or at least be released
-independently (see the pool reference counting in `Documentations/FastBuffer.md`).
+independently (see the pool reference counting in [FastBuffer.md](FastBuffer.md)).
 
 ## Receive API
 

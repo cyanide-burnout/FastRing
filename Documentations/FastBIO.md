@@ -6,7 +6,7 @@ Header: `Ring/FastBIO.h`
 entirely inside libssl — `FastBIO` only moves bytes, and implements the BIO control
 hooks libssl needs to negotiate kernel TLS offload.
 
-It is normally used through `SSLSocket` (`Documentations/SSLSocket.md`), which owns the
+It is normally used through `SSLSocket` ([SSLSocket.md](SSLSocket.md)), which owns the
 `SSL*` and the session state machine. Use `FastBIO` directly only when driving OpenSSL
 yourself.
 
@@ -128,7 +128,7 @@ libssl expects.
 
 > **A kTLS-capable socket must never have carried `SEND_ZC` / `SENDMSG_ZC` traffic.**
 > A prior zerocopy send makes kTLS appear to enable while preventing traffic from
-> flowing. See the kTLS section of the top-level `README.md`.
+> flowing. kTLS sendfile / `TLS_TX_ZEROCOPY_RO` is a separate path.
 
 ## Buffer Sizing
 
