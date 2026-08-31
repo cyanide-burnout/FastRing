@@ -100,10 +100,13 @@ Copies out of the receive queue, releasing each buffer as it is fully consumed.
 
 Returns:
 - `> 0`: bytes copied — up to `size`, or everything queued if less is available
-- `0`: nothing queued, or `MSG_WAITALL` was requested and the queue holds less than
-  `size`. In the `MSG_WAITALL` case nothing is consumed, so the call can simply be
-  retried on the next `POLLIN`
+- `-EAGAIN`: nothing queued, or `MSG_WAITALL` was requested and the queue holds less
+  than `size`. Nothing is consumed in either case, so the call can simply be retried on
+  the next `POLLIN`
 - `-EINVAL`: `socket`, `data` or `size` invalid
+
+An end of stream is not reported here — a closed peer arrives as `POLLHUP` through the
+event handler, and `0` would only be mistaken for EOF by a caller shaped like `read()`.
 
 Only `MSG_WAITALL` is interpreted; other `flags` are ignored.
 
@@ -141,8 +144,16 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
 Common return codes:
 - `0`: success
 - `-EINVAL`: invalid arguments
-- `-ENOMEM`: allocation failure
+- `-EAGAIN`: no descriptor, buffer or batch available. Every one of them comes back to
+  its pool as sends complete, so this is a transient state: retry on the next `POLLOUT`
+  rather than treating the socket as broken
 - `-EPIPE`: socket in error state (`POLLERR` observed)
+
+`POLLERR` is latched, not merely reported. A fatal receive error, a failed send, a
+connect that came back with `POLLERR`/`POLLHUP`, and an unrecoverable short write all
+mark the socket as failed, and every transmit after that returns `-EPIPE`. The event
+handler still receives the original error code as `parameter`, but a caller that
+ignores the event cannot keep writing into a socket that will never deliver.
 
 `TransmitFastSocketDescriptor()` takes ownership of the descriptor and the buffer on
 success **and on failure** — every error path releases both itself, so the caller must
@@ -233,8 +244,16 @@ FILE* GetFastSocketStream(struct FastSocket* socket, int own);
 ```
 
 - Wraps socket as `FILE*` via `fopencookie`.
-- stream read uses `ReceiveFastSocketData`.
-- stream write uses `TransmitFastSocketData`.
+- stream read uses `ReceiveFastSocketData` and tells the two states of an empty queue
+  apart. While the socket is still receiving, the read gives `errno = EAGAIN` and raises
+  the error flag: call `clearerr()` and read again on the next `POLLIN`. Once the receive
+  path has finished — a closed peer, a fatal receive error or `ReleaseFastSocket()` — it
+  reports a real end of file, so `feof()` becomes true and `fgets()`, `fread()` and
+  friends terminate on their own.
+- stream write uses `TransmitFastSocketData`, so both of its states reach the stream as
+  well. An exhausted pool gives `errno = EAGAIN` and clears the same way as on the read
+  side; a socket latched as failed gives `errno = EPIPE`, and that one does not go away,
+  since no further write on it will ever be delivered.
 - if `own != 0`, `fclose(stream)` will call `ReleaseFastSocket()`.
 
 ## Minimal Pattern

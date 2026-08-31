@@ -255,7 +255,12 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   if (unlikely((completion != NULL) &&
                (completion->res < 0)))
   {
-    // Error may occure during sending or connecting
+    // Error may occure during sending or connecting. The condition has to be latched, not just
+    // reported: TransmitFastSocketDescriptor() turns it into -EPIPE, so a socket that has failed
+    // to send stops accepting new data instead of silently swallowing it. Until this was done a
+    // failure on the receive side made the socket unwritable while a failure on the send side
+    // left it looking healthy, and GetFastSocketStream() had no way to report the latter at all
+    socket->outbound.condition |= POLLERR;
     CallHandlerFunction(socket, POLLERR, -completion->res);
     goto Continue;
   }
@@ -265,6 +270,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
                (completion->res >= POLLERR)))
   {
     // Error may occure during connecting (POLLERR, POLLHUP)
+    socket->outbound.condition |= POLLERR;
     CallHandlerFunction(socket, POLLERR, EPIPE);
     goto Continue;
   }
@@ -296,7 +302,9 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     // Mid-batch, or nothing was written at all: the following buffers are already queued
     // and the remainder would land after them, leaving a gap in the stream. This is the
     // documented limitation of FASTSOCKET_MODE_FILE_IO on anything but a regular file,
-    // the caller has to create such a socket with limit = 1 to keep every write recoverable
+    // the caller has to create such a socket with limit = 1 to keep every write recoverable.
+    // The gap cannot be closed, so the socket is latched as failed like any other send error
+    socket->outbound.condition |= POLLERR;
     CallHandlerFunction(socket, POLLERR, EIO);
   }
 
@@ -450,8 +458,10 @@ ssize_t ReceiveFastSocketData(struct FastSocket* socket, void* data, size_t size
                (socket->inbound.length < size) &&
                (flags & MSG_WAITALL)))
   {
-    // Insufficient length
-    return 0;
+    // Insufficient length. Zero would mean an end of stream to a caller shaped like read(),
+    // HandleStreamRead() among them, while nothing has been consumed and the rest is still
+    // to come. A closed peer is reported as POLLHUP through the event handler instead
+    return -EAGAIN;
   }
 
   size  = (socket->inbound.length < size) ? socket->inbound.length : size;
@@ -509,14 +519,17 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
                  (batch->count < socket->outbound.limit) ||
                  (batch = AllocateOutboundBatch(&socket->outbound)))))
   {
+    // Batches are recycled through a stack of their own, so an exhausted pool is a transient
+    // state rather than a fatal one: EAGAIN keeps a FILE* recoverable through clearerr()
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
-    return -ENOMEM;
+    return -EAGAIN;
   }
 
-  descriptor->data.number        = 0ULL;
-  descriptor->function           = HandleOutboundCompletion;
-  descriptor->closure            = socket;
+  descriptor->data.number = 0ULL;
+  descriptor->function    = HandleOutboundCompletion;
+  descriptor->closure     = socket;
+
   if ((descriptor->submission.opcode == IORING_OP_SEND)    ||
       (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
       (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
@@ -608,9 +621,11 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
   if (unlikely((descriptor == NULL) ||
                (buffer     == NULL)))
   {
+    // Descriptors and buffers come back to their pools as sends complete, so this is a
+    // transient state and the caller is expected to retry rather than to give up
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
-    return -ENOMEM;
+    return -EAGAIN;
   }
 
   pointer = buffer->data;
@@ -683,9 +698,11 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   if (unlikely((descriptor == NULL) ||
                (buffer     == NULL)))
   {
+    // Descriptors and buffers come back to their pools as sends complete, so this is a
+    // transient state and the caller is expected to retry rather than to give up
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
-    return -ENOMEM;
+    return -EAGAIN;
   }
 
   memcpy(buffer->data, data, size);
@@ -746,9 +763,20 @@ void ReleaseFastSocket(struct FastSocket* socket)
 
 static ssize_t HandleStreamRead(void* cookie, char* data, size_t size)
 {
+  struct FastSocket* socket;
   int result;
 
-  result = ReceiveFastSocketData((struct FastSocket*)cookie, data, size, 0);
+  socket = (struct FastSocket*)cookie;
+  result = ReceiveFastSocketData(socket, data, size, 0);
+
+  if (unlikely((result == -EAGAIN) &&
+               (socket->inbound.descriptor == NULL)))
+  {
+    // A receive path that has finished -- a closed peer, a fatal receive error, a released
+    // socket -- leaves inbound.descriptor at NULL. Together with a drained queue that is a
+    // real end of file for stdio, so feof() becomes true instead of the error flag
+    return 0;
+  }
 
   if (unlikely(result < 0))
   {
