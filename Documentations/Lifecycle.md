@@ -40,6 +40,50 @@ separate `POLL_UPDATE` / `TIMEOUT_UPDATE` request only if the descriptor has alr
 reached `SUBMITTED`. This is why an update issued before the next `WaitForFastRing()`
 costs nothing, while an update issued after it costs an extra SQE/CQE pair.
 
+## Three Layers of Exclusion
+
+A descriptor carries three separate words, and each answers a different question. Reading
+the code is much easier once they are told apart, because all three are involved in every
+update or removal.
+
+**`descriptor->lock` — who has the descriptor right now.** Bit `RING_DESC_LOCK_HELD` says
+that a completion handler is running on it, and the bits above it count writers waiting to
+get in. It has two sides:
+
+| Side | Taken by | Meaning |
+| --- | --- | --- |
+| `LockRingDescriptor()` / `UnlockRingDescriptor()` | Anyone about to change the descriptor | Wait for a running handler, and be visible while waiting |
+| `LockCompletedRingDescriptor()` / `UnlockCompletedRingDescriptor()` | `HandleCompletedRingDescriptor()` | Take the descriptor for the duration of the handler |
+
+The two use the pair differently. A completion takes `lock` and `state` in one 64-bit
+compare-and-swap that succeeds only while the lock is clear and the state is pending or
+submitted, so a single waiting writer is enough to keep it out — which is what stops a
+stream of multishot completions from starving that writer. A writer goes the other way
+round: it adds itself to the waiter count and sleeps on `lock` as a futex until the handler
+returns. The ring thread skips all of this, since handlers run there alone and waiting
+would mean waiting for itself.
+
+**`descriptor->state` — where the descriptor is in the submission pipeline.**
+`LockPendingRingDescriptor()` and `LockSubmittedRingDescriptor()` sit a layer above: each
+takes the descriptor lock on the way, claims its state as `RING_DESC_STATE_LOCKED`, and
+drops the lock again — from there on the claimed state is the exclusion, and the completion
+lock does not accept it. Note that these have no matching `Unlock*`: the state is released
+by whatever writes the next one, be it `PrepareFastRingDescriptor()`, a plain store or the
+release path.
+
+**`descriptor->data.*.condition` — what has been asked of the operation.**
+`RING_CONDITION_GUARD`, `RING_CONDITION_REMOVE` and `RING_CONDITION_UPDATE` do not exclude
+anybody; they carry intent between the API and the callback, and each of Poll, Watch and
+Timeout keeps its own. They are described under
+[Reentrancy](#reentrancy-calling-the-api-from-a-callback).
+
+The order is always the same: the descriptor lock first, the state second. The condition
+word is mostly read after a claim rather than before, because taking one may have waited
+long enough for the answer to change — but not always, and deliberately so:
+`RING_CONDITION_REMOVE` is published before any claim, so that whoever takes the state
+next sees it, and `RING_CONDITION_GUARD` is examined between the `PENDING` and `SUBMITTED`
+attempts, where it decides whether a claim is worth trying at all.
+
 ## Reference Counting
 
 `descriptor->references` counts everything that may still dereference the descriptor:
@@ -119,7 +163,7 @@ The mechanism is the `condition` word carried in the descriptor's `data` union:
 | Condition | Meaning |
 | --- | --- |
 | `RING_CONDITION_GUARD` | Set while the user callback is running |
-| `RING_CONDITION_UPDATE` | Poll only: the operation ended without being re-armed, so nothing of it is left in the kernel |
+| `RING_CONDITION_UPDATE` | Poll and Timeout: the operation ended without being re-armed, so nothing of it is left in the kernel and an update has to arm it anew. Watch never raises it, because its handler always re-arms |
 | `RING_CONDITION_REMOVE` | Removal was requested; no further user callbacks will be issued |
 
 Consequences a module author has to rely on:
@@ -140,8 +184,9 @@ Consequences a module author has to rely on:
   descriptor stays alive until the cancellation CQE arrives. The closure outlives the
   call by less than that: once the removal returns, no callback will be delivered and
   none is running any more, because a claim made off the ring thread waits a running
-  handler out. The one exception is a removal issued from inside the callback itself,
-  where that handler is still on the stack and still using the closure.
+  handler out. The one exception is a removal issued from inside the callback itself:
+  that handler is physically still on the stack and still holds the closure, so it may
+  only be freed after the callback has returned to the ring.
 
 `RemoveFastRingWatch()` and the timeout removal path spin over `LockPendingRingDescriptor()`
 / `LockSubmittedRingDescriptor()` until one of them succeeds. Off the ring thread each claim
@@ -198,7 +243,7 @@ may enter the kernel through this ring.
 | `CreateFastRing()` / `ReleaseFastRing()` | Ring thread |
 | All completion, poll, watch, timeout and flush callbacks | Ring thread |
 | `AllocateFastRingDescriptor()`, `PrepareFastRingDescriptor()`, `SubmitFastRingDescriptor()` | Any thread (lock-free MPSC queue) |
-| `SetFastRingFlushHandler()` / `RemoveFastRingFlushHandler()` | Any thread (lock-free stack) |
+| `SetFastRingFlushHandler()` / `RemoveFastRingFlushHandler()` | Ring thread. The calls are lock-free, but arming from elsewhere does not wake the ring and the handle cannot be owned by another thread |
 | Poll API, Registered File API, Registered Buffer API | Any thread (recursive mutex) |
 | `DiscardFastRingDescriptor()` | Ring thread, or any thread holding a reference of its own |
 | `SubmitFastRingEvent()` | Any thread, including another ring's thread |
@@ -213,7 +258,9 @@ recorded thread. Use it to decide between a direct call and a `ThreadCall` hop.
 Submitting a descriptor from a foreign thread only enqueues it. The SQE is copied
 into the ring on the next `WaitForFastRing()`. If the ring thread is blocked in
 `io_uring_submit_and_wait_timeout()`, it will not notice the new descriptor until the
-timeout expires — wake it with `SubmitFastRingEvent()` or `ThreadCall`.
+timeout expires. `ThreadCall` supplies a real foreign-thread wakeup. A
+`SubmitFastRingEvent()` queued from that same blocked source ring does not: its
+`MSG_RING` reaches the target only after the source ring submits it.
 
 ## Chained Descriptors
 

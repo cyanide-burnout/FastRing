@@ -11,8 +11,8 @@
 #include <sys/resource.h>
 #include <linux/futex.h>
 
-#define likely(condition)     __builtin_expect(!!(condition), 1)
-#define unlikely(condition)   __builtin_expect(!!(condition), 0)
+#define likely(condition)    __builtin_expect(!!(condition), 1)
+#define unlikely(condition)  __builtin_expect(!!(condition), 0)
 
 #if defined(__x86_64__) || defined(__i386__)
 #define yield()  __builtin_ia32_pause()
@@ -206,17 +206,11 @@ static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct F
   atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
 }
 
-static inline __attribute__((always_inline)) int LockPendingRingDescriptor(struct FastRingDescriptor* descriptor)
+static inline __attribute__((always_inline)) void LockRingDescriptor(struct FastRingDescriptor* descriptor)
 {
   uint32_t value;
-  int condition;
-  int result;
 
-  // A handler is free to re-arm its own descriptor, which leaves it pending while that handler is still running, so this claim needs the same reservation as the submitted one.
-  // The ring thread is exempt: handlers run there alone, and waiting would block on a lock this very thread holds deeper in its own stack
-  condition = IsFastRingThread(descriptor->ring);
-
-  if (condition == 0)
+  if (IsFastRingThread(descriptor->ring) == 0)
   {
     value = atomic_fetch_add_explicit(&descriptor->lock, RING_DESC_LOCK_WAITER, memory_order_acquire) + RING_DESC_LOCK_WAITER;
 
@@ -226,40 +220,39 @@ static inline __attribute__((always_inline)) int LockPendingRingDescriptor(struc
       value = atomic_load_explicit(&descriptor->lock, memory_order_acquire);
     }
   }
+}
 
-  value  = RING_DESC_STATE_PENDING;
-  result = atomic_compare_exchange_strong_explicit(&descriptor->state, &value, RING_DESC_STATE_LOCKED, memory_order_acquire, memory_order_relaxed);
-
-  if (condition == 0)
+static inline __attribute__((always_inline)) void UnlockRingDescriptor(struct FastRingDescriptor* descriptor)
+{
+  if (IsFastRingThread(descriptor->ring) == 0)
   {
     // Nothing left to protect: either the state is the claim now and LockCompletedRingDescriptor does not accept it, or the claim failed and there is nothing to hold
     atomic_fetch_sub_explicit(&descriptor->lock, RING_DESC_LOCK_WAITER, memory_order_release);
   }
+}
 
+static inline __attribute__((always_inline)) int LockPendingRingDescriptor(struct FastRingDescriptor* descriptor)
+{
+  uint32_t value;
+  int result;
+
+  // A handler is free to re-arm its own descriptor, which leaves it pending while that handler is still running, so this claim needs the same reservation as the submitted one
+  LockRingDescriptor(descriptor);
+
+  value  = RING_DESC_STATE_PENDING;
+  result = atomic_compare_exchange_strong_explicit(&descriptor->state, &value, RING_DESC_STATE_LOCKED, memory_order_acquire, memory_order_relaxed);
+
+  UnlockRingDescriptor(descriptor);
   return result;
 }
 
 static inline __attribute__((always_inline)) int LockSubmittedRingDescriptor(struct FastRingDescriptor* descriptor)
 {
   uint32_t value;
-  int condition;
   int result;
 
-  // A handler may be running on the descriptor already, and it has to return before the state can be claimed.
-  // The ring thread is exempt: handlers run there alone, and waiting would block on a lock this very thread holds deeper in its own stack
-  condition = IsFastRingThread(descriptor->ring);
-
-  if (condition == 0)
-  {
-    // A non-zero lock keeps LockCompletedRingDescriptor out, so a stream of completions cannot starve this out while a handler that is already running is being waited for
-    value = atomic_fetch_add_explicit(&descriptor->lock, RING_DESC_LOCK_WAITER, memory_order_acquire) + RING_DESC_LOCK_WAITER;
-
-    while (value & RING_DESC_LOCK_HELD)
-    {
-      syscall(SYS_futex, &descriptor->lock, FUTEX_WAIT_PRIVATE, value, NULL, NULL, 0);
-      value = atomic_load_explicit(&descriptor->lock, memory_order_acquire);
-    }
-  }
+  // A handler may be running on the descriptor already, and it has to return before the state can be claimed
+  LockRingDescriptor(descriptor);
 
   result = 1;
   value  = RING_DESC_STATE_SUBMITTED;
@@ -277,12 +270,7 @@ static inline __attribute__((always_inline)) int LockSubmittedRingDescriptor(str
     value = RING_DESC_STATE_SUBMITTED;
   }
 
-  if (condition == 0)
-  {
-    // Nothing left to protect: either the state is the claim now and LockCompletedRingDescriptor does not accept it, or the claim failed and there is nothing to hold
-    atomic_fetch_sub_explicit(&descriptor->lock, RING_DESC_LOCK_WAITER, memory_order_release);
-  }
-
+  UnlockRingDescriptor(descriptor);
   return result;
 }
 
@@ -828,18 +816,17 @@ static int __attribute__((hot)) HandlePollEvent(struct FastRingDescriptor* descr
 
 static int DiscardPoll(struct FastRingDescriptor* descriptor)
 {
-  uint8_t opcode;
+  uint8_t code;
 
   if (unlikely(LockPendingRingDescriptor(descriptor)))
   {
-    // Read before the SQE is reset: io_uring_initialize_sqe() keeps the opcode today, but it is
-    // not obliged to, and nothing here needs that dependency
-    opcode = descriptor->submission.opcode;
+    // Read before the SQE is reset: io_uring_initialize_sqe() keeps the opcode today, but it is not obliged to, and nothing here needs that dependency
+    code = descriptor->submission.opcode;
 
     io_uring_initialize_sqe(&descriptor->submission);
 
-    if (opcode == IORING_OP_POLL_ADD)  io_uring_prep_nop(&descriptor->submission);
-    else                               io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
+    if (code == IORING_OP_POLL_ADD)  io_uring_prep_nop(&descriptor->submission);
+    else                             io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
 
     PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
     ReleaseFastRingDescriptor(descriptor);
@@ -1137,11 +1124,19 @@ struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int 
     pthread_mutex_lock(&ring->files.lock);
 
     if ((handle < ring->files.length) &&
-        (descriptor = ring->files.entries[handle].descriptor) &&
-        (atomic_load_explicit(&descriptor->tag, memory_order_acquire) != ring->files.entries[handle].tag))
+        (descriptor = ring->files.entries[handle].descriptor))
     {
-      // Existing descriptor could change purpose and ownership
-      descriptor = NULL;
+      if (likely(atomic_load_explicit(&descriptor->tag, memory_order_acquire) == ring->files.entries[handle].tag))
+      {
+        // Handed out with a reference of its own: the pointer outlives files.lock, and a removal
+        // running in parallel would otherwise recycle the descriptor before the caller reads it
+        atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      }
+      else
+      {
+        // Existing descriptor could change purpose and ownership
+        descriptor = NULL;
+      }
     }
 
     pthread_mutex_unlock(&ring->files.lock);
@@ -1182,7 +1177,7 @@ static int __attribute__((hot)) HandleWatchEvent(struct FastRingDescriptor* desc
         }
 
         io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, descriptor->data.watch.mask);
+        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, atomic_load_explicit(&descriptor->data.watch.mask, memory_order_relaxed));
         descriptor->submission.len = descriptor->data.watch.flags;
         PrepareFastRingDescriptor(descriptor, 0);
         return 0;
@@ -1197,7 +1192,7 @@ static int __attribute__((hot)) HandleWatchEvent(struct FastRingDescriptor* desc
         }
 
         io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, descriptor->data.watch.mask);
+        io_uring_prep_poll_add(&descriptor->submission, descriptor->data.watch.handle, atomic_load_explicit(&descriptor->data.watch.mask, memory_order_relaxed));
         descriptor->submission.len = descriptor->data.watch.flags;
         SubmitFastRingDescriptor(descriptor, 0);
         return 1;
@@ -1223,8 +1218,8 @@ struct FastRingDescriptor* AddFastRingWatch(struct FastRing* ring, int handle, u
     descriptor->data.watch.function = function;
     descriptor->data.watch.handle   = handle;
     descriptor->data.watch.flags    = flags & (IORING_POLL_ADD_MULTI | IORING_POLL_ADD_LEVEL);
-    descriptor->data.watch.mask     = mask;
     descriptor->submission.len      = descriptor->data.watch.flags;
+    atomic_store_explicit(&descriptor->data.watch.mask, mask, memory_order_relaxed);
     atomic_store_explicit(&descriptor->data.watch.condition, 0, memory_order_relaxed);
     atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
     SubmitFastRingDescriptor(descriptor, 0);
@@ -1239,77 +1234,103 @@ void UpdateFastRingWatch(struct FastRingDescriptor* descriptor, uint32_t mask)
   uint32_t condition;
 
   if (likely((mask != 0) &&
-             (descriptor != NULL) &&
-             (descriptor->data.watch.mask != mask)))
+             (descriptor != NULL)))
   {
-    descriptor->data.watch.mask = mask;
-    condition = atomic_load_explicit(&descriptor->data.watch.condition, memory_order_acquire);
+    // Held before anything else is touched: a removal running in parallel drops the owner
+    // reference, and the descriptor would go back to the pool in the middle of this
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+
+    if (unlikely(atomic_load_explicit(&descriptor->data.watch.mask, memory_order_relaxed) == mask))
+    {
+      //
+      goto Final;
+    }
 
     if (unlikely(LockPendingRingDescriptor(descriptor)))
     {
-      if (likely(descriptor->submission.opcode == IORING_OP_POLL_ADD))
+      // Read after the claim, never before: taking it may have waited for a running handler
+      if (unlikely(atomic_load_explicit(&descriptor->data.watch.condition, memory_order_acquire) & RING_CONDITION_REMOVE))
       {
-        descriptor->submission.poll32_events = __io_uring_prep_poll_mask(mask);
-        descriptor->submission.len           = descriptor->data.watch.flags;
+        // Removal is already under way and has put its own request into the queued submission.
+        // Rewriting it here would leave the watch armed with nothing able to take it down
         atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
-        return;
+        goto Final;
       }
 
+      atomic_store_explicit(&descriptor->data.watch.mask, mask, memory_order_relaxed);
       descriptor->submission.poll32_events = __io_uring_prep_poll_mask(mask);
-      descriptor->submission.len           = IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS;
+      descriptor->submission.len           = (descriptor->submission.opcode == IORING_OP_POLL_ADD) ? descriptor->data.watch.flags : IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS;
       atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
-      return;
+      goto Final;
     }
 
-    if (unlikely(condition & RING_CONDITION_GUARD))
-    {
-      if (likely((condition & IORING_CQE_F_MORE) &&
-                 (LockSubmittedRingDescriptor(descriptor))))
-      {
-        io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, mask, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
-        atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-        SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-      }
+    condition = atomic_load_explicit(&descriptor->data.watch.condition, memory_order_acquire);
 
-      return;
+    if (unlikely(( condition & RING_CONDITION_GUARD) &&
+                 (~condition & IORING_CQE_F_MORE)))
+    {
+      // A handler holding the guard re-arms the watch on its way out and picks the mask up from
+      // the descriptor, unconditionally -- unlike Poll and Timeout, which may end the operation
+      // instead. Publishing the mask is therefore enough
+      atomic_store_explicit(&descriptor->data.watch.mask, mask, memory_order_relaxed);
+      goto Final;
     }
 
     if (likely(LockSubmittedRingDescriptor(descriptor)))
     {
+      if (unlikely(atomic_load_explicit(&descriptor->data.watch.condition, memory_order_acquire) & RING_CONDITION_REMOVE))
+      {
+        atomic_store_explicit(&descriptor->state, RING_DESC_STATE_SUBMITTED, memory_order_release);
+        goto Final;
+      }
+
+      atomic_store_explicit(&descriptor->data.watch.mask, mask, memory_order_relaxed);
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_poll_update(&descriptor->submission, descriptor->identifier, descriptor->identifier, mask, IORING_POLL_UPDATE_USER_DATA | IORING_POLL_UPDATE_EVENTS);
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-      return;
     }
+
+    Final:
+
+    ReleaseFastRingDescriptor(descriptor);
   }
 }
 
 void RemoveFastRingWatch(struct FastRingDescriptor* descriptor)
 {
+  uint8_t code;
+
   if (likely(descriptor != NULL))
   {
-    atomic_fetch_or_explicit(&descriptor->data.watch.condition, RING_CONDITION_REMOVE, memory_order_acq_rel);
+    // Held before anything else is touched: a removal or an update running in parallel drops the
+    // owner reference, and the descriptor would go back to the pool in the middle of this
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+
+    if (atomic_fetch_or_explicit(&descriptor->data.watch.condition, RING_CONDITION_REMOVE, memory_order_acq_rel) & RING_CONDITION_REMOVE)
+    {
+      // Removal is already under way, and repeating it would drop the owner reference twice. The caller is still owed the same promise
+      // as the first one got: once this returns, no handler is running any more and the closure may go
+      LockRingDescriptor(descriptor);
+      UnlockRingDescriptor(descriptor);
+      ReleaseFastRingDescriptor(descriptor);
+      return;
+    }
 
     for ( ; ; )
     {
       if (LockPendingRingDescriptor(descriptor))
       {
-        if (descriptor->submission.opcode == IORING_OP_POLL_ADD)
-        {
-          io_uring_initialize_sqe(&descriptor->submission);
-          io_uring_prep_nop(&descriptor->submission);
-          PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-          ReleaseFastRingDescriptor(descriptor);
-          return;
-        }
+        // Read before the SQE is reset, io_uring_initialize_sqe() is not obliged to keep it
+        code = descriptor->submission.opcode;
 
         io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
+
+        if (code == IORING_OP_POLL_ADD)  io_uring_prep_nop(&descriptor->submission);
+        else                             io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
+
         PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-        ReleaseFastRingDescriptor(descriptor);
-        return;
+        break;
       }
 
       if (LockSubmittedRingDescriptor(descriptor))
@@ -1318,10 +1339,13 @@ void RemoveFastRingWatch(struct FastRingDescriptor* descriptor)
         io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
         atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
         SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-        ReleaseFastRingDescriptor(descriptor);
-        return;
+        break;
       }
     }
+
+    // The owner reference, and then the one taken above
+    ReleaseFastRingDescriptor(descriptor);
+    ReleaseFastRingDescriptor(descriptor);
   }
 }
 
@@ -1358,6 +1382,13 @@ static int __attribute__((hot)) HandleTimeoutEvent(struct FastRingDescriptor* de
               condition & RING_CONDITION_MASK | completion->flags & IORING_CQE_F_MORE | RING_CONDITION_GUARD,
               memory_order_release, memory_order_relaxed)));
 
+    if (~completion->flags & IORING_CQE_F_MORE)
+    {
+      // Raised before the callback, not after it: the kernel is done with this timeout already, and a callback that re-arms it through
+      // SetFastRingTimeout() has to see that there is no entry left to update. Every path that arms it again clears the flag
+      atomic_fetch_or_explicit(&descriptor->data.timeout.condition, RING_CONDITION_UPDATE, memory_order_relaxed);
+    }
+
     if (likely(~condition & RING_CONDITION_REMOVE))
     {
       //
@@ -1378,6 +1409,7 @@ static int __attribute__((hot)) HandleTimeoutEvent(struct FastRingDescriptor* de
 
         io_uring_initialize_sqe(&descriptor->submission);
         io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);
+        atomic_fetch_and_explicit(&descriptor->data.timeout.condition, ~RING_CONDITION_UPDATE, memory_order_relaxed);
         PrepareFastRingDescriptor(descriptor, 0);
         return 0;
       }
@@ -1392,10 +1424,12 @@ static int __attribute__((hot)) HandleTimeoutEvent(struct FastRingDescriptor* de
 
         io_uring_initialize_sqe(&descriptor->submission);
         io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);
+        atomic_fetch_and_explicit(&descriptor->data.timeout.condition, ~RING_CONDITION_UPDATE, memory_order_relaxed);
         SubmitFastRingDescriptor(descriptor, 0);
         return 1;
       }
     }
+
   }
 
   return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
@@ -1408,65 +1442,109 @@ static void CreateTimeout(struct FastRingDescriptor* descriptor, HandleFastRingT
   descriptor->closure               = closure;
 
   atomic_store_explicit(&descriptor->data.timeout.condition, 0, memory_order_relaxed);
+
+  if (flags & TIMEOUT_FLAG_OWNED)
+  {
+    // The owner keeps a reference of its own, so the descriptor survives its own completion
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+  }
+
   io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, flags);
   SubmitFastRingDescriptor(descriptor, 0);
 }
 
-static void UpdateTimeout(struct FastRingDescriptor* descriptor)
+static void UpdateTimeout(struct FastRingDescriptor* descriptor, time_t seconds, long nanoseconds)
 {
   uint32_t condition;
 
+  // Held before anything else is touched: a removal running in parallel drops the owner
+  // reference, and the descriptor would go back to the pool in the middle of this
+  atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+
   for ( ; ; )
   {
-    condition = atomic_load_explicit(&descriptor->data.timeout.condition, memory_order_acquire);
-
     if (unlikely(LockPendingRingDescriptor(descriptor)))
     {
+      // The interval is written under the claim: the SQE carries a pointer to it, so a plain
+      // store races the submission loop copying the very entry that points at this field
+      descriptor->data.timeout.interval.tv_sec  = seconds;
+      descriptor->data.timeout.interval.tv_nsec = nanoseconds;
       atomic_store_explicit(&descriptor->state, RING_DESC_STATE_PENDING, memory_order_release);
-      return;
+      break;
     }
 
+    // Read after the claim, never before: taking it may have waited for a running handler
+    condition = atomic_load_explicit(&descriptor->data.timeout.condition, memory_order_acquire);
+
     if (( condition & RING_CONDITION_GUARD) &&
-        (~condition & IORING_CQE_F_MORE))
+        (~condition & IORING_CQE_F_MORE)    &&
+        ( descriptor->data.timeout.flags & TIMEOUT_FLAG_REPEAT))
     {
-      // Handler is re-arming a non-multishot timeout itself and will pick up the interval.
-      return;
+      // Handler is re-arming a repeating timeout itself and will pick up the interval. Without
+      // TIMEOUT_FLAG_REPEAT it does no such thing, and leaving on a guard would drop the update
+      descriptor->data.timeout.interval.tv_sec  = seconds;
+      descriptor->data.timeout.interval.tv_nsec = nanoseconds;
+      break;
     }
 
     if (likely(LockSubmittedRingDescriptor(descriptor)))
     {
+      descriptor->data.timeout.interval.tv_sec  = seconds;
+      descriptor->data.timeout.interval.tv_nsec = nanoseconds;
       io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_timeout_update(&descriptor->submission, &descriptor->data.timeout.interval, descriptor->identifier, descriptor->data.timeout.flags & IORING_TIMEOUT_ABS);
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+
+      if (atomic_fetch_and_explicit(&descriptor->data.timeout.condition, ~RING_CONDITION_UPDATE, memory_order_acq_rel) & RING_CONDITION_UPDATE)
+      {
+        // The timeout has already fired and nothing re-armed it, so there is no entry to update
+        io_uring_prep_timeout(&descriptor->submission, &descriptor->data.timeout.interval, 0, descriptor->data.timeout.flags);
+        SubmitFastRingDescriptor(descriptor, 0);
+        break;
+      }
+
+      io_uring_prep_timeout_update(&descriptor->submission, &descriptor->data.timeout.interval, descriptor->identifier, descriptor->data.timeout.flags & IORING_TIMEOUT_ABS);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-      return;
+      break;
     }
   }
+
+  ReleaseFastRingDescriptor(descriptor);
 }
 
 static void RemoveTimeout(struct FastRingDescriptor* descriptor)
 {
+  uint64_t flags;
+  uint8_t code;
+
+  // Held before anything else is touched, the descriptor may be recycled under this call
   atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-  atomic_fetch_or_explicit(&descriptor->data.timeout.condition, RING_CONDITION_REMOVE, memory_order_release);
+
+  flags = descriptor->data.timeout.flags;
+
+  if (atomic_fetch_or_explicit(&descriptor->data.timeout.condition, RING_CONDITION_REMOVE, memory_order_acq_rel) & RING_CONDITION_REMOVE)
+  {
+    // Removal is already under way, and repeating it would drop a reference twice. The caller is still owed the same promise as the first one got:
+    // once this returns, no handler is running any more and the closure may go
+    LockRingDescriptor(descriptor);
+    UnlockRingDescriptor(descriptor);
+    ReleaseFastRingDescriptor(descriptor);
+    return;
+  }
 
   for ( ; ; )
   {
     if (LockPendingRingDescriptor(descriptor))
     {
-      if (descriptor->submission.opcode == IORING_OP_TIMEOUT)
-      {
-        io_uring_initialize_sqe(&descriptor->submission);
-        io_uring_prep_nop(&descriptor->submission);
-        PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-        ReleaseFastRingDescriptor(descriptor);
-        return;
-      }
+      // Read before the SQE is reset, io_uring_initialize_sqe() is not obliged to keep it
+      code = descriptor->submission.opcode;
 
       io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
+
+      if (code == IORING_OP_TIMEOUT)  io_uring_prep_nop(&descriptor->submission);
+      else                            io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
+
       PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-      ReleaseFastRingDescriptor(descriptor);
-      return;
+      break;
     }
 
     if (LockSubmittedRingDescriptor(descriptor))
@@ -1475,10 +1553,17 @@ static void RemoveTimeout(struct FastRingDescriptor* descriptor)
       io_uring_prep_timeout_remove(&descriptor->submission, descriptor->identifier, 0);
       atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
       SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
-      ReleaseFastRingDescriptor(descriptor);
-      return;
+      break;
     }
   }
+
+  if (flags & TIMEOUT_FLAG_OWNED)
+  {
+    // The reference taken by CreateTimeout() on the owner's behalf
+    ReleaseFastRingDescriptor(descriptor);
+  }
+
+  ReleaseFastRingDescriptor(descriptor);
 }
 
 struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct FastRingDescriptor* descriptor, int64_t interval, uint64_t flags, HandleFastRingTimeoutFunction function, void* closure)
@@ -1493,9 +1578,7 @@ struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct Fast
   if ((interval >= 0) &&
       (descriptor != NULL))
   {
-    descriptor->data.timeout.interval.tv_sec  =  interval / 1000;
-    descriptor->data.timeout.interval.tv_nsec = (interval % 1000) * 1000000;
-    UpdateTimeout(descriptor);
+    UpdateTimeout(descriptor, interval / 1000LL, (interval % 1000LL) * 1000000LL);
     return descriptor;
   }
 
@@ -1503,8 +1586,8 @@ struct FastRingDescriptor* SetFastRingTimeout(struct FastRing* ring, struct Fast
       (interval >= 0) &&
       (descriptor = AllocateFastRingDescriptor(ring, HandleTimeoutEvent, NULL)))
   {
-    descriptor->data.timeout.interval.tv_sec  =  interval / 1000;
-    descriptor->data.timeout.interval.tv_nsec = (interval % 1000) * 1000000;
+    descriptor->data.timeout.interval.tv_sec  =  interval / 1000LL;
+    descriptor->data.timeout.interval.tv_nsec = (interval % 1000LL) * 1000000LL;
     CreateTimeout(descriptor, function, closure, flags);
     return descriptor;
   }
@@ -1524,9 +1607,7 @@ struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, stru
   if ((interval != NULL) &&
       (descriptor != NULL))
   {
-    descriptor->data.timeout.interval.tv_sec  = interval->tv_sec;
-    descriptor->data.timeout.interval.tv_nsec = interval->tv_usec * 1000;
-    UpdateTimeout(descriptor);
+    UpdateTimeout(descriptor, interval->tv_sec, interval->tv_usec * 1000LL);
     return descriptor;
   }
 
@@ -1535,7 +1616,7 @@ struct FastRingDescriptor* SetFastRingCertainTimeout(struct FastRing* ring, stru
       (descriptor = AllocateFastRingDescriptor(ring, HandleTimeoutEvent, NULL)))
   {
     descriptor->data.timeout.interval.tv_sec  = interval->tv_sec;
-    descriptor->data.timeout.interval.tv_nsec = interval->tv_usec * 1000;
+    descriptor->data.timeout.interval.tv_nsec = interval->tv_usec * 1000LL;
     CreateTimeout(descriptor, function, closure, flags);
     return descriptor;
   }
@@ -1555,9 +1636,7 @@ struct FastRingDescriptor* SetFastRingPreciseTimeout(struct FastRing* ring, stru
   if ((interval != NULL) &&
       (descriptor != NULL))
   {
-    descriptor->data.timeout.interval.tv_sec  = interval->tv_sec;
-    descriptor->data.timeout.interval.tv_nsec = interval->tv_nsec;
-    UpdateTimeout(descriptor);
+    UpdateTimeout(descriptor, interval->tv_sec, interval->tv_nsec);
     return descriptor;
   }
 

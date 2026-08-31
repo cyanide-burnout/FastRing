@@ -91,12 +91,9 @@ Transitions and their meaning are described in `Documentations/Lifecycle.md`.
 
 `descriptor->lock` sits next to it and covers what the state cannot: bit
 `RING_DESC_LOCK_HELD` says that a completion handler is running, and the bits above it
-count writers waiting to claim the state. The two sides use the pair differently. A
-completion takes both words in one 64-bit compare-and-swap, which succeeds only while the
-lock is clear and the state is pending or submitted — a reserving writer is enough to
-keep it out. A writer goes the other way round: it adds itself to the waiter count, sleeps
-on `lock` as a futex until a running handler returns, then claims `state` on its own and
-drops the reservation, since from that point the state is the claim.
+count writers waiting to claim the state. The two words are the first two of the three
+layers of exclusion a descriptor carries; how they are taken, in which order, and how the
+per-API `condition` word relates to them is described in `Documentations/Lifecycle.md`.
 
 ### Submission options
 
@@ -136,9 +133,10 @@ and for chained descriptors completed through `IOSQE_CQE_SKIP_SUCCESS`.
 Poll, Watch and Timeout descriptors keep a `condition` word in `descriptor->data`
 carrying `RING_CONDITION_GUARD` and `RING_CONDITION_REMOVE`, which is what makes it safe
 to update or remove an operation from inside its own callback. `RING_CONDITION_UPDATE`
-is used by the Poll API alone, where it marks an operation that ended without being
-re-armed; Watch and Timeout never raise it. `RING_CONDITION_MASK` covers all three. See
-`Documentations/Lifecycle.md`.
+marks an operation that ended without being re-armed, so that an update arms it anew
+instead of asking to change an entry the kernel no longer has; Poll and Timeout raise it,
+Watch never does because its handler always re-arms. `RING_CONDITION_MASK` covers all
+three. See `Documentations/Lifecycle.md`.
 
 ## Flush Handlers
 
@@ -158,6 +156,14 @@ iteration**, after every CQE of this pass has been handled. It is the mechanism 
 "do this once more, but not right now": batching work that several completions would
 otherwise each trigger, and getting off a completion handler's stack before touching
 shared state.
+
+That is the whole of it. A flusher is a phase of the loop, not a task queue, not a
+notification and not a general cancellable job — anything beyond "apply what this pass
+has accumulated, once, before the loop waits again" is a misuse of it. A synchronous
+call from an arbitrary foreign thread is `ThreadCall`, which supplies the wakeup,
+generation, reference count and join protocol such a thing needs. A cross-ring handoff
+from a ring that is already making progress is `SubmitFastRingEvent()`. Neither belongs
+here.
 
 ### When it runs
 
@@ -220,24 +226,37 @@ again during shutdown.
 
 ### Cancelling
 
-`RemoveFastRingFlushHandler()` cancels an armed flusher by moving it from pending
-straight to free:
+`RemoveFastRingFlushHandler()` cancels an armed flusher by changing its state from
+pending to free:
 
 - `0` — cancelled, the handler will not be called;
 - `-EPERM` — too late, the flusher is already running or has already run;
 - `-EBADF` — `ring` or `flusher` is `NULL`.
 
 A cancelled flusher is not recycled immediately; the drain loop notices the changed
-state, skips the call and reclaims it. Passing a stale handle of an already-called
-flusher is safe in the sense that it cannot invoke anything, but the object may have
-been reused — so clear the handle in the handler, as above, and cancel only handles
-you know are still armed.
+state, skips the call and reclaims it.
+
+**A handle stops being a handle once the flusher has run.** The object goes back to the
+free list and the next `SetFastRingFlushHandler()` may hand it to somebody else, in which
+case its state is `RING_FLUSH_STATE_PENDING` again. The cancellation looks at nothing but
+that state, so it succeeds and quietly cancels the **new** owner's flusher — and returns
+`0` while doing it. Clear the handle in the handler, as above, and cancel only handles you
+know are still armed. Within the ring thread that is a matter of discipline rather than of
+timing, since nobody else can arm or run a flusher meanwhile.
 
 ### Rules
 
-- Flush handlers run in the ring thread; `SetFastRingFlushHandler()` and
-  `RemoveFastRingFlushHandler()` themselves are lock-free and may be called from any
-  thread.
+- **The whole facility belongs to the ring thread**, arming included. Both calls are
+  lock-free and will not corrupt anything if called from elsewhere, but arming from
+  another thread does not wake the ring: nothing is submitted and no event is signalled,
+  so the handler waits for the wait to expire or for an unrelated completion to arrive.
+  Use `ThreadCall` for a call from an arbitrary foreign thread. `SubmitFastRingEvent()`
+  is useful for a cross-ring handoff, but only wakes its target after the source ring has
+  submitted the queued `MSG_RING` SQE. And a handle cannot be owned by a foreign thread
+  at all: the flusher may run and be recycled before that thread has finished storing the
+  pointer, after which every use of it lands on somebody else's flusher. In the ring
+  thread none of this arises, because "has it run yet" is answered by the handler itself
+  clearing the field.
 - Do not block: everything after the flush phase, including the next wait, is stalled.
 - Prefer a flusher over doing work directly in a completion handler when the work
   touches state that other completions in the same batch may also touch.
@@ -346,7 +365,10 @@ Behavior notes:
 - `DestroyFastRingPoll()` removes every registration matching both `function` and
   `closure`. Use it to tear down all descriptors owned by one object.
 - `GetFastRingPollDescriptor()` returns `NULL` if the descriptor was recycled for a
-  different purpose.
+  different purpose. What it does return comes with a reference taken on the caller's
+  behalf, so the pointer stays valid even if the registration is removed a moment later —
+  which is what makes the call usable from another thread at all. Release it with
+  `ReleaseFastRingDescriptor()` when done, or it is a leak.
 - Removal is asynchronous: a cancellation request is submitted and the descriptor is
   freed when it completes.
 
@@ -399,6 +421,27 @@ void (*HandleFastRingTimeoutFunction)(struct FastRingDescriptor* descriptor);
   the stored pointer.
 - `function` and `closure` are only used at creation time.
 
+### Ownership of a timeout descriptor
+
+By default a terminal timeout that was not re-armed is released by its own completion: the
+descriptor is gone by the time the callback returns, and the owner is expected to forget the
+pointer inside that callback — every in-tree user does exactly that. A repeating timeout, and
+one the callback re-arms through `SetFastRingTimeout()`, survive instead, because the new
+operation takes a reference of its own. Nothing may touch such a descriptor from another
+thread either way, since there is no telling from outside whether it still exists.
+
+`TIMEOUT_FLAG_OWNED`, passed at creation, switches the model. The descriptor takes a
+reference on the owner's behalf and therefore outlives its own completion, so the stored
+pointer stays valid: the timeout can be re-armed through it after firing, and it can be
+touched from another thread. In exchange the removal becomes mandatory — a negative or
+`NULL` interval — and a descriptor that is never removed is a leak. Concurrent duplicate
+removals are idempotent and join a running callback; after the first removal has returned,
+however, the pointer is no longer a handle and must not be used again. By the time removal
+returns no callback is running any more — except when it was issued from inside the callback
+itself, which is still on the stack and only returns to the ring afterwards.
+
+The flag lives above the 32 bits the kernel reads and never reaches an SQE.
+
 ## Event API
 
 ```c
@@ -411,6 +454,9 @@ int SubmitFastRingEvent(struct FastRing* ring, struct FastRingDescriptor* event,
 - `SubmitFastRingEvent()` uses `io_uring msg_ring`. `ring` is the source ring (it may
   be a different ring, which is how cross-ring wakeups are done), `event` identifies
   the target, `parameter` is delivered to the target handler as `completion->res`.
+- The call only queues `MSG_RING` on the source. It wakes the target after that SQE is
+  submitted; it does not wake a blocked source ring merely because a foreign thread
+  called it. Use `ThreadCall` for that case.
 - Returns `0`, or `-EINVAL` when the event is `NULL` or a descriptor cannot be
   allocated.
 

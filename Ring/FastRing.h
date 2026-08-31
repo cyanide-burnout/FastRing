@@ -118,7 +118,7 @@ struct FastRingPollData
 struct FastRingWatchData
 {
   int handle;
-  uint32_t mask;
+  ATOMIC(uint32_t) mask;                         // Written by UpdateFastRingWatch() from any thread, read by the completion handler
   uint32_t flags;
   ATOMIC(uint32_t) condition;
   HandleFastRingWatchFunction function;
@@ -320,6 +320,10 @@ int RemoveFastRingPoll(struct FastRing* ring, int handle);
 void DestroyFastRingPoll(struct FastRing* ring, HandleFastRingPollFunction function, void* closure);
 
 int SetFastRingPoll(struct FastRing* ring, int handle, uint64_t flags, HandleFastRingPollFunction function, void* closure);
+
+// Returns the descriptor of a registration with a reference taken on the caller's behalf, so the
+// pointer stays valid no matter what happens to the registration meanwhile. Release it with
+// ReleaseFastRingDescriptor() when done
 struct FastRingDescriptor* GetFastRingPollDescriptor(struct FastRing* ring, int handle);
 
 // Watch
@@ -332,8 +336,17 @@ struct FastRingDescriptor* SetFastRingWatch(struct FastRing* ring, struct FastRi
 
 // Timeout
 
+// Selects the ownership model, and lives above the 32 bits the kernel reads, so it never
+// reaches an SQE. Without it a timeout that has fired is released by its own completion and
+// the owner is expected to forget the descriptor inside the callback -- which is why nothing
+// may touch it from another thread. With it the descriptor carries a reference of the owner's
+// own and outlives the callback, so it stays valid until it is removed with an interval of -1
+// or a NULL one, and that removal becomes mandatory
+
+#define TIMEOUT_FLAG_OWNED   (1ULL << 63)
+
 #ifndef IORING_TIMEOUT_MULTISHOT
-#define TIMEOUT_FLAG_REPEAT  (1ULL << 63)
+#define TIMEOUT_FLAG_REPEAT  (1ULL << 62)
 #else
 #define TIMEOUT_FLAG_REPEAT  IORING_TIMEOUT_MULTISHOT
 #endif
