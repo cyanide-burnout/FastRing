@@ -15,7 +15,7 @@ A descriptor is always in exactly one of the states stored in `descriptor->state
 | --- | --- |
 | `RING_DESC_STATE_FREE` | On the free stack, owned by the ring, must not be touched |
 | `RING_DESC_STATE_ALLOCATED` | Returned by `AllocateFastRingDescriptor()`, owned by the caller, SQE may be filled in |
-| `RING_DESC_STATE_PENDING` | Prepared and queued for submission, SQE may still be patched in place |
+| `RING_DESC_STATE_PENDING` | Prepared: the identifier is valid and the SQE may still be patched in place |
 | `RING_DESC_STATE_LOCKED` | Transient, another party is mutating the descriptor right now |
 | `RING_DESC_STATE_SUBMITTED` | The SQE has been copied into the ring, the kernel owns the request |
 
@@ -27,6 +27,13 @@ PrepareFastRingDescriptor()    ALLOCATED -> PENDING
 WaitForFastRing()              PENDING   -> LOCKED -> SUBMITTED
 completion, refcount reaches 0 SUBMITTED -> FREE
 ```
+
+Being in the submission queue is a separate property, not part of the state.
+`SubmitFastRingDescriptor()` prepares **and** queues; `PrepareFastRingDescriptor()` only
+prepares, and a descriptor left that way stays `PENDING` indefinitely — the submission loop
+never sees it, because it walks the queue and not the states. A FastRing Event receiver is
+exactly that: prepared for the sake of its identifier and never queued, so `PENDING` is
+where it lives for good.
 
 `LOCKED` is never observed by a caller that follows the API: it exists only inside
 the compare-and-swap sequences used to patch a descriptor that may be concurrently
@@ -246,7 +253,7 @@ may enter the kernel through this ring.
 | `SetFastRingFlushHandler()` / `RemoveFastRingFlushHandler()` | Ring thread. The calls are lock-free, but arming from elsewhere does not wake the ring and the handle cannot be owned by another thread |
 | Poll API, Registered File API, Registered Buffer API | Any thread (recursive mutex) |
 | `DiscardFastRingDescriptor()` | Ring thread, or any thread holding a reference of its own |
-| `SubmitFastRingEvent()` | Any thread, including another ring's thread |
+| `SubmitFastRingEvent()` | Source ring thread. It sends `MSG_RING` to the target ring captured by `CreateFastRingEvent()`; a foreign caller can enqueue it but cannot wake the source to submit it |
 
 ```c
 int IsFastRingThread(struct FastRing* ring);
@@ -258,9 +265,14 @@ recorded thread. Use it to decide between a direct call and a `ThreadCall` hop.
 Submitting a descriptor from a foreign thread only enqueues it. The SQE is copied
 into the ring on the next `WaitForFastRing()`. If the ring thread is blocked in
 `io_uring_submit_and_wait_timeout()`, it will not notice the new descriptor until the
-timeout expires. `ThreadCall` supplies a real foreign-thread wakeup. A
-`SubmitFastRingEvent()` queued from that same blocked source ring does not: its
-`MSG_RING` reaches the target only after the source ring submits it.
+timeout expires. `ThreadCall` supplies a real foreign-thread wakeup.
+
+FastRing Event solves a different problem: communication **between two rings**. The
+target loop owns the receiving descriptor returned by `CreateFastRingEvent()`; the source
+loop passes its own ring plus a pointer to that receiver to `SubmitFastRingEvent()`, which
+creates a temporary sending descriptor. Submission on the source wakes the target.
+Queueing the same request from an arbitrary thread cannot wake the source ring that still
+has to submit it.
 
 ## Chained Descriptors
 

@@ -445,18 +445,40 @@ The flag lives above the 32 bits the kernel reads and never reaches an SQE.
 ## Event API
 
 ```c
-struct FastRingDescriptor* CreateFastRingEvent(struct FastRing* ring, HandleFastRingCompletionFunction function, void* closure);
-int SubmitFastRingEvent(struct FastRing* ring, struct FastRingDescriptor* event, uint32_t parameter, int option);
+struct FastRingDescriptor* CreateFastRingEvent(struct FastRing* target, HandleFastRingCompletionFunction function, void* closure);
+int SubmitFastRingEvent(struct FastRing* source, struct FastRingDescriptor* event, uint32_t parameter, int option);
 ```
 
-- `CreateFastRingEvent()` allocates and prepares a descriptor that is never submitted
-  itself; it only serves as the target identifier for `msg_ring`.
-- `SubmitFastRingEvent()` uses `io_uring msg_ring`. `ring` is the source ring (it may
-  be a different ring, which is how cross-ring wakeups are done), `event` identifies
-  the target, `parameter` is delivered to the target handler as `completion->res`.
-- The call only queues `MSG_RING` on the source. It wakes the target after that SQE is
-  submitted; it does not wake a blocked source ring merely because a foreign thread
-  called it. Use `ThreadCall` for that case.
+FastRing Event is **ring-to-ring messaging**. `CreateFastRingEvent(target, ...)` creates
+the receiving descriptor on the target ring. The descriptor is not submitted as an SQE;
+its ring and identifier describe where future `MSG_RING` requests have to deliver their
+CQEs, and its handler therefore runs in the target ring thread.
+
+`SubmitFastRingEvent(source, event, ...)` is called from the sending loop with a pointer
+to that receiving descriptor. It allocates a temporary sending descriptor on the local
+`source` ring, prepares its `IORING_OP_MSG_RING` SQE from the receiving descriptor and
+submits it through the source. The sending descriptor is released by its own completion.
+The kernel posts the message CQE to the target ring, waking it if necessary; `parameter`
+arrives there as `completion->res`, and `option` in the target user data.
+
+The receiving descriptor is not inherently persistent or one-shot. Its handler follows
+the ordinary descriptor contract: return non-zero to keep using the same receiver for
+further messages, or `0` to release it after this message. It may also be released
+explicitly with `ReleaseFastRingDescriptor()` when its owner is done with it.
+
+It stays in `RING_DESC_STATE_PENDING` for its whole life, and deliberately so:
+`PrepareFastRingDescriptor()` hands out an identifier without queueing anything, which is
+exactly what a receiver needs and exactly what that state describes. It is never submitted,
+so it never reaches `RING_DESC_STATE_SUBMITTED` — that one would claim the kernel owns a
+request, and there is no request. `DiscardFastRingDescriptor()` is therefore the wrong way
+to dispose of it: it expects a descriptor that carries an operation, finds none to cancel
+and leaves the last reference behind.
+
+This is not a generic foreign-thread wakeup. Calling `SubmitFastRingEvent()` from an
+arbitrary thread only places `MSG_RING` in the source ring's MPSC submission queue; it
+cannot wake that source ring so that it submits the request. Use `ThreadCall` when the
+caller is not itself operating a source ring.
+
 - Returns `0`, or `-EINVAL` when the event is `NULL` or a descriptor cannot be
   allocated.
 
