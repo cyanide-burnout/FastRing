@@ -89,6 +89,15 @@ To abandon a descriptor whose operation may already be in flight, use the
 `RING_DESC_STATE_PENDING`, `RING_DESC_STATE_LOCKED`, `RING_DESC_STATE_SUBMITTED`.
 Transitions and their meaning are described in `Documentations/Lifecycle.md`.
 
+`descriptor->lock` sits next to it and covers what the state cannot: bit
+`RING_DESC_LOCK_HELD` says that a completion handler is running, and the bits above it
+count writers waiting to claim the state. The two sides use the pair differently. A
+completion takes both words in one 64-bit compare-and-swap, which succeeds only while the
+lock is clear and the state is pending or submitted — a reserving writer is enough to
+keep it out. A writer goes the other way round: it adds itself to the waiter count, sleeps
+on `lock` as a futex until a running handler returns, then claims `state` on its own and
+drops the reservation, since from that point the state is the claim.
+
 ### Submission options
 
 The `option` argument of `PrepareFastRingDescriptor()`, `SubmitFastRingDescriptor()`
@@ -125,9 +134,10 @@ and for chained descriptors completed through `IOSQE_CQE_SKIP_SUCCESS`.
 ### Condition flags
 
 Poll, Watch and Timeout descriptors keep a `condition` word in `descriptor->data`
-carrying `RING_CONDITION_GUARD`, `RING_CONDITION_UPDATE` and `RING_CONDITION_REMOVE`
-(`RING_CONDITION_MASK` covers all three). These are the mechanism that makes it safe
-to update or remove an operation from inside its own callback; see
+carrying `RING_CONDITION_GUARD` and `RING_CONDITION_REMOVE`, which is what makes it safe
+to update or remove an operation from inside its own callback. `RING_CONDITION_UPDATE`
+is used by the Poll API alone, where it marks an operation that ended without being
+re-armed; Watch and Timeout never raise it. `RING_CONDITION_MASK` covers all three. See
 `Documentations/Lifecycle.md`.
 
 ## Flush Handlers
@@ -245,10 +255,12 @@ recycled until io_uring is done with it.
 
 What it does, in this order:
 
-- claims the descriptor state — a CAS for a submission still sitting in the pending
-  queue, a spinlock for one the submission loop has already taken;
+- claims the descriptor — a CAS for a submission still sitting in the pending queue, a
+  wait for one the submission loop has already copied into the ring, and in either case
+  a reservation that keeps a completion handler out until the claim is made;
 - under that claim, clears `function` and `closure`, so no completion reaches the owner
-  any more and the submission loop never observes a half-updated descriptor;
+  any more and neither the submission loop nor a handler observes a half-updated
+  descriptor;
 - then either
   - rewrites the still-queued submission in place as `IORING_OP_NOP`, when it has not
     reached the kernel yet, or
@@ -260,28 +272,35 @@ allocated but never submitted is released outright — no completion will ever a
 do it, and leaving it in `RING_DESC_STATE_ALLOCATED` would lose the slot for good. In
 any other state the call does nothing.
 
-**Call it from the ring thread.** The state is claimed with the same primitives the
-submission loop itself uses, so the call is safe against that loop — but *not* against
-completion handling. `HandleCompletedRingDescriptor()` reads `function`, invokes it and
-may drop the last reference without ever claiming the state, so a CQE processed in
-parallel can recycle the descriptor while this call still holds the pointer. On the ring
-thread that cannot happen, because the same thread is the one reaping completions.
+**Hold a reference if you call it from another thread.** The claim covers both writers a
+descriptor has: the submission loop, which takes the state with the same primitives, and
+a running completion handler, which `HandleCompletedRingDescriptor()` now shuts out
+through the descriptor lock. What the claim cannot cover is the pointer itself — a
+completion that drops the last reference recycles the descriptor and hands it to the next
+owner, and no claim taken afterwards means anything. On the ring thread that cannot
+happen, because the same thread reaps completions; from anywhere else the caller has to
+keep a reference of its own for the whole call.
 
 Even so, the function earns its place: a plain check of `descriptor->state` followed by a
 resubmission is a race against the submission loop, and resubmitting a descriptor that is
 still queued links the pending list onto itself and stalls the ring for good.
 
-Tearing down from another thread needs more than this helper: the caller has to hold a
-reference of its own so the descriptor cannot be recycled, and the owner needs a guard of
-its own so a handler already running does not touch a dying object. That is exactly what
-the `RING_CONDITION_GUARD` / `RING_CONDITION_REMOVE` protocol does for the Poll, Watch and
-Timeout APIs — see `Documentations/Lifecycle.md`.
+Tearing down from another thread needs one thing more than this helper: a reference of
+the caller's own, so the descriptor cannot be recycled mid-call. Shutting out a handler
+that is already running used to be the caller's job as well — that is what the
+`RING_CONDITION_GUARD` / `RING_CONDITION_REMOVE` protocol does for the Poll, Watch and
+Timeout APIs — but the descriptor lock now does it for every descriptor; see
+`Documentations/Lifecycle.md`.
 
-Reference accounting is handled internally. The queued-submission path consumes the
-reference the pending entry already holds; the cancellation path takes one more, which
-the cancellation completion drops, while the original operation completes with
-`-ECANCELED` and drops the last one. Do not call `ReleaseFastRingDescriptor()` on a
-discarded descriptor.
+Reference accounting inside the call is handled internally. The queued-submission path
+consumes the reference the pending entry already holds; the cancellation path takes one
+more, which the cancellation completion drops, while the original operation completes
+with `-ECANCELED` and drops the last one. Do not add a `ReleaseFastRingDescriptor()` for
+any of those.
+
+A reference the **caller** took to keep the descriptor alive across the call — the one a
+foreign thread has to hold, see above — is not among them and stays the caller's to drop.
+Release it right after the call returns.
 
 The function expects a descriptor carrying a **single** operation. If a queued
 submission is not the descriptor's own operation but an update prepared for an earlier

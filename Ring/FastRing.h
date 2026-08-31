@@ -64,6 +64,13 @@ struct FastRingBufferProvider;
 #define RING_DESC_STATE_LOCKED     3
 #define RING_DESC_STATE_SUBMITTED  4
 
+// Bit 0 tells that a completion handler is running, the rest is a count of waiters.
+// Unlike state, which is a position in the submission pipeline, this one excludes the
+// completion path -- the only writer state does not cover. Take it before state
+
+#define RING_DESC_LOCK_HELD        1
+#define RING_DESC_LOCK_WAITER      2
+
 #define RING_DESC_ALIGNMENT        512
 #define RING_DESC_INTEGRITY_MASK   0x0fff00000000003fULL
 
@@ -103,7 +110,7 @@ typedef void (*HandleFastRingTimeoutFunction)(struct FastRingDescriptor* descrip
 struct FastRingPollData
 {
   int handle;
-  uint64_t flags;
+  ATOMIC(uint64_t) flags;
   ATOMIC(uint32_t) condition;
   HandleFastRingPollFunction function;
 };
@@ -149,10 +156,10 @@ struct FastRingDescriptor
 {
   struct FastRing* ring;                         // (  8) Related ring
   ATOMIC(uint32_t) state;                        // ( 12) RING_DESC_STATE_*
+  ATOMIC(uint32_t) lock;                         // ( 16) RING_DESC_LOCK_*, futex word
 
-  uint32_t length;                               // ( 16) Length of submission
-  uint32_t linked;                               // ( 20) Count of following linked descriptors in chain (when check is required)
-  uint32_t alignment;                            // ( 24)
+  uint32_t length;                               // ( 20) Length of submission
+  uint32_t linked;                               // ( 24) Count of following linked descriptors in chain (when check is required)
   uint64_t identifier;                           // ( 32) Prepared entry identifier (for SQEs and CQEs)
   ATOMIC(uint32_t) tag;                          // ( 36) Lock-free stack tag (see FastRing's available)
   ATOMIC(uint32_t) references;                   // ( 40) Count of references (SQEs, files, etc.)
@@ -267,14 +274,19 @@ void ReleaseFastRing(struct FastRing* ring);
 // Discard
 
 // Detaches a descriptor from its owner during teardown: the handler is dropped and the operation
-// is either cancelled or, when its submission has not reached the kernel yet, rewritten in place.
-// The state is claimed first -- a CAS for a submission still queued, a spinlock for one already
-// taken by the kernel -- and the handler is detached under that claim, so the submission loop
-// never observes a half-updated descriptor. A descriptor that was allocated but never submitted
-// carries nothing to cancel and is released outright, as no completion will ever arrive to do it.
-// Completion handling does not claim the state at all, hence the call has to be made from the ring
-// thread. Expects a descriptor carrying a single operation, and the remaining reference is dropped
-// by the completion
+// is either cancelled or, when its submission has not reached the ring yet, rewritten in place.
+// The state is claimed first -- a CAS for a submission still queued, a wait for one the submission
+// loop has already copied into the ring -- and the handler is detached under that claim, so neither
+// the submission loop nor a running completion handler observes a half-updated descriptor. A
+// descriptor that was allocated but never submitted carries nothing to cancel and is released
+// outright, as no completion will ever arrive to do it. Expects a descriptor carrying a single
+// operation, and the remaining reference is dropped by the completion.
+// Callable from any thread, but only while the descriptor is kept alive by a reference the caller
+// owns and took while the descriptor was still known to be alive -- taking the first one through a
+// pointer that may have gone stale is no better than using it. Nothing here stops a completion from
+// recycling a descriptor nobody holds. That reference is not one of those accounted here and has to
+// be dropped by the caller once the call returns. Owners that do not hold such a reference have to
+// call this from the ring thread
 void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor);
 
 // Poll

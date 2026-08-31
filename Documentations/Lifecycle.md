@@ -119,7 +119,7 @@ The mechanism is the `condition` word carried in the descriptor's `data` union:
 | Condition | Meaning |
 | --- | --- |
 | `RING_CONDITION_GUARD` | Set while the user callback is running |
-| `RING_CONDITION_UPDATE` | A re-arm was requested while the callback was running and must be performed after it returns |
+| `RING_CONDITION_UPDATE` | Poll only: the operation ended without being re-armed, so nothing of it is left in the kernel |
 | `RING_CONDITION_REMOVE` | Removal was requested; no further user callbacks will be issued |
 
 Consequences a module author has to rely on:
@@ -128,20 +128,27 @@ Consequences a module author has to rely on:
   `RemoveFastRingWatch()` and `SetFastRingTimeout(..., -1, ...)` set
   `RING_CONDITION_REMOVE`. The handler observes it after the callback returns and
   suppresses the re-arm, so the operation is not resurrected.
-- **Update from inside the callback does not double-arm.** With
-  `RING_CONDITION_GUARD` set and no `IORING_CQE_F_MORE`, the update path returns
-  without submitting anything: the handler is about to re-arm the request itself and
-  picks up the new mask or interval from the descriptor.
+- **Update from inside the callback does not double-arm.** The update path claims the
+  descriptor and submits the new request itself, which leaves the state no longer
+  submitted; the handler checks that on its way out and gives the descriptor up instead
+  of re-arming it. Leaving the work to the handler instead would lose the update
+  whenever the completion carries `POLLERR` or `POLLHUP`, since it ends the operation
+  in that case rather than arming it again.
 - **After remove, no callback is delivered.** A CQE that arrives for an already
   removed operation is consumed without calling the user function.
 - **Remove is asynchronous.** The owner reference is dropped immediately, but the
-  descriptor stays alive until the cancellation CQE arrives. Do not free the closure
-  in the same statement as the remove call unless the closure is owned elsewhere.
+  descriptor stays alive until the cancellation CQE arrives. The closure outlives the
+  call by less than that: once the removal returns, no callback will be delivered and
+  none is running any more, because a claim made off the ring thread waits a running
+  handler out. The one exception is a removal issued from inside the callback itself,
+  where that handler is still on the stack and still using the closure.
 
 `RemoveFastRingWatch()` and the timeout removal path spin over `LockPendingRingDescriptor()`
-/ `LockSubmittedRingDescriptor()` until one of them succeeds. They must therefore not be
-called from a thread that can be preempted by the ring thread indefinitely — in practice,
-call them from the ring thread or from a thread that does not hold the ring thread back.
+/ `LockSubmittedRingDescriptor()` until one of them succeeds. Off the ring thread each claim
+first reserves the descriptor and sleeps on a futex until a running handler returns, so the
+spinning is over states held by other writers only, and those are released without waiting
+for anything. On the ring thread the reservation is skipped: handlers run there alone, and
+waiting would mean waiting for the caller itself.
 
 ### Abandoning a raw descriptor
 
@@ -165,16 +172,19 @@ Doing it by hand is a trap, twice over:
 `DiscardFastRingDescriptor()` claims the state with the same primitives the submission
 loop uses, and detaches the handler only after that claim, so neither hazard applies.
 
-**Call it from the ring thread.** The claim excludes the submission loop, not completion
-handling: `HandleCompletedRingDescriptor()` reads `function`, calls it and may drop the
-last reference without ever claiming the state, so a CQE reaped in parallel could recycle
-the descriptor under the call. On the ring thread the two cannot overlap, because the
-same thread is the one reaping completions.
+**Hold a reference when calling it from another thread.** The claim covers both writers:
+the submission loop, and a completion handler, which `HandleCompletedRingDescriptor()`
+shuts out through the descriptor lock. It does not and cannot cover the pointer — a
+completion that drops the last reference returns the descriptor to the pool and hands it
+to the next owner, and a claim taken after that means nothing. On the ring thread the two
+cannot overlap, because the same thread reaps completions.
 
 A raw descriptor owned by a module therefore has the same teardown rule as the built-in
-APIs: abandon it from the ring thread. Doing it from another thread requires the owner to
-hold its own reference and to carry its own guard, the way `RING_CONDITION_GUARD` and
-`RING_CONDITION_REMOVE` work above — the helper alone is not enough.
+APIs: abandon it from the ring thread, or keep a reference of the owner's own for the
+duration of the call and drop it right after the call returns — the helper accounts for
+the references the operation itself carries, not for that one. A guard of its own, the way `RING_CONDITION_GUARD` and
+`RING_CONDITION_REMOVE` work above, is no longer needed for this — the descriptor lock
+covers every descriptor, not only those of the built-in APIs.
 
 ## Thread Model
 
@@ -190,6 +200,7 @@ may enter the kernel through this ring.
 | `AllocateFastRingDescriptor()`, `PrepareFastRingDescriptor()`, `SubmitFastRingDescriptor()` | Any thread (lock-free MPSC queue) |
 | `SetFastRingFlushHandler()` / `RemoveFastRingFlushHandler()` | Any thread (lock-free stack) |
 | Poll API, Registered File API, Registered Buffer API | Any thread (recursive mutex) |
+| `DiscardFastRingDescriptor()` | Ring thread, or any thread holding a reference of its own |
 | `SubmitFastRingEvent()` | Any thread, including another ring's thread |
 
 ```c
