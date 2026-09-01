@@ -8,8 +8,12 @@ asks for; each HTTP request is a `struct FetchTransmission` wrapping one `CURL` 
 handle. There is no thread and no blocking call anywhere — sockets are polled with
 `IORING_OP_POLL_ADD` and libcurl's timer becomes a FastRing timeout.
 
-`Fetch` is also the transport under [CURLWSCore.md](CURLWSCore.md) (WebSocket) and
-[gRPCClient.md](gRPCClient.md).
+That makes it useful for plain requests, but plain requests are not the point of the
+module. `Fetch` is a **multiplexer for protocols built on libcurl**: a place where an
+arbitrary number of sessions of different kinds share one multi handle, one set of ring
+descriptors and one connection pool. Two such protocols ship with the project —
+[CURLWSCore.md](CURLWSCore.md) for WebSocket and [gRPCClient.md](gRPCClient.md) for gRPC
+— and the list is extended by external modules **without changing this API**.
 
 A complete, runnable program covering every completion path is in
 [Examples/Fetch](../Examples/Fetch/FetchTest.c).
@@ -18,6 +22,8 @@ A complete, runnable program covering every completion path is in
 
 ```text
 FastRing  ->  Fetch (libcurl multi)  ->  application
+                                    ->  CURLWSCore  ->  application
+                                    ->  gRPCClient  ->  application
 ```
 
 `CURLMOPT_SOCKETFUNCTION` allocates one FastRing descriptor per libcurl socket and
@@ -43,9 +49,13 @@ before it, as with any libcurl program.
 
 The multi handle is created with `CURLMOPT_PIPELINING` set to
 `CURLPIPE_HTTP1 | CURLPIPE_MULTIPLEX`, so HTTP/2 requests to the same origin share a
-connection. The share handle carries `CURL_LOCK_DATA_COOKIE` and `CURL_LOCK_DATA_HSTS`:
-**cookies and HSTS state are shared by every transmission of one `Fetch`**. Separate
-cookie jars mean separate `Fetch` instances.
+connection. The share handle carries `CURL_LOCK_DATA_COOKIE` and `CURL_LOCK_DATA_HSTS`,
+which provides common storage for that state — but **neither engine is switched on by
+`Fetch`**: libcurl keeps cookies off until `CURLOPT_COOKIEFILE` is set, and HSTS off
+until `CURLOPT_HSTS` or `CURLOPT_HSTS_CTRL` is. **Switching them on stays a property of
+each easy handle**, which an application does per transmission; the share only makes the
+storage common to those handles that did switch them on. A jar is therefore per `Fetch`
+instance rather than per request, and separate jars mean separate instances.
 
 `ReleaseFetch()` disarms the timer and the flush handler, then walks every easy handle
 still registered and completes it with `FETCH_STATUS_INCOMPLETE` before destroying the
@@ -181,6 +191,50 @@ curl_slist_free_all(transport->list);
 curl_url_cleanup(transport->location);
 ReleaseFetch(transport->fetch);
 ```
+
+## Hosting a Protocol Module
+
+A protocol on top of libcurl needs the same things every time: a session object with its
+own state, its own libcurl callbacks, and a completion path. `Fetch` provides the last of
+those and stays out of the way of the first two, which is what makes it a host rather
+than an HTTP helper. Adding a protocol requires **no change to this module** — both
+`CURLWSCore` and `gRPCClient` are written entirely against the API above.
+
+The two mechanisms that make it work were introduced for exactly this purpose:
+
+- **A caller-supplied `transmission`.** A module declares
+  `struct FetchTransmission super;` as the first member of its own session structure,
+  allocates one block, and hands the inner transmission to
+  `MakeExtendedFetchTransmission()`. One allocation, one lifetime, and a cast in either
+  direction. `CURLWSCore` does this with `struct CWSTransmission`, `gRPCClient` with
+  `struct GRPCTransmission` — and `gRPCClient` nests once more, putting
+  `GRPCTransmission` first in `struct GRPCCall`.
+- **`FETCH_OPTION_SET_HANDLER_DATA`.** `CURLOPT_READDATA`, `CURLOPT_WRITEDATA` and
+  `CURLOPT_HEADERDATA` are pointed at that object, so the module installs its own
+  `CURLOPT_WRITEFUNCTION`, `CURLOPT_HEADERFUNCTION` and `CURLOPT_READFUNCTION` and
+  receives its session pointer directly. `Fetch` touches neither the protocol framing
+  nor the payload.
+
+What a module gets for free: one multi handle and one connection pool shared with every
+other session, HTTP/2 multiplexing, a share handle that pools cookie and HSTS state once
+an application enables those engines, socket polling and timers on the ring, and
+cancellation and shutdown semantics that are the same for every protocol. A transfer that
+ends on its own is reaped from the flush handler, so its completion runs in the ring
+thread after CQ processing; `CancelFetchTransmission()` and `ReleaseFetch()` call the
+handler in place instead.
+
+What a module owes in return:
+
+- allocate its session object from the `malloc()` family, since `Fetch` frees it;
+- leave the [reserved options](#options-reserved-by-fetch) alone, `CURLOPT_PRIVATE`
+  above all;
+- do its teardown in the completion handler, which is the last call it will receive;
+- **never destroy the easy handle from inside one of its own libcurl callbacks.** A
+  handler that cancels its own session while libcurl is calling it has to defer that
+  cancellation. `CURLWSCore` delivers received frames from a ring flush handler and can
+  cancel in place; `gRPCClient` dispatches frames from the write callback and therefore
+  marks the request, aborts the transfer, and lets the completion path release
+  everything. A new module has to pick one of those two shapes deliberately.
 
 ## Completion Handler
 

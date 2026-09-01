@@ -30,7 +30,8 @@ API and integration notes for the modules under `Ring/` and `Supplimentary/`.
 
 ## HTTP, WebSocket and DNS
 
-- [Fetch.md](Fetch.md) — asynchronous wrapper over the libcurl multi interface
+- [Fetch.md](Fetch.md) — the libcurl multi interface on the ring, and a multiplexer hosting
+  protocol modules built on top of it
 - [CURLWSCore.md](CURLWSCore.md) — WebSocket client on top of `Fetch` (recommended)
 - [LWSCore.md](LWSCore.md) — legacy `libwebsockets` adapter (deprecated)
 - [Resolver.md](Resolver.md) — c-ares DNS channel driven by the ring

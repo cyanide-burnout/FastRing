@@ -121,7 +121,7 @@ what it needs.
 - [`FastSemaphore`](Documentations/FastSemaphore.md) - reactive `sem_t` integration (glibc internals + io_uring futex ops)
 - [`FastGLoop`](Documentations/FastGLoop.md) - `GLib` loop integration
 - [`FastUVLoop`](Documentations/FastUVLoop.md) - `libuv` loop integration
-- [`Fetch`](Documentations/Fetch.md) - asynchronous wrapper over `libcurl` multi interface
+- [`Fetch`](Documentations/Fetch.md) - `libcurl` multi interface on the ring, and a host for protocols built on it
 - [`CURLWSCore`](Documentations/CURLWSCore.md) - recommended WebSocket client adapter
 - [`LWSCore`](Documentations/LWSCore.md) - deprecated WebSocket adapter (kept for compatibility)
 - [`FastAvahiPoll`](Documentations/FastAvahiPoll.md) - Avahi poll adapter for FastRing
