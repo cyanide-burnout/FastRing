@@ -94,11 +94,9 @@ static void HandleFetchEvent(struct FetchTransmission* super, CURL* easy, int co
     free(message);
   }
 
-  if (transmission->state != CWS_STATE_REJECTED)
-  {
-    // Handler may reject reception
-    transmission->function(transmission->closure, transmission, CWS_REASON_CLOSED, code, data, length);
-  }
+  // A rejection stops reception, but the closing notification is delivered in any case:
+  // it is the point where an application is expected to drop its pointer
+  transmission->function(transmission->closure, transmission, CWS_REASON_CLOSED, code, data, length);
 
   while (message = transmission->outbound.head)
   {
@@ -319,7 +317,15 @@ struct CWSTransmission* MakeExtendedCWSTransmission(struct Fetch* fetch, CURL* e
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, HandleSocketWrite);
     curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, HandleSocketHeader);
 
-    return (struct CWSTransmission*)MakeExtendedFetchTransmission(fetch, &transmission->super, easy, FETCH_OPTION_SET_HANDLER_DATA, HandleFetchEvent, NULL, NULL);
+    if (MakeExtendedFetchTransmission(fetch, &transmission->super, easy, FETCH_OPTION_SET_HANDLER_DATA, HandleFetchEvent, NULL, NULL) != NULL)
+    {
+      //
+      return transmission;
+    }
+
+    // The easy handle has been released by MakeExtendedFetchTransmission() already
+    free(transmission);
+    return NULL;
   }
 
   curl_easy_cleanup(easy);
@@ -388,10 +394,11 @@ struct CWSMessage* AllocateCWSMessage(struct CWSTransmission* transmission, size
 
     if (size <= message->size)
     {
-      message->next   = NULL;
-      message->type   = type;
-      message->data   = message->buffer;
-      message->length = length;
+      message->next           = NULL;
+      message->type           = type;
+      message->data           = message->buffer;
+      message->length         = length;
+      message->buffer[length] = '\0';
       return message;
     }
 
@@ -400,12 +407,14 @@ struct CWSMessage* AllocateCWSMessage(struct CWSTransmission* transmission, size
 
   if (message = (struct CWSMessage*)malloc(size))
   {
-    message->transmission = transmission;
-    message->size         = size;
-    message->next         = NULL;
-    message->type         = type;
-    message->data         = message->buffer;
-    message->length       = length;
+    message->transmission   = transmission;
+    message->size           = size;
+    message->next           = NULL;
+    message->type           = type;
+    message->data           = message->buffer;
+    message->length         = length;
+    // The spare byte keeps a received payload usable as a string
+    message->buffer[length] = '\0';
   }
 
   return message;

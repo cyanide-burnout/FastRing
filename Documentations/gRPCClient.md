@@ -166,20 +166,24 @@ typedef void (*HandleGRPCErrorFunction)(void* closure, struct GRPCService* servi
                                         const char* method, int status, const char* message);
 ```
 
-Two channels, and a failing call uses both exactly once:
+Two channels, each with its own rule:
 
-- the reply closure is invoked with a `NULL` message, so a caller that only checks the
-  reply still notices;
-- `function`, when supplied, is called with the method name, the status and the message.
+- the reply closure runs **exactly once** per call — with the response message if one
+  arrived, otherwise with `NULL` at status time, so a caller that only watches the reply
+  still notices a failure;
+- `function`, when supplied, runs when the status is not `GRPC_STATUS_OK`, **and** when no
+  response message was delivered at all, even if the status was OK. protobuf-c allows the
+  closure to run once, so a missing reply cannot be signalled any other way.
+
+The two are therefore not a pair. A call that fails **after** its reply was delivered is
+reported through the error handler alone — the closure has already run, with the real
+message. A call that fails without a reply is reported through both. A call that succeeds
+and delivers a reply uses neither.
 
 `status` follows the same convention as the transport layer: a gRPC status when the call
 reached gRPC level, otherwise a negative Fetch completion code. `method` is the name from
 the method descriptor, and it is set before the first frame is queued, so it is present
 even when the call fails on its way out.
-
-A call that ends with `GRPC_STATUS_OK` but **never delivered a response message** is also
-reported through the error handler, not only through the closure — protobuf-c's contract
-allows the closure to run once, so a missing reply cannot be signalled any other way.
 
 ## Rules
 

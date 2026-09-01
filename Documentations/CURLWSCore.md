@@ -85,15 +85,21 @@ typedef int (*HandleCWSEventFunction)(
 | `CWS_REASON_CLOSED` | Completion code from `Fetch` | Error text when the transport failed, otherwise empty |
 
 Return `0` to continue. **A negative return rejects the session**: the state becomes
-`CWS_STATE_REJECTED` and the transmission is cancelled. On `CWS_REASON_CLOSED` the
-return value is ignored.
+`CWS_STATE_REJECTED` and the transmission is cancelled. Reception stops there — no
+further `CWS_REASON_CONNECTED` or `CWS_REASON_RECEIVED` is delivered — but
+`CWS_REASON_CLOSED` still follows, with `FETCH_STATUS_CANCELLED` in `parameter`, so a
+rejection ends like any other close. On `CWS_REASON_CLOSED` the return value is
+ignored.
 
 `parameter` on `CWS_REASON_CLOSED` follows the `Fetch` convention exactly — a
 non-negative value is the HTTP response code, a negative one is either `-CURLcode` or
 `FETCH_STATUS_CANCELLED` / `FETCH_STATUS_INCOMPLETE`. See [Fetch.md](Fetch.md).
 
 `data` points into a message buffer owned by the transmission and is only valid for
-the duration of the call. Copy anything that must outlive it.
+the duration of the call. Copy anything that must outlive it. It carries a terminating
+zero byte past `length` — the spare byte of the allocation — so a text frame can be
+handed straight to the string functions, as with the accumulated body of
+[Fetch.md](Fetch.md).
 
 ### Delivery is deferred
 
@@ -105,12 +111,18 @@ the next pass, not recursively.
 
 ### Frame reassembly
 
-Fragmented frames are reassembled internally using libcurl's `curl_ws_meta()`
-`offset` / `bytesleft`, so the handler always sees whole messages. Two reassembly
-slots are kept in parallel — one for data frames, one for control frames
-(`PING` / `PONG` / `CLOSE`) — so a control frame interleaved into a fragmented data
-message does not corrupt it. A frame arriving out of order relative to its offset
-aborts the transfer.
+A frame that libcurl delivers across several write callbacks is reassembled internally
+using `curl_ws_meta()` `offset` / `bytesleft`, so the handler sees one whole frame.
+Two reassembly slots are kept in parallel — one for data frames, one for control
+frames (`PING` / `PONG` / `CLOSE`) — so a control frame interleaved into a partially
+delivered data frame does not corrupt it. A frame arriving out of order relative to
+its offset aborts the transfer.
+
+**Continuation frames are not merged.** Reassembly works at frame level, and the slot
+is chosen by control-versus-data only, so a message fragmented at protocol level
+arrives as several `CWS_REASON_RECEIVED` events, the later ones carrying `CURLWS_CONT`
+in `parameter`. An application that has to deal with a peer fragmenting its messages
+joins them itself.
 
 ## Sending
 
@@ -151,12 +163,22 @@ if (message = AllocateCWSMessage(transmission, sizeof(struct PeakSetupData), CUR
 | Field | Role |
 | --- | --- |
 | `buffer` | Payload storage, `length` bytes plus one spare byte |
-| `data` | Send cursor, preset to `buffer`; also the close marker when set to `NULL` |
+| `data` | Send cursor, preset to `buffer` — usable as the fill pointer; also the close marker when set to `NULL` |
 | `length` | Number of bytes to send; **assign it if you wrote fewer than allocated** |
 | `type` | libcurl frame type: `CURLWS_TEXT`, `CURLWS_BINARY`, `CURLWS_PING`, `CURLWS_PONG`, `CURLWS_CONT` |
 | `size` | Allocation size, managed by the module |
 
-Do not touch `data` or `size` other than for the close marker below.
+Never **assign** to `data` other than the close marker below, and leave `size` alone
+entirely — both belong to the module once the message is queued, `data` being the cursor
+it advances across partial writes.
+
+Reading `data` before transmitting is a different matter: until then it equals `buffer`,
+so filling a message through it is equivalent, and much of the code written against this
+module does exactly that:
+
+```c
+struct PeakSetupData* payload = (struct PeakSetupData*)message->data;
+```
 
 ### What happens after TransmitCWSMessage()
 
