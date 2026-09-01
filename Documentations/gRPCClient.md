@@ -37,6 +37,11 @@ A `GRPCMethod` is the prepared, reusable description of one RPC endpoint:
 - The object is reference counted (`count` starts at `1`). One method can back many
   concurrent transmissions; `HoldGRPCMethod()` / `ReleaseGRPCMethod()` manage that.
 
+`MakeGRPCTransmission()` **does not take a reference of its own.** The method carries the
+`CURLU` handle and the header list that libcurl uses without copying, so it has to stay
+alive until every transmission made from it has completed — take a reference with
+`HoldGRPCMethod()` if the method could otherwise be released first.
+
 ## Transport Layer
 
 ```c
@@ -87,6 +92,12 @@ queues it, and when `final` is non-zero also queues the end-of-stream marker. It
 returns the number of frames queued — `2` for a final message, `1` for a non-final
 one, `0` if nothing could be allocated.
 
+A message with **no field set is still framed.** It packs into zero bytes, which is a
+valid gRPC message, and goes out as a bare five-byte frame header declaring a length of
+zero — so a request type like `google.protobuf.Empty`, or a proto3 message whose only
+field is left at its default, behaves like any other. A return value below the expected
+count therefore means an allocation failure, never an empty payload.
+
 ```c
 TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 0);   // one more to come
 TransmitGRPCMessage(transmission, (ProtobufCMessage*)&request, 1);   // last, closes the stream
@@ -98,6 +109,12 @@ transmit. Setting `frame->data = NULL` before `TransmitGRPCFrame()` makes the en
 **end-of-stream marker** rather than a payload — that is exactly what `final` does.
 `TransmitGRPCFrame()` takes ownership; frames are recycled through a per-transmission
 free list.
+
+Sending is driven by libcurl's read callback, which parks itself with
+`CURL_READFUNC_PAUSE` whenever the queue runs dry. `TransmitGRPCFrame()` un-pauses it —
+but only when it enqueues into an empty queue, since a non-empty queue means the sender
+is already running. There is no "frame has been sent" event and the queue is unbounded,
+so an application that can outrun its link has to account for that itself.
 
 ## ProtobufC Service Wrapper
 
@@ -126,16 +143,43 @@ time each is called.
 own contract, so the wrapper delivers the first response message and ignores the rest
 of a server stream. Use the transport layer for anything streaming.
 
-Error reporting has two channels:
+### Lifetime of a service
+
+The service is reference counted, and **every call in flight holds a reference.**
+`protobuf_c_service_destroy()` therefore releases the caller's reference rather than
+freeing immediately: a service destroyed while calls are outstanding stays alive until
+the last of them has reported its status. Each call takes its reference before it is
+armed and releases it from the completion path, so cancelling or failing a call is
+balanced exactly like a call that succeeds.
+
+So a service can be destroyed without draining its calls first:
+
+```c
+protobuf_c_service_destroy(service);   // returns while calls may still be running
+ReleaseFetch(fetch);                   // completes them with FETCH_STATUS_INCOMPLETE
+```
+
+### Error reporting
 
 ```c
 typedef void (*HandleGRPCErrorFunction)(void* closure, struct GRPCService* service,
                                         const char* method, int status, const char* message);
 ```
 
+Two channels, and a failing call uses both exactly once:
+
 - the reply closure is invoked with a `NULL` message, so a caller that only checks the
   reply still notices;
-- `function`, when supplied, is called with the method name, status and message.
+- `function`, when supplied, is called with the method name, the status and the message.
+
+`status` follows the same convention as the transport layer: a gRPC status when the call
+reached gRPC level, otherwise a negative Fetch completion code. `method` is the name from
+the method descriptor, and it is set before the first frame is queued, so it is present
+even when the call fails on its way out.
+
+A call that ends with `GRPC_STATUS_OK` but **never delivered a response message** is also
+reported through the error handler, not only through the closure — protobuf-c's contract
+allows the closure to run once, so a missing reply cannot be signalled any other way.
 
 ## Rules
 
@@ -144,3 +188,6 @@ typedef void (*HandleGRPCErrorFunction)(void* closure, struct GRPCService* servi
 - Release methods (`ReleaseGRPCMethod()`) and destroy services
   (`protobuf_c_service_destroy()`) before releasing the `Fetch` instance; a `Fetch`
   torn down under live calls completes them with `FETCH_STATUS_INCOMPLETE`.
+- A method has to outlive the transmissions made from it, since libcurl reads its URL
+  handle and header list directly. A service, by contrast, outlives its own calls on
+  its own.

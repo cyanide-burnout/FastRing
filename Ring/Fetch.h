@@ -13,8 +13,6 @@ extern "C"
 struct Fetch;
 struct FetchTransmission;
 
-#define FETCH_STORAGE_SIZE  128
-
 #define FETCH_OPTION_HANDLE_CONTENT    (1 << 0)
 #define FETCH_OPTION_SET_HANDLER_DATA  (1 << 1)
 
@@ -66,6 +64,12 @@ void TouchFetchTransmission(struct FetchTransmission* transmission);
 int AppendFetchParameter(CURLU* location, int size, const char* format, ...);
 struct curl_slist* AppendFetchList(struct curl_slist* list, int size, const char* format, ...);
 struct curl_slist* MakeFetchConnectAddress(const struct sockaddr* address);
+
+int HandleFetchDebug(CURL* easy, curl_infotype type, char* data, size_t size, void* closure);
+
+// curl_easy_setopt(easy, CURLOPT_VERBOSE, 1L);
+// curl_easy_setopt(easy, CURLOPT_DEBUGDATA, syslog);
+// curl_easy_setopt(easy, CURLOPT_DEBUGFUNCTION, HandleFetchDebug);
 
 #ifdef __cplusplus
 }

@@ -458,13 +458,16 @@ int TransmitGRPCMessage(struct GRPCTransmission* transmission, const ProtobufCMe
 
   result = 0;
 
-  if ((message != NULL) &&
-      (length   = protobuf_c_message_get_packed_size(message)) &&
-      (frame    = AllocateGRPCFrame(transmission, length)))
+  if (message != NULL)
   {
-    frame->length = protobuf_c_message_pack(message, frame->data);
-    TransmitGRPCFrame(frame);
-    result ++;
+    length = protobuf_c_message_get_packed_size(message);
+
+    if (frame = AllocateGRPCFrame(transmission, length))
+    {
+      frame->length = protobuf_c_message_pack(message, frame->data);
+      TransmitGRPCFrame(frame);
+      result ++;
+    }
   }
 
   if ((final != 0) &&
@@ -492,7 +495,7 @@ static int HandleCall(void* closure, struct GRPCTransmission* transmission, int 
   switch (reason)
   {
     case GRPCCLIENT_REASON_FRAME:
-      if ((call->function != NULL) && 
+      if ((call->function != NULL) &&
           (message         = protobuf_c_message_unpack(call->descriptor, NULL, length, (uint8_t*)data)))
       {
         // Due to semantics of ProtobufCMethodDescriptor::closure() it could be call only once
@@ -556,34 +559,42 @@ static void InvokeService(ProtobufCService* service, unsigned index, const Proto
     }
   }
 
+  // The call owns a reference from here on, and HandleCall() is the only place that
+  // releases it - including when CancelGRPCTransmission() below reports a failure in place
+  private->count ++;
+
   transmission = MakeGRPCTransmission(private->fetch, method, HandleCall, private);
 
-  if ((transmission == NULL) ||
-      (TransmitGRPCMessage(transmission, input, 1) != 2))
+  if (transmission != NULL)
   {
-    CancelGRPCTransmission(transmission);
+    call             = (struct GRPCCall*)transmission;
+    call->method     = descriptor2->name;
+    call->descriptor = descriptor2->output;
+    call->function   = closure;
+    call->closure    = data;
 
-    if (closure != NULL)
+    if (TransmitGRPCMessage(transmission, input, 1) != 2)
     {
-      // Call handler has to be notified about error
-      closure(NULL, data);
-    }
-
-    if (private->function != NULL)
-    {
-      // Error handler can observe an detailed error state
-      private->function(private->closure, private, descriptor2->name, -CURLE_OUT_OF_MEMORY, NULL);
+      // HandleCall() notifies both handlers and releases the reference
+      CancelGRPCTransmission(transmission);
     }
 
     return;
   }
 
-  call              = (struct GRPCCall*)transmission;
-  call->method      = descriptor2->name;
-  call->descriptor  = descriptor2->output;
-  call->function    = closure;
-  call->closure     = data;
-  private->count   ++;
+  if (closure != NULL)
+  {
+    // Call handler has to be notified about error
+    closure(NULL, data);
+  }
+
+  if (private->function != NULL)
+  {
+    // Error handler can observe an detailed error state
+    private->function(private->closure, private, descriptor2->name, -CURLE_OUT_OF_MEMORY, NULL);
+  }
+
+  private->super.destroy(&private->super);
 }
 
 static void DestroyService(ProtobufCService* service)

@@ -366,6 +366,8 @@ struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, str
       ((transmission != NULL) ||
        (transmission  = (struct FetchTransmission*)calloc(1, sizeof(struct FetchTransmission)))))
   {
+    // A transmission provided by an application is only required to be an allocation,
+    // so the accumulation buffer has to be initialized here as well
     transmission->fetch      = fetch;
     transmission->easy       = easy;
     transmission->state      = FETCH_STATUS_INCOMPLETE;
@@ -374,6 +376,9 @@ struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, str
     transmission->function   = function;
     transmission->parameter1 = parameter1;
     transmission->parameter2 = parameter2;
+    transmission->buffer     = NULL;
+    transmission->length     = 0;
+    transmission->capacity   = 0;
 
     curl_easy_setopt(easy, CURLOPT_SHARE, fetch->share);
     curl_easy_setopt(easy, CURLOPT_PRIVATE, transmission);

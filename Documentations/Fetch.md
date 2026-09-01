@@ -137,9 +137,13 @@ extended transmission gets exactly the options the caller set, plus the ones bel
 
 Pass `transmission` as `NULL` to have the object allocated. A non-`NULL` value lets the
 object be embedded in a larger structure — that is how `CURLWSCore` puts
-`struct FetchTransmission` first in `struct CWSTransmission`. Such an object must be
-**zero-initialized and allocated from the `malloc()` family**: `Fetch` does not clear
-`buffer`, `length` and `capacity`, and releases the object with `free()`.
+`struct FetchTransmission` first in `struct CWSTransmission`. This is the deliberate
+division of labour: a module layered on `Fetch` allocates one block for its own
+structure with the transmission inside it, rather than the transmission carrying
+storage on the module's behalf. Such an object must come
+**from the `malloc()` family**, since `Fetch` releases it with `free()`. Its
+`FetchTransmission` part does not have to be pre-cleared — the constructor initializes
+every field, the accumulation buffer included.
 
 ### Options reserved by Fetch
 
@@ -260,8 +264,6 @@ There is no incremental or streaming delivery: the handler sees the whole body a
 or nothing. For a response too large to hold in memory, use
 `FETCH_OPTION_SET_HANDLER_DATA` and install `CURLOPT_WRITEFUNCTION` yourself.
 
-`FETCH_STORAGE_SIZE` in the header is unused legacy.
-
 ## Cancelling and Nudging
 
 ```c
@@ -357,16 +359,15 @@ The list is the caller's to free, after the transmission has completed.
 
 ## Tracing
 
-`Fetch.c` also exports a ready-made `CURLOPT_DEBUGFUNCTION`:
+`Fetch` also provides a ready-made `CURLOPT_DEBUGFUNCTION`:
 
 ```c
 int HandleFetchDebug(CURL* easy, curl_infotype type, char* data, size_t size, void* closure);
 ```
 
-It is missing from `Fetch.h`, so declare it where you use it. `closure` — passed
-through `CURLOPT_DEBUGDATA` — is a `void (*)(int priority, const char* format, ...)`
-function, invoked with `LOG_DEBUG`; `syslog()` itself fits, as does any printf-like
-logger:
+`closure` — passed through `CURLOPT_DEBUGDATA` — is a
+`void (*)(int priority, const char* format, ...)` function, invoked with `LOG_DEBUG`;
+`syslog()` itself fits, as does any printf-like logger:
 
 ```c
 curl_easy_setopt(easy, CURLOPT_VERBOSE,       1L);
