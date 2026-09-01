@@ -1,14 +1,39 @@
 # FastRing
 
+FastRing was introduced in **2023** as part of the **BrandMeister** and **TetraPack** projects.
+
 `FastRing` is a set of high-performance asynchronous I/O modules built around `io_uring` (Linux).
 It is designed for reactive networking workloads and low-overhead event handling.
 
 At the centre is the event and descriptor engine (`Ring/FastRing.*`). Around it sit
 networking, TLS and protocol adapters, supplementary services, and runnable examples.
 
+## Background
+
+FastRing started as an internal building block inside BrandMeister and TetraPack. Over
+time it evolved into a standalone set of modules with its own API and supporting parts:
+buffer pools, socket and TLS transports, and adapters that bring foreign event loops and
+protocol libraries onto the same ring.
+
+This repository is the home of the standalone modules. Modules adopted by BrandMeister
+or TetraPack are synchronized with their project copies, so those parts track the code
+actively used in production rather than living as detached forks.
+
+Not every module has a consumer yet. Some exist only here, as experimental work or as
+groundwork for what those projects — or other ones — are expected to need. Where a module
+is experimental or deprecated, it is marked as such in the list below.
+
 ## What It Solves
 
-FastRing provides:
+FastRing provides a single event domain for native `io_uring` operations and libraries
+or runtimes that were not designed around `io_uring`, allowing them to share one
+submission/completion lifecycle and one thread model.
+
+It is not a thin wrapper around `io_uring`: the library has its own descriptor lifecycle,
+submission model, completion dispatch, cross-thread coordination and higher-level
+transport abstractions.
+
+The core engine covers:
 - `SQE/CQE` multiplexing
 - submission/completion queue flow control
 - descriptor lifecycle tracking
