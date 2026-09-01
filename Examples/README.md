@@ -20,6 +20,7 @@ library has to be installed first.
 | `AAA` | - | `FastSocket` usage in a RADIUS client | - |
 | `Avahi` | `avahitest` | `FastAvahiPoll` service discovery | `avahi-client` |
 | `CURLWS` | `curlwstest` | `Fetch` + `CURLWSCore` WebSocket client | `libcurl` |
+| `Fetch` | `fetchtest` | `Fetch` HTTP client, every completion path | `libcurl` |
 | `H2H3Server` | `h2h3test` | `H2OCore` + `FastUVLoop` + `PicoBundle`, HTTP/2 and HTTP/3 | `libuv`, `openssl`, `zlib`, `brotli`, patched H2O |
 | `SMBClient` | `smbpipeecho` | `SambarAdapter` named pipe client | `libsmb2`, `krb5` |
 | `SMBServer` | `smbserver` | `SambarAdapter` SMB2 server | `libsmb2`, `krb5` |
@@ -32,6 +33,14 @@ Most examples also link `jemalloc`.
 `Examples/SMBClientPipe` is currently empty.
 
 ## Notes per Example
+
+### Fetch
+
+`FetchTest.c` issues five requests against `www.google.com` in one ring and shows all
+four ways a transmission can end — HTTP status, negated `CURLcode`,
+`FETCH_STATUS_CANCELLED` and `FETCH_STATUS_INCOMPLETE`. It needs outbound HTTPS and DNS;
+the stalled request is aimed at a local listening socket, so it does not depend on the
+network. See [Documentations/Fetch.md](../Documentations/Fetch.md).
 
 ### AAA
 
