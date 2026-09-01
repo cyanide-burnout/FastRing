@@ -76,7 +76,16 @@ typedef int (*HandleGRPCEventFunction)(void* closure, struct GRPCTransmission* t
   any stored pointer inside the `STATUS` branch.
 
 `CancelGRPCTransmission()` aborts an in-flight call; teardown then runs through the
-same path.
+same path, so the handler still receives `GRPCCLIENT_REASON_STATUS`, with
+`FETCH_STATUS_CANCELLED` in `parameter` and no message.
+
+**Cancelling from a frame handler is allowed** — "I have what I needed, stop the stream"
+is the natural way to end a server stream. The cancellation is deferred in that case:
+frames are dispatched from inside libcurl's write callback, where the easy handle must
+not be destroyed, so the transfer is aborted instead and the completion path releases
+everything afterwards. The status callback is delivered on the next pass rather than
+inside the cancelling call, and it looks the same as any other cancellation. Frames still
+queued behind the current one are dropped.
 
 ### Sending
 
@@ -175,10 +184,10 @@ Two channels, each with its own rule:
   response message was delivered at all, even if the status was OK. protobuf-c allows the
   closure to run once, so a missing reply cannot be signalled any other way.
 
-The two are therefore not a pair. A call that fails **after** its reply was delivered is
-reported through the error handler alone — the closure has already run, with the real
-message. A call that fails without a reply is reported through both. A call that succeeds
-and delivers a reply uses neither.
+The two are therefore not a pair. A call that succeeds **and delivers a reply** runs the
+closure with it and never reaches the error handler. A call that fails **after** its reply
+was delivered is reported through the error handler alone — the closure has already run,
+with the real message. Only a call that fails without a reply uses both.
 
 `status` follows the same convention as the transport layer: a gRPC status when the call
 reached gRPC level, otherwise a negative Fetch completion code. `method` is the name from

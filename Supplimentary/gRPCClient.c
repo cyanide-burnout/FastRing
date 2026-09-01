@@ -8,6 +8,12 @@
 
 // Transport
 
+// A handler is free to cancel its own transmission, but that happens inside the write
+// callback of libcurl, where neither the easy handle may be destroyed nor the inbound
+// buffer touched afterwards, so the cancellation is deferred
+#define GRPC_CONDITION_GUARD    (1 << 0)
+#define GRPC_CONDITION_RELEASE  (1 << 1)
+
 #define GRPC_TRANSMISSION_LENGTH     sizeof(struct GRPCCall)  // The biggest allocation to fit GRPCTransmission and GRPCCall
 #define GRPC_STRING_BUFFER_LENGTH    2048                     // 2 KB
 #define GRPC_ALLOCATION_GRANULARITY  (1 << 12)                // 4 KB
@@ -116,6 +122,7 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
   struct gRPC* frame;
   uint8_t* pointer;
   size_t length;
+  int result;
 
   transmission  = (struct GRPCTransmission*)data;
   size         *= count;
@@ -144,9 +151,16 @@ static size_t HandleWrite(void* buffer, size_t size, size_t count, void* data)
 
     if (transmission->inbound.length >= length)
     {
-      if (HandleFrame(transmission, frame->flags, frame->data, length - sizeof(struct gRPC)) != 0)
+      transmission->condition |= GRPC_CONDITION_GUARD;
+      result                   = HandleFrame(transmission, frame->flags, frame->data, length - sizeof(struct gRPC));
+      transmission->condition &= ~GRPC_CONDITION_GUARD;
+
+      if ((result != 0) ||
+          (transmission->condition & GRPC_CONDITION_RELEASE))
       {
-        // Cannot proceed frame
+        // Either the frame was rejected by the handler, or the handler has cancelled
+        // the transmission - the transfer is aborted in both cases and everything is
+        // released by the completion path of Fetch
         return CURL_WRITEFUNC_ERROR;
       }
 
@@ -210,6 +224,14 @@ static void HandleFetch(struct FetchTransmission* super, CURL* easy, int code, c
   void* closure;
 
   transmission = (struct GRPCTransmission*)super;
+
+  if (transmission->condition & GRPC_CONDITION_RELEASE)
+  {
+    // The transfer has been aborted on behalf of CancelGRPCTransmission(), so it has to
+    // look exactly like a cancellation made outside of a handler
+    code = FETCH_STATUS_CANCELLED;
+    data = NULL;
+  }
 
   if (code != 200)
   {
@@ -369,6 +391,13 @@ void CancelGRPCTransmission(struct GRPCTransmission* transmission)
 {
   if (transmission != NULL)
   {
+    if (transmission->condition & GRPC_CONDITION_GUARD)
+    {
+      // Called from a frame handler, HandleWrite() completes the cancellation
+      transmission->condition |= GRPC_CONDITION_RELEASE;
+      return;
+    }
+
     // Resources will be released by HandleFetch()
     CancelFetchTransmission(&transmission->super);
   }

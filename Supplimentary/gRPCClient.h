@@ -49,7 +49,7 @@ struct GRPCBuffer
 {
   uint8_t* buffer;
   size_t length;
-  size_t size; 
+  size_t size;
 };
 
 struct GRPCTransmission
@@ -62,6 +62,7 @@ struct GRPCTransmission
   int status;                 // gRPC status
   char* message;              //
 
+  uint32_t condition;         // Re-entrancy guard
   struct GRPCBuffer inbound;  // Inbound
   struct GRPCBuffer scratch;  //
 
