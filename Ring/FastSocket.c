@@ -310,14 +310,13 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
   Continue:
 
-  if ((~descriptor->submission.flags & IOSQE_IO_LINK) &&
-      ( socket->outbound.condition   & POLLOUT) &&
-      ( descriptor->data.number == 0ULL))
+  if ((( completion == NULL) ||
+       (~completion->flags & IORING_CQE_F_MORE))      &&
+      (~descriptor->submission.flags & IOSQE_IO_LINK) &&
+      ( socket->outbound.condition   & POLLOUT))
   {
-    // In case of TCP the kernel may occupy a buffer for much longer,
-    // notify handler once about accepted buffer as soon as possible
-
-    descriptor->data.number ++;
+    // The first zero-copy CQE only reports that data was accepted and carries F_MORE.
+    // Keep the next batch back until the final notification releases the buffer
 
     if ( (batch  = socket->outbound.tail) &&
         ((batch != socket->outbound.head) ||
@@ -526,9 +525,8 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
     return -EAGAIN;
   }
 
-  descriptor->data.number = 0ULL;
-  descriptor->function    = HandleOutboundCompletion;
-  descriptor->closure     = socket;
+  descriptor->function = HandleOutboundCompletion;
+  descriptor->closure  = socket;
 
   if ((descriptor->submission.opcode == IORING_OP_SEND)    ||
       (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||

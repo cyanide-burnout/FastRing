@@ -304,13 +304,13 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     goto Continue;
   }
 
-  if (( descriptor->data.socket.number == 0ULL) &&
+  if ((( completion == NULL) ||
+       (~completion->flags & IORING_CQE_F_MORE)) &&
       ((descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) == 0) &&
       ( engine->outbound.condition   & POLLOUT))
   {
-    // In case of TCP the kernel may occupy a buffer for much longer,
-    // notify handler once about accepted buffer as soon as possible
-    descriptor->data.socket.number ++;
+    // The first zero-copy CQE only reports that data was accepted and carries F_MORE.
+    // Keep writes throttled until the final notification releases the buffer
     engine->outbound.condition     &= ~POLLOUT;
     CallHandlerFunction(engine, POLLOUT, 0);
   }
@@ -736,7 +736,6 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
   memcpy(buffer->data, data, length);
   memset(&descriptor->data.socket.message, 0, sizeof(struct msghdr));
 
-  descriptor->data.socket.number             = 0ULL;
   descriptor->data.socket.vector.iov_base    = buffer->data;
   descriptor->data.socket.vector.iov_len     = length;
   descriptor->data.socket.message.msg_iov    = &descriptor->data.socket.vector;
