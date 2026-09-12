@@ -15,13 +15,8 @@ extern "C"
 #define FASTSOCKET_MODE_ZERO_COPY  MSG_ZEROCOPY
 #define FASTSOCKET_MODE_AUTO_CORK  MSG_MORE
 
-// FASTSOCKET_MODE_FILE_IO transmits through IORING_OP_WRITE, which has no MSG_WAITALL.
-// The kernel retries a short write only for regular files and block devices, so on a pipe,
-// a FIFO or a character device the write may be reported as partial. A partial write is
-// resubmitted only while nothing is queued behind it, which holds when limit is 1. With a
-// larger limit the following buffers are already linked into the same batch, the remainder
-// would land after them, and the truncation is reported as POLLERR with EIO instead.
-// Pass limit = 1 whenever this mode is used with anything but a regular file
+// FILE_IO can safely retry a short write only at the batch tail.
+// Use limit = 1 for non-regular files; otherwise partial writes report EIO.
 
 #if (IO_URING_VERSION_MAJOR > 2) || (IO_URING_VERSION_MAJOR == 2) && (IO_URING_VERSION_MINOR >= 6)
 #define FASTSOCKET_MODE_FILE_IO    MSG_DONTROUTE

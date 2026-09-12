@@ -299,18 +299,70 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   if (unlikely((completion != NULL) &&
                (completion->res < 0)))
   {
+    if ((descriptor->submission.opcode == IORING_OP_SENDMSG_ZC) &&
+        ((completion->res    == -ENOBUFS)   ||
+         (completion->res    == -ECANCELED) &&
+         (engine->retry.tail != NULL)))
+    {
+      if (completion->res == -ENOBUFS)                    engine->retry.tail = descriptor;
+      if (~descriptor->submission.flags & IOSQE_IO_LINK)  engine->retry.head = descriptor;
+
+      // SENDMSG_ZC posts a final notification even when an older kernel omits
+      // F_MORE from a linked request cancelled before execution. Keep separate
+      // retry ownership for that notification to release through POLLPRI.
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      HoldFastBuffer(FAST_BUFFER(descriptor->data.socket.vector.iov_base));
+      engine->count++;
+
+      PrepareFastRingDescriptor(descriptor, 0);
+
+      descriptor->linked  = 0;
+      descriptor          = engine->retry.tail;
+      descriptor->linked ++;
+
+      if ((engine->retry.head != NULL) &&
+          (~engine->outbound.condition & POLLPRI))
+      {
+        SubmitFastRingDescriptorRange(engine->retry.tail, engine->retry.head);
+        engine->outbound.condition |= POLLPRI;
+        engine->retry.head          = NULL;
+        engine->retry.tail          = NULL;
+      }
+
+      return 1;
+    }
+
     // Error may occur during sending
     CallHandlerFunction(engine, POLLERR, -completion->res);
     goto Continue;
   }
 
-  if ((( completion == NULL) ||
-       (~completion->flags & IORING_CQE_F_MORE)) &&
-      ((descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) == 0) &&
-      ( engine->outbound.condition   & POLLOUT))
+  if ((engine->outbound.condition & POLLPRI) &&
+      (completion         != NULL) &&
+      (completion->res    >= 0)    &&
+      (~completion->flags & IORING_CQE_F_MORE))
   {
-    // The first zero-copy CQE only reports that data was accepted and carries F_MORE.
-    // Keep writes throttled until the final notification releases the buffer
+    engine->outbound.condition &= ~POLLPRI;
+
+    if (engine->retry.head != NULL)
+    {
+      SubmitFastRingDescriptorRange(engine->retry.tail, engine->retry.head);
+      engine->outbound.condition |= POLLPRI;
+      engine->retry.head          = NULL;
+      engine->retry.tail          = NULL;
+    }
+  }
+
+  if (( descriptor->data.socket.number == 0ULL) &&
+      ((descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) == 0) &&
+      ( engine->outbound.condition   & POLLOUT) &&
+      ( engine->retry.tail             == NULL) &&
+      (( completion                    == NULL) ||
+       (~completion->flags & IORING_CQE_F_NOTIF)))
+  {
+    // In case of TCP the kernel may occupy a buffer for much longer,
+    // notify handler once about accepted buffer as soon as possible
+    descriptor->data.socket.number ++;
     engine->outbound.condition     &= ~POLLOUT;
     CallHandlerFunction(engine, POLLOUT, 0);
   }
@@ -377,7 +429,7 @@ static void FlushOutboundQueue(void* closure, int reason)
 
   SubmitFastRingDescriptorRange(engine->outbound.tail, engine->outbound.head);
 
-  engine->outbound.condition |= POLLOUT;
+  engine->outbound.condition |= POLLPRI | POLLOUT;
   engine->outbound.count      = 0;
   engine->outbound.tail       = NULL;
   engine->outbound.head       = NULL;
@@ -736,6 +788,7 @@ static int HandleBIOWrite(BIO* handle, const char* data, int length)
   memcpy(buffer->data, data, length);
   memset(&descriptor->data.socket.message, 0, sizeof(struct msghdr));
 
+  descriptor->data.socket.number             = 0ULL;
   descriptor->data.socket.vector.iov_base    = buffer->data;
   descriptor->data.socket.vector.iov_len     = length;
   descriptor->data.socket.message.msg_iov    = &descriptor->data.socket.vector;

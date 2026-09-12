@@ -51,12 +51,19 @@ struct FastBIOOutboundQueue
   size_t count;
 };
 
+struct FastBIORetryQueue
+{
+  struct FastRingDescriptor* head;
+  struct FastRingDescriptor* tail;
+};
+
 struct FastBIO
 {
   struct FastRing* ring;
   struct FastRingDescriptor* descriptor;
   struct FastBIOOutboundQueue outbound;
   struct FastBIOInboundQueue inbound;
+  struct FastBIORetryQueue retry;
   HandleFastBIOEvent function;
   uint32_t flags;
   void* closure;

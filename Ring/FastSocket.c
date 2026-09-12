@@ -14,9 +14,7 @@ static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct
 {
   if (completion == NULL)
   {
-    // Close operation has not been executed (ring teardown): the kernel closes
-    // the descriptor on IORING_OP_CLOSE regardless of the reported result, so a
-    // manual close is only needed when the operation never ran
+    // Close manually only if the queued close never ran
     close(descriptor->submission.fd);
   }
 
@@ -48,7 +46,7 @@ static void FreeSocketInstance(struct FastSocket* socket, int reason)
   }
   else
   {
-    // Error may occure during allocation
+    // Allocation failed
     close(socket->handle);
   }
 
@@ -61,7 +59,7 @@ static inline void __attribute__((always_inline)) ReleaseSocketInstance(struct F
 
   if (unlikely(socket->count == 0))
   {
-    // Prevent inlining less used code
+    // Keep cold cleanup out of line
     FreeSocketInstance(socket, reason);
   }
 }
@@ -70,7 +68,7 @@ static inline void __attribute__((always_inline)) CallHandlerFunction(struct Fas
 {
   if (likely(socket->function != NULL))
   {
-    // Handler can be freed earlier then socket
+    // Handler may already be detached
     socket->function(socket, event, parameter);
   }
 }
@@ -92,13 +90,37 @@ static inline struct FastSocketOutboundBatch* __attribute__((always_inline)) All
   {
     queue->stack = batch->next;
     batch->next  = NULL;
-    goto AppendQueue;
+    return batch;
   }
 
-  if (likely(batch = (struct FastSocketOutboundBatch*)calloc(1, sizeof(struct FastSocketOutboundBatch))))
-  {
-    AppendQueue:
+  return (struct FastSocketOutboundBatch*)calloc(1, sizeof(struct FastSocketOutboundBatch));
+}
 
+static inline struct FastSocketOutboundBatch* __attribute__((always_inline)) PrependOutboundBatch(struct FastSocketOutboundQueue* queue)
+{
+  struct FastSocketOutboundBatch* batch;
+
+  if (likely(batch = AllocateOutboundBatch(queue)))
+  {
+    batch->next = queue->tail;
+    queue->tail = batch;
+
+    if (queue->head == NULL)
+    {
+      //
+      queue->head = batch;
+    }
+  }
+
+  return batch;
+}
+
+static inline struct FastSocketOutboundBatch* __attribute__((always_inline)) AppendOutboundBatch(struct FastSocketOutboundQueue* queue)
+{
+  struct FastSocketOutboundBatch* batch;
+
+  if (likely(batch = AllocateOutboundBatch(queue)))
+  {
     if (likely(queue->tail != NULL))
     {
       queue->head->next = batch;
@@ -132,7 +154,7 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
 
   if (unlikely(completion->user_data & RING_DESC_OPTION_IGNORE))
   {
-    // That's required to solve a possible race condition when proceed io_uring_prep_cancel()
+    // Ignore the CQE racing with io_uring_prep_cancel()
     return 0;
   }
 
@@ -197,14 +219,12 @@ static int HandleInboundCompletion(struct FastRingDescriptor* descriptor, struct
   {
     if (socket->inbound.descriptor == NULL)
     {
-      // Socket could be closed by function()
-      // at the same time with receive last packet
+      // Handler may close the socket on the final receive
       ReleaseSocketInstance(socket, reason);
       return 0;
     }
 
-    // Eventually URing may release submission
-    // Also this handles -ENOBUFS and -ECANCELED
+    // Rearm a terminated multishot receive
     SubmitFastRingDescriptor(socket->inbound.descriptor, 0);
   }
 
@@ -255,11 +275,53 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   if (unlikely((completion != NULL) &&
                (completion->res < 0)))
   {
-    // Error may occure during sending or connecting. The condition has to be latched, not just
-    // reported: TransmitFastSocketDescriptor() turns it into -EPIPE, so a socket that has failed
-    // to send stops accepting new data instead of silently swallowing it. Until this was done a
-    // failure on the receive side made the socket unwritable while a failure on the send side
-    // left it looking healthy, and GetFastSocketStream() had no way to report the latter at all
+    batch = NULL;
+
+    if (((descriptor->submission.opcode == IORING_OP_SEND_ZC)     ||
+         (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC)) &&
+        ((completion->res == -ENOBUFS)   ||
+         (completion->res == -ECANCELED) &&
+         (batch = socket->outbound.tail) &&
+         (batch->head == NULL)))
+    {
+      if (completion->res == -ENOBUFS)
+      {
+        batch = PrependOutboundBatch(&socket->outbound);
+
+        if (unlikely(batch == NULL))
+        {
+          // Batch allocation failed
+          goto Error;
+        }
+
+        // Keep new data behind the retry batch
+        batch->count = socket->outbound.limit;
+        batch->tail  = descriptor;
+      }
+
+      if (~descriptor->submission.flags & IOSQE_IO_LINK)
+      {
+        // The unlinked descriptor closes the failed batch
+        batch->head = descriptor;
+      }
+
+      // Cancelled ZC requests still notify without F_MORE on older kernels
+      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+      PrepareFastRingDescriptor(descriptor, 0);
+      socket->count ++;
+
+      if (descriptor->submission.opcode == IORING_OP_SEND_ZC)  HoldFastBuffer(FAST_BUFFER(descriptor->submission.addr));
+      else                                                     HoldFastBuffer(FAST_BUFFER(descriptor->data.socket.vector.iov_base));
+
+      descriptor->linked  = 0;
+      descriptor          = batch->tail;
+      descriptor->linked ++;
+      return 1;
+    }
+
+    Error:
+
+    // Latch send failures so later transmits return EPIPE
     socket->outbound.condition |= POLLERR;
     CallHandlerFunction(socket, POLLERR, -completion->res);
     goto Continue;
@@ -269,7 +331,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
                (completion      != NULL) &&
                (completion->res >= POLLERR)))
   {
-    // Error may occure during connecting (POLLERR, POLLHUP)
+    // Connecting failed
     socket->outbound.condition |= POLLERR;
     CallHandlerFunction(socket, POLLERR, EPIPE);
     goto Continue;
@@ -281,17 +343,13 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
                ((descriptor->submission.opcode == IORING_OP_WRITE) ||
                 (descriptor->submission.opcode == IORING_OP_WRITE_FIXED))))
   {
-    // Send opcodes rely on MSG_WAITALL, but IORING_OP_WRITE has no such flag and
-    // the kernel retries a short write only for regular files and block devices
+    // WRITE has no MSG_WAITALL; only files retry short writes
 
     if ((completion->res > 0) &&
         (~descriptor->submission.flags & IOSQE_IO_LINK))
     {
-      // Tail of a batch: nothing has been queued behind, so the remainder still lands in
-      // the right place. The queue stays held until the whole buffer has been written.
-      // A descriptor passed to TransmitFastSocketDescriptor() may carry an explicit file
-      // offset, which has to advance too. FASTSOCKET_MODE_FILE_IO instead uses -1, meaning
-      // the current file position, and that one is maintained by the kernel
+      // Only an unlinked tail can be retried without reordering
+      // Advance explicit offsets; ~0ULL means kernel-managed position
       descriptor->submission.addr += completion->res;
       descriptor->submission.len  -= completion->res;
       descriptor->submission.off  += completion->res * (descriptor->submission.off != ~0ULL);
@@ -299,35 +357,43 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
       return 1;
     }
 
-    // Mid-batch, or nothing was written at all: the following buffers are already queued
-    // and the remainder would land after them, leaving a gap in the stream. This is the
-    // documented limitation of FASTSOCKET_MODE_FILE_IO on anything but a regular file,
-    // the caller has to create such a socket with limit = 1 to keep every write recoverable.
-    // The gap cannot be closed, so the socket is latched as failed like any other send error
+    // Retrying a partial linked write would reorder the stream
     socket->outbound.condition |= POLLERR;
     CallHandlerFunction(socket, POLLERR, EIO);
   }
 
   Continue:
 
-  if ((( completion == NULL) ||
-       (~completion->flags & IORING_CQE_F_MORE))      &&
-      (~descriptor->submission.flags & IOSQE_IO_LINK) &&
-      ( socket->outbound.condition   & POLLOUT))
+  if ((~descriptor->submission.flags & IOSQE_IO_LINK) &&
+      ( socket->outbound.condition   & POLLOUT) &&
+      ( descriptor->data.number == 0ULL))
   {
-    // The first zero-copy CQE only reports that data was accepted and carries F_MORE.
-    // Keep the next batch back until the final notification releases the buffer
+    // Report acceptance before delayed ZC buffer release
 
-    if ( (batch  = socket->outbound.tail) &&
-        ((batch != socket->outbound.head) ||
+    descriptor->data.number ++;
+    batch = socket->outbound.tail;
+
+    if ((batch       != NULL) &&
+        (batch->head != NULL))
+    {
+      // Restore the retry tail's one-shot marker
+      batch->head->data.number = 0ULL;
+    }
+
+    if ((batch       != NULL) &&
+        (batch->head != NULL) &&
+        ((batch      != socket->outbound.head) ||
          (socket->outbound.condition & POLLHUP)))
     {
       socket->outbound.tail                  = batch->next;
       *((uintptr_t*)&socket->outbound.head) *= (uintptr_t)(socket->outbound.tail != NULL);
       SubmitFastRingDescriptorRange(batch->tail, batch->head);
       ReleaseOutboundBatch(&socket->outbound, batch);
+      goto Release;
     }
-    else
+
+    if ((batch       == NULL) ||
+        (batch->head != NULL))
     {
       socket->outbound.condition &= ~POLLOUT;
 
@@ -342,6 +408,8 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     }
   }
 
+  Release:
+
   if (( completion == NULL) ||
       (~completion->flags & IORING_CQE_F_MORE))
   {
@@ -354,7 +422,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
       case IORING_OP_WRITE:
       case IORING_OP_WRITE_FIXED:
-        // addr may have been advanced by a short write, the base is kept in the vector
+        // A short write may advance addr; release the saved base
         ReleaseFastBuffer(FAST_BUFFER(descriptor->data.socket.vector.iov_base));
         break;
 
@@ -402,7 +470,7 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
     if ((limit > 0) &&
         (limit < socket->outbound.limit))
     {
-      // Use pre-defined limit for IORING_OP_SEND_ZC SQEs
+      // Use the configured SEND_ZC limit
       socket->outbound.limit = limit;
     }
 
@@ -416,7 +484,7 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
 
     if (message == NULL)
     {
-      // Socket address or control data are not required, make simple multi-short submission
+      // No address or control data: use plain multishot receive
       io_uring_prep_recv_multishot(&descriptor->submission, handle, NULL, 0, flags);
       goto Continue;
     }
@@ -449,7 +517,7 @@ ssize_t ReceiveFastSocketData(struct FastSocket* socket, void* data, size_t size
                (data   == NULL) ||
                (size   == 0)))
   {
-    // Cannot proceed a call
+    // Invalid call
     return -EINVAL;
   }
 
@@ -457,9 +525,7 @@ ssize_t ReceiveFastSocketData(struct FastSocket* socket, void* data, size_t size
                (socket->inbound.length < size) &&
                (flags & MSG_WAITALL)))
   {
-    // Insufficient length. Zero would mean an end of stream to a caller shaped like read(),
-    // HandleStreamRead() among them, while nothing has been consumed and the rest is still
-    // to come. A closed peer is reported as POLLHUP through the event handler instead
+    // No complete buffer yet; peer closure is reported as POLLHUP
     return -EAGAIN;
   }
 
@@ -516,26 +582,24 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
 
   if (unlikely(!((batch = socket->outbound.head) &&
                  (batch->count < socket->outbound.limit) ||
-                 (batch = AllocateOutboundBatch(&socket->outbound)))))
+                 (batch = AppendOutboundBatch(&socket->outbound)))))
   {
-    // Batches are recycled through a stack of their own, so an exhausted pool is a transient
-    // state rather than a fatal one: EAGAIN keeps a FILE* recoverable through clearerr()
+    // Batch exhaustion is transient
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
     return -EAGAIN;
   }
 
-  descriptor->function = HandleOutboundCompletion;
-  descriptor->closure  = socket;
+  descriptor->data.number = 0ULL;
+  descriptor->function    = HandleOutboundCompletion;
+  descriptor->closure     = socket;
 
   if ((descriptor->submission.opcode == IORING_OP_SEND)    ||
       (descriptor->submission.opcode == IORING_OP_SEND_ZC) ||
       (descriptor->submission.opcode == IORING_OP_SENDMSG) ||
       (descriptor->submission.opcode == IORING_OP_SENDMSG_ZC))
   {
-    // Without MSG_WAITALL a stream socket reports a short send and the rest of the buffer
-    // is silently dropped: it cannot be sent afterwards, because a linked batch has already
-    // queued the following buffers and the remainder would arrive out of order
+    // Prevent partial linked sends from reordering the stream
     descriptor->submission.ioprio    |= IORING_RECVSEND_POLL_FIRST;
     descriptor->submission.msg_flags |= MSG_WAITALL;
   }
@@ -543,8 +607,7 @@ int TransmitFastSocketDescriptor(struct FastSocket* socket, struct FastRingDescr
   if ((descriptor->submission.opcode == IORING_OP_WRITE) ||
       (descriptor->submission.opcode == IORING_OP_WRITE_FIXED))
   {
-    // A short write is resubmitted by HandleOutboundCompletion(), which advances addr,
-    // so the base has to be kept aside for ReleaseFastBuffer()
+    // Preserve the base while a short write advances addr
     descriptor->data.socket.vector.iov_base = (void*)descriptor->submission.addr;
   }
 
@@ -599,7 +662,7 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
                ((message->msg_name      == NULL) ||
                 (message->msg_namelen   >  sizeof(struct sockaddr_storage)))))
   {
-    // Cannot proceed a call
+    // Invalid call
     return -EINVAL;
   }
 
@@ -619,8 +682,7 @@ int TransmitFastSocketMessage(struct FastSocket* socket, struct msghdr* message,
   if (unlikely((descriptor == NULL) ||
                (buffer     == NULL)))
   {
-    // Descriptors and buffers come back to their pools as sends complete, so this is a
-    // transient state and the caller is expected to retry rather than to give up
+    // Pool exhaustion is transient
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
     return -EAGAIN;
@@ -686,7 +748,7 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
                ((address == NULL) ||
                 (length   > sizeof(struct sockaddr_storage)))))
   {
-    // Cannot proceed a call
+    // Invalid call
     return -EINVAL;
   }
 
@@ -696,8 +758,7 @@ int TransmitFastSocketData(struct FastSocket* socket, struct sockaddr* address, 
   if (unlikely((descriptor == NULL) ||
                (buffer     == NULL)))
   {
-    // Descriptors and buffers come back to their pools as sends complete, so this is a
-    // transient state and the caller is expected to retry rather than to give up
+    // Pool exhaustion is transient
     ReleaseFastRingDescriptor(descriptor);
     ReleaseFastBuffer(buffer);
     return -EAGAIN;
@@ -729,7 +790,7 @@ void ReleaseFastSocket(struct FastSocket* socket)
 
     if (socket->inbound.condition & IORING_CQE_F_MORE)
     {
-      // Preventing leakage in destruction inside a call HandleInboundCompletion() when last FastBuffer has been received
+      // Handler may destroy the socket on the final buffer
       socket->inbound.descriptor = NULL;
     }
 
@@ -770,9 +831,7 @@ static ssize_t HandleStreamRead(void* cookie, char* data, size_t size)
   if (unlikely((result == -EAGAIN) &&
                (socket->inbound.descriptor == NULL)))
   {
-    // A receive path that has finished -- a closed peer, a fatal receive error, a released
-    // socket -- leaves inbound.descriptor at NULL. Together with a drained queue that is a
-    // real end of file for stdio, so feof() becomes true instead of the error flag
+    // A drained queue and terminated receive path are EOF
     return 0;
   }
 
@@ -817,7 +876,7 @@ FILE* GetFastSocketStream(struct FastSocket* socket, int own)
 
   if (own)
   {
-    // Release FastSocket on fclose()
+    // Drop fclose ownership
     functions.close = HandleStreamClose;
   }
 
