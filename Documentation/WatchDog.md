@@ -1,0 +1,69 @@
+# WatchDog API Reference
+
+Header: `Ring/WatchDog.h`
+
+`WatchDog` keeps the systemd watchdog fed from a FastRing timeout, so a stalled ring
+loop is what systemd actually detects.
+
+## API
+
+```c
+struct WatchDog
+{
+  int state;
+  uint64_t interval;                      // notification interval, milliseconds
+  struct FastRing* ring;
+  struct FastRingDescriptor* descriptor;
+};
+
+struct WatchDog* CreateWatchDog(struct FastRing* ring);
+void ReleaseWatchDog(struct WatchDog* state);
+```
+
+`CreateWatchDog()`:
+
+- returns `NULL` when `sd_watchdog_enabled()` reports the watchdog is disabled or
+  unavailable — this is the normal result outside a systemd unit with
+  `WatchdogSec=`, not an error — and also when the state cannot be allocated;
+- sends `MAINPID=` for the current process;
+- arms a repeating FastRing timeout at **a quarter** of the interval systemd allows
+  (`WATCHDOG_USEC / 4000` milliseconds), so the loop may stall for about three
+  notification periods before systemd acts.
+
+The first expiry sends `READY=1` together with `WATCHDOG=1`, every later one sends
+`WATCHDOG=1` alone. That makes it usable as the readiness notification for
+`Type=notify` units as well — the service is reported ready once the ring loop has
+actually started turning, one notification period after `CreateWatchDog()`.
+
+The repeating timeout uses `TIMEOUT_FLAG_REPEAT`, which becomes a kernel multishot timeout
+when FastRing is built with liburing 2.4 or newer and then needs Linux 6.4; on an older
+kernel such a build sends no notification at all. See
+[Repeating timeouts](LIFECYCLE.md#repeating-timeouts).
+
+`ReleaseWatchDog()` cancels the timeout and frees the state. The cancellation completes
+asynchronously, but no notification is sent after the call. Call it on the ring thread and
+before `ReleaseFastRing()`: the timeout is not `TIMEOUT_FLAG_OWNED`, and after the ring is
+released its descriptor no longer exists.
+
+## Usage
+
+```c
+struct WatchDog* watchdog = CreateWatchDog(ring);   // NULL is fine, just means "not under systemd"
+
+while (running)
+  WaitForFastRing(ring, interval, NULL);
+
+ReleaseWatchDog(watchdog);
+```
+
+`ReleaseWatchDog(NULL)` is safe, so the return value needs no special handling.
+
+## Rules
+
+- The notification is driven by a ring timeout, so it stops as soon as the loop stops
+  running. That is the point: a handler that blocks the ring will trip the watchdog.
+- Do not also call `sd_notify(0, "WATCHDOG=1")` from elsewhere; that would mask
+  exactly the stall this module is meant to expose.
+- Requires linking against `libsystemd` (`sd_watchdog_enabled()`). Built with
+  `USE_LIGHTNOTIFIER`, `sd_notify()` is replaced by `LightNotify()` from `LightNotifier.h`,
+  which is not part of this repository.

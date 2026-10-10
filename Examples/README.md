@@ -40,7 +40,7 @@ Most examples also link `jemalloc`.
 four ways a transmission can end — HTTP status, negated `CURLcode`,
 `FETCH_STATUS_CANCELLED` and `FETCH_STATUS_INCOMPLETE`. It needs outbound HTTPS and DNS;
 the stalled request is aimed at a local listening socket, so it does not depend on the
-network. See [Documentations/Fetch.md](../Documentations/Fetch.md).
+network. See [Documentation/Fetch.md](../Documentation/Fetch.md).
 
 ### AAA
 
@@ -60,7 +60,7 @@ git apply /path/to/FastRing/Supplimentary/h2o.patch
 ```
 
 The patch fixes H2O's own libuv binding for the HTTP/3 path; see
-[Documentations/H2OCore.md](../Documentations/H2OCore.md). Without it, HTTP/3 does not
+[Documentation/H2OCore.md](../Documentation/H2OCore.md). Without it, HTTP/3 does not
 work.
 
 `H2H3Server` expects a certificate bundle (`bundle.pem`) next to the binary.
