@@ -173,6 +173,7 @@ static int UpdateKCPZeroWindowProbe(struct KCPCongestion* congestion, uint32_t t
 static int ExpandKCPQueue(struct KCPQueue* queue, uint32_t size)
 {
   void* block;
+  uint32_t length;
 
   if ((size <= 1) ||
       ((size  = 1u << (32 - __builtin_clz(size - 1))) <= queue->size) ||
@@ -182,15 +183,16 @@ static int ExpandKCPQueue(struct KCPQueue* queue, uint32_t size)
     return -1;
   }
 
+  length        = queue->tail - queue->head;
   queue->slots  = (struct KCPSegment**)block;
   queue->head  &= queue->size - 1;
-  queue->tail  &= queue->size - 1;
+  queue->tail   = queue->head + length;
 
-  if (queue->tail < queue->head)
+  if (queue->tail > queue->size)
   {
-    memcpy(queue->slots + queue->size, queue->slots, queue->tail * sizeof(struct KCPSegment*));
-    queue->tail += queue->size;
-    queue->size  = queue->tail;
+    memcpy(queue->slots + queue->size, queue->slots, (queue->tail - queue->size) * sizeof(struct KCPSegment*));
+    memset(queue->slots, 0, (queue->tail - queue->size) * sizeof(struct KCPSegment*));
+    queue->size = queue->tail;
   }
 
   memset(queue->slots + queue->size, 0, (size - queue->size) * sizeof(struct KCPSegment*));
@@ -572,6 +574,7 @@ static int HandleIncomingKCPSegment(struct KCPService* service, struct KCPConver
       {
         while ((queue->head != queue->tail) &&
                (segment      = queue->slots[queue->head & mask]) &&
+               (segment->state & KCP_SEGMENT_NUMBERED) &&
                (control      = segment->control) &&
                (control->sn != number))
         {

@@ -71,13 +71,10 @@ On wake-up the handler:
 Steps 1 and 2 run only when the word is not `0`. The wait is re-armed after every
 completion, whatever its result.
 
-`ReleaseLatchServer()` detaches the handler, turns the descriptor into a cancellation of the
-wait and submits it, then unmaps the word and closes the handle. It does not release a client
-that holds or waits for the latch; after it nothing grants, and clients wait until their
-timeout. The cancellation is submitted without claiming the descriptor, so it is correct only
-while the wait is in the kernel; a descriptor still queued for submission — right after
-`CreateLatchServer()`, or after the handler has re-armed it in the last iteration — would be
-queued twice (see [LIFECYCLE.md](LIFECYCLE.md#the-submission-queue)).
+`ReleaseLatchServer()` abandons the descriptor with `DiscardFastRingDescriptor()` — the wait
+is cancelled, or rewritten as a NOP while it is still queued — then unmaps the word and closes
+the handle. It does not release a client that holds or waits for the latch; after it nothing
+grants, and clients wait until their timeout.
 
 ### Dead-holder recovery
 

@@ -74,8 +74,8 @@ set, and arms the ring side. Call it on the ring thread.
 For every GLib iteration the adapter keeps at most one one-shot poll descriptor per file
 descriptor and one timeout descriptor. A changed mask cancels the old poll with a transient
 `IORING_OP_POLL_REMOVE` and adds a new one; the timeout is updated with a transient
-`IORING_OP_TIMEOUT_REMOVE`. Transient descriptors are released by their own completions and do
-not touch the loop.
+`IORING_OP_TIMEOUT_REMOVE`. Transient descriptors, and an old poll that completes before its
+cancellation, are released by their own completions and do not touch the loop.
 
 `ReleaseFastGLoop()` stops the GLib loop if its fiber is parked, abandons the timeout and every
 poll descriptor with `DiscardFastRingDescriptor()`, cancels a pending flush handler, and frees
@@ -85,7 +85,7 @@ callback — from inside the fiber the switch would land in a stale context — 
 handler without calling back, and `ReleaseFastGLoop()` touches freed memory.
 
 Once the GLib loop has returned, after `StopFastGLoop()` or a `g_main_loop_quit()` issued by
-GLib code, the polls and the timeout of its last iteration are still armed, and their next
-completion switches into a fiber that is no longer running. Release the loop before the ring
-handles another completion.
+GLib code, the polls and the timeout of its last iteration are still armed; their completions
+are consumed without switching into the finished fiber until `ReleaseFastGLoop()` abandons
+them.
 

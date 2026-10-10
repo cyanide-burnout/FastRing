@@ -107,10 +107,11 @@ passed. Lower it to bound how much of the ring one socket may occupy. With
 [Short writes in `FASTSOCKET_MODE_FILE_IO`](#short-writes-in-fastsocket_mode_file_io).
 
 The socket does not take ownership of `provider`, `inbound` or `outbound` — they are
-usually shared between sockets and must outlive them, or at least be released
-independently (see the pool reference counting in [FastBuffer.md](FastBuffer.md)). The
-provider in particular is used by every receive completion, the last one of a released
-socket included; see [Lifecycle](#lifecycle).
+usually shared between sockets. It holds a reference to `provider`
+(`HoldFastRingBufferProvider()`) until its last receive completion has been handled, and the
+pools stay alive while their buffers do (see the pool reference counting in
+[FastBuffer.md](FastBuffer.md)), so all three may be released independently of the socket;
+see [Lifecycle](#lifecycle).
 
 ## Receive API
 
@@ -304,14 +305,16 @@ buffers are released, the batch structures are freed, `IORING_OP_CLOSE` is submi
 `handle` (or `close()` is called when no descriptor can be allocated), and the object is
 freed. Nothing reports that moment.
 
-`provider` and the pools must stay valid until then: every receive completion, the one of
-the cancelled receive included, returns its buffer to the provider. After releasing
-sockets, run the loop until their operations have completed, then release the provider,
-the pools and the ring.
+Every receive completion, the one of the cancelled receive included, returns its buffer to
+`provider`; the socket's reference keeps the provider registered until then, and the pools
+live as long as their buffers. The provider and the pools may therefore be released right
+after the sockets. The ring may not: run the loop until the operations have completed, then
+release the ring.
 
 If `ReleaseFastRing()` runs while a socket is alive, its handlers are called with
 `RING_REASON_RELEASED`: an attached event handler receives `POLLHUP` with `0`, outbound
-handlers release their buffers, and a queued close calls `close()`. The object is freed
+handlers only release their buffers — no `POLLOUT`, nothing submitted or scheduled — and a
+queued close calls `close()`. The object is freed
 during the teardown only if its owner reference is gone by then; otherwise it leaks, and a
 `ReleaseFastSocket()` afterwards uses the freed ring. Release sockets before the ring.
 

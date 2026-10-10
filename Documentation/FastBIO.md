@@ -210,11 +210,12 @@ and one whose final completion is being handled is left to that handler. It then
 `BIO*` reference. Queued writes, a `close_notify` for example, are still submitted. When the
 last reference goes, the queued inbound buffers are released, `IORING_OP_CLOSE` is submitted
 for `handle` (`close()` when no descriptor can be allocated), and the engine is freed.
-Nothing reports that moment; `provider` and the pools must stay valid until then, so run the
-loop until the operations have completed before releasing them.
+Nothing reports that moment. The engine holds `provider` until then and the pools live as
+long as their buffers, so both may be released right after the `BIO*`; run the loop until
+the operations have completed before releasing the ring.
 
 If `ReleaseFastRing()` runs while the engine is alive, its handlers are called with
-`RING_REASON_RELEASED`: the poll and receive handlers deliver `POLLHUP` with `0`, outbound
-handlers release their buffers, a pending touch delivers event `0`, and a queued close calls
-`close()`. A `BIO_free()` after `ReleaseFastRing()` uses the freed ring; free the BIO before
+`RING_REASON_RELEASED`: the poll and receive handlers deliver `POLLHUP` with `0`, outbound,
+option and touch handlers only release what they hold without calling the handler, and a
+queued close calls `close()`. A `BIO_free()` after `ReleaseFastRing()` uses the freed ring; free the BIO before
 the ring.

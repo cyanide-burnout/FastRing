@@ -52,7 +52,8 @@ int IsFastRingThread(struct FastRing* ring);
   upper half to the kernel for direct descriptors.
 - Excludes the ring from `fork()`, turns off iowait accounting where supported, and probes the
   supported opcodes into `ring->probe`.
-- Returns `NULL` when `io_uring` cannot be set up, among others on kernels older than 6.0.
+- Returns `NULL` when `io_uring` cannot be set up, among others on kernels older than 6.0, or
+  when memory runs out.
 
 `WaitForFastRing(ring, interval, mask)` runs one iteration of the loop: it moves queued
 descriptors into the submission queue, submits, waits for at most `interval` milliseconds unless
@@ -418,6 +419,7 @@ typedef void* (*CreateRingBufferFunction)(size_t length, void* closure);
 typedef void (*ReleaseRingBufferFunction)(void* buffer);
 
 struct FastRingBufferProvider* CreateFastRingBufferProvider(struct FastRing* ring, uint16_t group, uint16_t count, uint32_t length, CreateRingBufferFunction function, void* closure);
+struct FastRingBufferProvider* HoldFastRingBufferProvider(struct FastRingBufferProvider* provider);
 void ReleaseFastRingBufferProvider(struct FastRingBufferProvider* provider, ReleaseRingBufferFunction function);
 
 void PrepareFastRingBuffer(struct FastRingBufferProvider* provider, struct io_uring_sqe* submission);
@@ -440,9 +442,16 @@ buffers of one length.
   `NULL` when the completion carries no buffer.
 - `AdvanceFastRingBuffer()` gives the slot back to the kernel. With `function == NULL` the same
   buffer is reused; with a `function` a new buffer takes the slot and the old one passes to the
-  caller. Completions without a buffer are ignored.
-- `ReleaseFastRingBufferProvider()` unregisters the group and calls `function` for every buffer
-  in the provider; `NULL` leaves the buffers to the caller.
+  caller. When `function` returns `NULL` the slot stays out of the ring for good, so the provider
+  has one buffer less. Completions without a buffer are ignored.
+- `HoldFastRingBufferProvider()` takes a reference for a receiver whose operations select
+  buffers from the provider, and returns it. `FastSocket` and `FastBIO` hold their provider
+  until their last receive completion.
+- `ReleaseFastRingBufferProvider()` drops a reference. When the last one goes, the group is
+  unregistered and `function` of that call is called for every buffer in the provider; `NULL`
+  leaves the buffers to the caller. Every holder therefore passes the function that matches the
+  buffers — `FastSocket` and `FastBIO` pass `ReleaseRingFastBuffer()`, as they work with
+  FastBuffer-backed providers only.
 - `GetFastRingBufferGroup()` returns the next group id of the ring, starting at 1.
 
 ## Registered Files and Buffers
@@ -463,8 +472,9 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
   registers a sparse table of 16384 entries. Errors: `-EINVAL` for a `NULL` address or ring,
   `-ENOMEM`, `-EOVERFLOW` when the table is full, or the kernel's error.
 - `UpdateFastRingRegisteredBuffer()` replaces the buffer at `index` and returns `index`; with
-  `address == NULL` it unregisters the slot and returns `INT32_MIN`. `-EINVAL` for a bad index or
-  a ring without a table.
+  `address == NULL` it unregisters the slot and returns `INT32_MIN`, and the slot is free again
+  even if the kernel refused, as it does off the ring thread. A refused replacement leaves the
+  slot as it was. `-EINVAL` for a bad index or a ring without a table.
 
 All four are ring-thread calls: the kernel refuses registration from other threads.
 

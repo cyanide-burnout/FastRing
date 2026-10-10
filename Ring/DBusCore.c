@@ -5,11 +5,15 @@
 
 #include <malloc.h>
 
+#define DBUSCORE_STATE_DISPATCH  (1 << 0)
+#define DBUSCORE_STATE_RELEASED  (1 << 1)
+
 struct DBusCore
 {
   struct FastRing* ring;
   struct FastRingFlusher* flusher;
   DBusConnection* connection;
+  int state;
 };
 
 static void HandleWatchEvent(struct FastRingDescriptor* descriptor, int result)
@@ -145,13 +149,23 @@ static void ToggleTimeout(DBusTimeout* timeout, void* data)
 static void HandleDispatchEvent(void* closure, int reason)
 {
   struct DBusCore* core;
+  DBusDispatchStatus status;
 
   if (reason == RING_REASON_COMPLETE)
   {
-    core          = (struct DBusCore*)closure;
-    core->flusher = NULL;
+    core           = (struct DBusCore*)closure;
+    core->flusher  = NULL;
+    core->state   |= DBUSCORE_STATE_DISPATCH;
+    status         = dbus_connection_dispatch(core->connection);
+    core->state   &= ~DBUSCORE_STATE_DISPATCH;
 
-    if ((dbus_connection_dispatch(core->connection) != DBUS_DISPATCH_COMPLETE) &&
+    if (core->state & DBUSCORE_STATE_RELEASED)
+    {
+      free(core);
+      return;
+    }
+
+    if ((status        != DBUS_DISPATCH_COMPLETE) &&
         (core->flusher == NULL))
     {
       // Schedule one-time call of dbus_connection_dispatch
@@ -206,6 +220,12 @@ void ReleaseDBusCore(struct DBusCore* core)
     dbus_connection_set_watch_functions(core->connection, NULL, NULL, NULL, NULL, NULL);
     dbus_connection_set_dispatch_status_function(core->connection, NULL, NULL, NULL);
     dbus_connection_unref(core->connection);
+
+    if (core->state & DBUSCORE_STATE_DISPATCH)
+    {
+      core->state |= DBUSCORE_STATE_RELEASED;
+      return;
+    }
 
     free(core);
   }

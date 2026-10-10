@@ -25,11 +25,12 @@ _Static_assert(sizeof(struct tls12_crypto_info_aria_gcm_256)      <= sizeof(unio
 
 static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  if (completion == NULL)
+  if ((completion        == NULL) &&
+      (descriptor->state != RING_DESC_STATE_SUBMITTED))
   {
     // Close operation has not been executed (ring teardown): the kernel closes
     // the descriptor on IORING_OP_CLOSE regardless of the reported result, so a
-    // manual close is only needed when the operation never ran
+    // manual close is only needed when the operation never reached the kernel
     close(descriptor->submission.fd);
   }
 
@@ -46,6 +47,8 @@ static void FreeEngine(struct FastBIO* engine, int reason)
     engine->inbound.tail = buffer->next;
     ReleaseFastBuffer(buffer);
   }
+
+  ReleaseFastRingBufferProvider(engine->inbound.provider, ReleaseRingFastBuffer);
 
   if (descriptor = AllocateFastRingDescriptor(engine->ring, HandleReleaseCompletion, NULL))
   {
@@ -296,8 +299,13 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
 
   engine = (struct FastBIO*)descriptor->closure;
 
-  if (unlikely((completion != NULL) &&
-               (completion->res < 0)))
+  if (unlikely(completion == NULL))
+  {
+    // The ring is being released: the handler is not called, as whatever it does would submit to that ring
+    goto Continue;
+  }
+
+  if (unlikely(completion->res < 0))
   {
     if ((descriptor->submission.opcode == IORING_OP_SENDMSG_ZC) &&
         ((completion->res    == -ENOBUFS)   ||
@@ -338,7 +346,6 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
   }
 
   if ((engine->outbound.condition & POLLPRI) &&
-      (completion         != NULL) &&
       (completion->res    >= 0)    &&
       (~completion->flags & IORING_CQE_F_MORE))
   {
@@ -357,8 +364,7 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
       ((descriptor->submission.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) == 0) &&
       ( engine->outbound.condition   & POLLOUT) &&
       ( engine->retry.tail             == NULL) &&
-      (( completion                    == NULL) ||
-       (~completion->flags & IORING_CQE_F_NOTIF)))
+      (~completion->flags & IORING_CQE_F_NOTIF))
   {
     // In case of TCP the kernel may occupy a buffer for much longer,
     // notify handler once about accepted buffer as soon as possible
@@ -386,8 +392,13 @@ static int HandleOptionCompletion(struct FastRingDescriptor* descriptor, struct 
 
   engine = (struct FastBIO*)descriptor->closure;
 
-  if (likely((completion != NULL) &&
-             (completion->res < 0)          &&
+  if (unlikely(completion == NULL))
+  {
+    // The ring is being released, see HandleOutboundCompletion()
+    goto Continue;
+  }
+
+  if (likely((completion->res < 0)          &&
              (completion->res != -EEXIST)   &&
              (completion->res != -EALREADY)))
   {
@@ -415,7 +426,12 @@ static int HandleTouchCompletion(struct FastRingDescriptor* descriptor, struct i
   engine = (struct FastBIO*)descriptor->closure;
   engine->outbound.condition &= ~POLLIN;
 
-  CallHandlerFunction(engine, 0, 0);
+  if (likely(completion != NULL))
+  {
+    // Not while the ring is being released, see HandleOutboundCompletion()
+    CallHandlerFunction(engine, 0, 0);
+  }
+
   ReleaseEngine(engine, reason);
 
   return 0;
@@ -966,10 +982,8 @@ static int HandleBIODestroy(BIO* handle)
     if ((descriptor = engine->inbound.descriptor) &&
         (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING))
     {
-      // io_uring_prep_recvmsg_multishot() is not yet submitted to io_uring
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_nop(&descriptor->submission);
-      PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      // io_uring_prep_recvmsg_multishot() is not yet submitted to io_uring, detach the handler as the engine may be gone before the NOP completes
+      DiscardFastRingDescriptor(descriptor);
       engine->inbound.descriptor = NULL;
       engine->count --;
     }
@@ -1055,7 +1069,7 @@ BIO* CreateFastBIO(struct FastRing* ring, struct FastRingBufferProvider* provide
     engine->function             = function;
     engine->descriptor           = descriptors[0];
     engine->inbound.descriptor   = descriptors[1];
-    engine->inbound.provider     = provider;
+    engine->inbound.provider     = HoldFastRingBufferProvider(provider);  // Released by FreeEngine(), after the last receive completion
     engine->inbound.pool         = inbound;
     engine->outbound.granularity = (granularity > 0) ? granularity : SSL3_RT_MAX_PLAIN_LENGTH;  // Zero would round every outbound allocation down to nothing
     engine->outbound.limit       = ring->ring.sq.ring_entries / 2;

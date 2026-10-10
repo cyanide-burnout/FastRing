@@ -38,8 +38,8 @@ void ReleaseDBusCore(struct DBusCore* core);
 drops the connection reference. Unhooking makes libdbus call the remove functions of the
 adapter for every watch and timeout, which is where their ring objects go away. It does not
 close or disconnect the connection — call `dbus_connection_close()` /
-`dbus_connection_unref()` yourself if you own it. It must not be called from a message
-handler run by the adapter's dispatch: the dispatch flusher uses the `DBusCore` after
+`dbus_connection_unref()` yourself if you own it. Called from a message handler run by the
+adapter's dispatch, it does the same, and the `DBusCore` itself is freed once
 `dbus_connection_dispatch()` returns.
 
 ## Usage

@@ -243,15 +243,20 @@ static int HandleVerifyRequest(int condition, X509_STORE_CTX* context)
 struct SSLSocket* CreateSSLSocket(struct FastRing* ring, struct FastRingBufferProvider* provider, struct FastBufferPool* inbound, struct FastBufferPool* outbound, SSL_CTX* context, int handle, int role, int option, uint32_t granularity, uint32_t limit, HandleSSLSocketEventFunction function, void* closure)
 {
   BIO* engine;
+  SSL* connection;
   struct SSLSocket* socket;
 
-  socket = NULL;
-  engine = NULL;
+  socket     = NULL;
+  engine     = NULL;
+  connection = NULL;
 
-  if ((socket = (struct SSLSocket*)calloc(1, sizeof(struct SSLSocket))) &&
-      (engine = CreateFastBIO(ring, provider, inbound, outbound, handle, option & SSL_OPTION_OP_MASK, granularity, limit, HandleBIOEvent, socket)) &&
-      (socket->connection = SSL_new(context)))
+  // FastBIO is created last: once it exists it owns the handle, which on failure has to stay with the caller
+  if ((socket     = (struct SSLSocket*)calloc(1, sizeof(struct SSLSocket))) &&
+      (connection = SSL_new(context)) &&
+      (engine     = CreateFastBIO(ring, provider, inbound, outbound, handle, option & SSL_OPTION_OP_MASK, granularity, limit, HandleBIOEvent, socket)))
   {
+    socket->connection = connection;
+
     SSL_set_bio(socket->connection, engine, engine);
     SSL_set_mode(socket->connection, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     SSL_set_options(socket->connection, SSL_OP_IGNORE_UNEXPECTED_EOF | option & SSL_OPTION_OP_MASK);
@@ -273,7 +278,7 @@ struct SSLSocket* CreateSSLSocket(struct FastRing* ring, struct FastRingBufferPr
     return socket;
   }
 
-  BIO_free(engine);
+  SSL_free(connection);
   free(socket);
   return NULL;
 }

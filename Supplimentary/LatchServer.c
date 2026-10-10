@@ -117,13 +117,8 @@ void ReleaseLatchServer(struct LatchServer* server)
         (descriptor->function == HandleCompletion) &&
         (descriptor->submission.opcode == IORING_OP_FUTEX_WAIT))
     {
-      descriptor->function = NULL;
-      descriptor->closure  = NULL;
-
-      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);
-      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      // The handler re-arms the wait, so the descriptor may still be queued rather than in the kernel
+      DiscardFastRingDescriptor(descriptor);
     }
 
     munmap(server->latch, sizeof(struct Latch));

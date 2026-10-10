@@ -688,7 +688,7 @@ handler's stack before touching shared state. Its interface and rules are in
 | `SetFastRingFlushHandler()`, `RemoveFastRingFlushHandler()` | The ring thread |
 | `SubmitFastRingEvent()` | The thread of the **source** ring |
 | `AddFastRingRegisteredFile()`, `RemoveFastRingRegisteredFile()`, `AddFastRingRegisteredBuffer()`, `UpdateFastRingRegisteredBuffer()` | The ring thread; the kernel refuses registration from other tasks with `-EEXIST` since Linux 6.1 |
-| Buffer provider: create, release, `AdvanceFastRingBuffer()` | The ring thread |
+| Buffer provider: create, hold, release, `AdvanceFastRingBuffer()` | The ring thread |
 | `IsFastRingThread()` | Any thread |
 
 ```c
@@ -718,12 +718,14 @@ handler then runs on the ring thread, not on the thread that queued it.
 
 ### What ReleaseFastRing() does
 
-1. Every flusher still armed is called with `RING_REASON_RELEASED`, and all flushers are freed.
-2. Every descriptor that is not `FREE` and has a handler is called with
+1. Submission stops: from here on a submission is dropped and `SetFastRingFlushHandler()` returns
+   `NULL`, so what a handler below does on release cannot reach memory being freed.
+2. Every flusher still armed is called with `RING_REASON_RELEASED`, and all flushers are freed.
+3. Every descriptor that is not `FREE` and has a handler is called with
    `(descriptor, NULL, RING_REASON_RELEASED)`, and every descriptor is freed. This includes
    descriptors in flight, event receivers and descriptors that were allocated but never
    submitted.
-3. The probe and the bookkeeping of registered files and buffers are freed, and
+4. The probe and the bookkeeping of registered files and buffers are freed, and
    `io_uring_queue_exit()` closes the ring; the kernel cancels what it still holds.
 
 `ReleaseFastRing()` does not wait for or reap completions. A cancellation queued by a removal or a
@@ -734,9 +736,9 @@ Rules for the `RING_REASON_RELEASED` path:
 
 - `completion` is `NULL`, and the return value is ignored: the descriptor is freed either way.
 - The handler releases the module's own resources: closes file descriptors, frees closures,
-  completes outstanding user requests with an error. It does not submit anything, does not arm
-  flushers (they have been released already and would never run) and does not call back into the
-  ring. `AllocateFastRingDescriptor()` returns `NULL` at this point.
+  completes outstanding user requests with an error. It need not submit anything or arm flushers,
+  which are dropped at this point, and `AllocateFastRingDescriptor()` returns `NULL`; releasing an
+  object whose release submits, a socket from its `POLLHUP` for example, is therefore safe.
 - Descriptors are visited in the reverse order of their first allocation, which says nothing about
   module order. A handler must not assume that the objects it points to are still alive.
 - The built-in Poll, Watch and Timeout handlers do not call the user callbacks; their
@@ -784,8 +786,9 @@ Every completion that consumed a buffer has to be advanced, an error completion 
 included; otherwise the slot is lost for good. Buffers passed to `CreateFastRingBufferProvider()`
 are released through the `ReleaseRingBufferFunction` given to `ReleaseFastRingBufferProvider()`;
 `NULL` leaves them to the caller, for the case where they come from an arena. A provider must be
-released before the ring, and not before the operations that select buffers from its group have
-completed.
+released before the ring. A receiver that holds it with `HoldFastRingBufferProvider()`, as
+`FastSocket` and `FastBIO` do, keeps it registered until its last completion; for operations of
+its own the owner must not release it before they have completed.
 
 ### Registered files and buffers
 

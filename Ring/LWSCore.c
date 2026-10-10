@@ -39,10 +39,11 @@ static int TransmitPendingMessages(struct lws* instance, struct LWSSession* sess
   result  = 0;
   message = NULL;
 
+  // lws_write() returns the length of the payload, so an empty message is written when it returns 0
   while ((message        = session->head) &&
          (message->data != NULL)          &&
-         (result = lws_write(instance, message->data, message->length, message->protocol)) &&
-         (result > 0))
+         (((result = lws_write(instance, message->data, message->length, message->protocol)) > 0) ||
+          (result == 0) && (message->length == 0)))
   {
     session->head = message->next;
     message->next = session->heap;
@@ -119,6 +120,13 @@ void TransmitLWSMessage(struct LWSMessage* message)
 
   session->head = message;
   session->tail = message;
+
+  if (session->instance == NULL)
+  {
+    // Not connected, or the connection is gone: the message stays queued until the session is released
+    return;
+  }
+
   lws_callback_on_writable(session->instance);
   TouchLWSLoop(session->loop);
 }

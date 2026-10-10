@@ -217,10 +217,9 @@ this is what the non-`RING_REASON_COMPLETE` branch of the wakeup handler is for,
 - Arguments are passed by `va_list` and are only valid for the duration of the handler.
   Pointers to the caller's stack are fine, because the caller is blocked meanwhile; the
   handler must not keep them.
-- Do not release the handler role from inside the handler. The handler re-arms its
-  descriptor after the queued calls have run, and the descriptor would then be queued a
-  second time by the abandonment in `ReleaseThreadCall()`, which stops the ring from
-  submitting (see [LIFECYCLE.md](LIFECYCLE.md#the-submission-queue)). Defer it to a flusher.
+- The handler role may be released from inside the handler. The call in progress still
+  completes with `TC_RESULT_CALLED`, the calls queued behind it are cancelled, and the
+  descriptor is not re-armed.
 
 ## Lifecycle
 

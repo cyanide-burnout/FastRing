@@ -34,8 +34,8 @@ void ReleasePicoBundle(struct PicoBundle* bundle);
   size. `AcquirePicoBundle()` and `ReleasePicoBundle()` work from either language.
 - `CreatePicoBundleFromSSLContext()` fixes the key exchanges to secp256r1 and X25519 and the
   cipher suites to those of `ptls_openssl`. It returns `NULL` for a `NULL` context, a
-  context without a private key or certificate, or a certificate chain that cannot be
-  loaded.
+  context without a private key or certificate, a certificate chain that cannot be
+  loaded, or a key type picotls cannot sign with.
 
 ## Lifecycle
 

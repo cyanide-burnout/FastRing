@@ -381,7 +381,9 @@ yet. Ring objects are created on demand and belong to the instance:
 - one poll descriptor per socket libcurl asks to watch, with the single reference set by
   `AllocateFastRingDescriptor()`. When libcurl removes the socket (`CURL_POLL_REMOVE`), the
   descriptor is detached from the instance: a request not yet submitted becomes a NOP, a
-  submitted one is followed by a `POLL_REMOVE`, and the completions return it to the ring;
+  submitted one is followed by a `POLL_REMOVE`, and the completions return it to the ring. A
+  new mask is written into a request not yet submitted or into one whose completion is running;
+  a submitted one is detached the same way and replaced by a new descriptor;
 - one timeout for libcurl's timer, without `TIMEOUT_FLAG_OWNED`: a timeout that fires is
   released by its own completion, a new value updates it, and `-1` removes it;
 - at most one flush handler, armed after socket and timer events and by

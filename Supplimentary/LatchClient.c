@@ -84,7 +84,7 @@ void UnlockLatch(struct LatchClient* client)
       (client->value == atomic_load_explicit(&latch->value, memory_order_relaxed)))
   {
     client->value = 0ULL;
-    atomic_store_explicit(&latch->value, 0, memory_order_relaxed);
+    atomic_store_explicit(&latch->value, 0, memory_order_release);
     while (futex(LATCH(&latch->value), FUTEX_WAKE_BITSET, INT32_MAX, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0);
   }
 }

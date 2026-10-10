@@ -124,9 +124,8 @@ void ReleaseSSLSocket(struct SSLSocket* socket);
 call exists; wait for `SSL_EVENT_CONNECTED`, which also switches FastBIO to asynchronous
 receive.
 
-On success `handle` belongs to the socket. On `NULL` it depends on where creation stopped:
-when the object or the FastBIO could not be created, `handle` is still open; when `SSL_new()`
-failed, the FastBIO has already been freed and closes `handle` itself.
+On success `handle` belongs to the socket. On `NULL` it is left open and stays with the
+caller.
 
 `ReleaseSSLSocket()` detaches the handler, calls `SSL_shutdown()` (a `close_notify` is
 queued if FastBIO accepts the write at that moment), `SSL_free()`, which frees the FastBIO,

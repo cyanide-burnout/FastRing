@@ -79,7 +79,8 @@ static h2o_quic_conn_t* HandleQUICConnection(h2o_quic_ctx_t* quic, quicly_addres
   token = NULL;
   error = NULL;
 
-  if ((packet->token.len != 0) &&
+  if ((packet->token.len != 0)    &&
+      (core->decryptor   != NULL) &&
       (token = (quicly_address_token_plaintext_t*)alloca(sizeof(quicly_address_token_plaintext_t))) &&
       ((quicly_decrypt_address_token(core->decryptor, token, packet->token.base, packet->token.len, 1, &error) != 0) ||
        (h2o_socket_compare_address(&source->sa, &token->remote.sa, token->type == QUICLY_ADDRESS_TOKEN_TYPE_RETRY) != 0)))
@@ -186,6 +187,7 @@ struct H2OCore* CreateH2OCore(uv_loop_t* loop, const struct sockaddr* address, S
       {
         close(handle);
         core->state |= H2OCORE_STATE_UDP_FAILED;
+        return core;
       }
 
       ptls_openssl_random_bytes(core->secret, PTLS_MAX_SECRET_SIZE);
@@ -257,8 +259,9 @@ void UpdateH2OCoreSecurity(struct H2OCore* core, SSL_CTX* context1, ptls_context
     }
   }
 
-  if ((core     != NULL) &&
-      (context2 != NULL))
+  if ((core      != NULL) &&
+      (core->udp != NULL) &&
+      (context2  != NULL))
   {
     core->quicly.tls          = context2;
     context2->on_client_hello = &core->handler;

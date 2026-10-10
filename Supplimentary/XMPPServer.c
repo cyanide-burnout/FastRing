@@ -15,6 +15,35 @@
 #define INBOUND_COUNT       2048
 #define POLL_INTERVAL       5000  // milliseconds
 #define CONNECTION_TIMEOUT  60    // seconds
+#define ACCEPT_PAUSE        100   // milliseconds
+
+static const struct __kernel_timespec delay = { 0, ACCEPT_PAUSE * 1000000L };
+
+static void FreeServer(struct XMPPServer* server);
+
+static inline int __attribute__((always_inline)) CallEventFunction(struct XMPPServer* server, struct XMPPConnection* connection, int event, union XMPPEventData* data)
+{
+  if (!server->active)
+  {
+    // The handler has released the server already and expects nothing more from it
+    return -1;
+  }
+
+  return server->function(server, connection, event, data);
+}
+
+static inline int __attribute__((always_inline)) LeaveServer(struct XMPPServer* server)
+{
+  if ((-- server->depth == 0) &&
+      (!server->active))
+  {
+    // ReleaseXMPPServer() was called from a handler, nothing on the stack uses the server any more
+    FreeServer(server);
+    return 1;
+  }
+
+  return 0;
+}
 
 // Helpers
 
@@ -152,7 +181,7 @@ static void HandleXMLStartElement(void* context, const xmlChar* name, const xmlC
 
     parameter.store    = connection->store;
     connection->state |= XMPP_STATE_GUARD;
-    server->function(server, connection, XMPP_EVENT_STREAM_BEGIN, &parameter);
+    CallEventFunction(server, connection, XMPP_EVENT_STREAM_BEGIN, &parameter);
     connection->state &= ~XMPP_STATE_GUARD;
     return;
   }
@@ -178,7 +207,7 @@ static void HandleXMLStartElement(void* context, const xmlChar* name, const xmlC
 
     parameter.store    = connection->store;
     connection->state |= XMPP_STATE_GUARD;
-    server->function(server, connection, XMPP_EVENT_STANZA_BEGIN, &parameter);
+    CallEventFunction(server, connection, XMPP_EVENT_STANZA_BEGIN, &parameter);
     connection->state &= ~XMPP_STATE_GUARD;
     return;
   }
@@ -224,7 +253,7 @@ static void HandleXMLEndElement(void* context, const xmlChar* name, const xmlCha
   if (connection->depth <= 0)
   {
     connection->state |= XMPP_STATE_GUARD;
-    server->function(server, connection, XMPP_EVENT_STREAM_END, NULL);
+    CallEventFunction(server, connection, XMPP_EVENT_STREAM_END, NULL);
     connection->state &= ~XMPP_STATE_GUARD;
     return;
   }
@@ -233,7 +262,7 @@ static void HandleXMLEndElement(void* context, const xmlChar* name, const xmlCha
   {
     parameter.store    = connection->store;
     connection->state |= XMPP_STATE_GUARD;
-    server->function(server, connection, XMPP_EVENT_STANZA_END, &parameter);
+    CallEventFunction(server, connection, XMPP_EVENT_STANZA_END, &parameter);
     connection->state &= ~XMPP_STATE_GUARD;
     return;
   }
@@ -291,10 +320,14 @@ static void HandleSocket(struct FastSocket* socket, int event, int parameter)
 {
   int result;
   struct FastBuffer* buffer;
+  struct XMPPServer* server;
   struct XMPPConnection* connection;
 
   connection = (struct XMPPConnection*)socket->closure;
+  server     = connection->server;
   result     = (event & POLLHUP) || (event & POLLERR);
+
+  server->depth ++;
 
   if (event & POLLIN)
   {
@@ -317,8 +350,10 @@ static void HandleSocket(struct FastSocket* socket, int event, int parameter)
       (connection->state & XMPP_STATE_FAILURE))
   {
     connection->state |= XMPP_STATE_FAILURE;
-    DestroyConnection(connection->server, connection);
+    DestroyConnection(server, connection);
   }
+
+  LeaveServer(server);
 }
 
 static int CreateConnection(struct XMPPServer* server, int handle, struct sockaddr* address, socklen_t length)
@@ -371,7 +406,7 @@ static void DestroyConnection(struct XMPPServer* server, struct XMPPConnection* 
         (~connection->state & XMPP_STATE_DESTROY))
     {
       connection->state |= XMPP_STATE_GUARD;
-      server->function(server, connection, XMPP_EVENT_CONNECTION_DESTROY, NULL);
+      CallEventFunction(server, connection, XMPP_EVENT_CONNECTION_DESTROY, NULL);
     }
 
     xmlParseChunk(connection->parser, NULL, 0, 1);
@@ -404,13 +439,44 @@ static int HandleConnection(struct FastRingDescriptor* descriptor, struct io_uri
   if ((completion != NULL) &&
       (server      = (struct XMPPServer*)descriptor->closure))
   {
+    if (descriptor->submission.opcode == IORING_OP_TIMEOUT)
+    {
+      // The pause is over
+      descriptor->data.socket.length = sizeof(struct sockaddr_storage);
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_accept(&descriptor->submission, server->handle, (struct sockaddr*)&descriptor->data.socket.address, &descriptor->data.socket.length, 0);
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
+
+    if ((completion->res == -EMFILE)  ||
+        (completion->res == -ENFILE)  ||
+        (completion->res == -ENOBUFS) ||
+        (completion->res == -ENOMEM))
+    {
+      // Out of descriptors or memory: accepting again at once would spin until some are freed
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_timeout(&descriptor->submission, (struct __kernel_timespec*)&delay, 0, 0);
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
+
+    server->depth    ++;
     parameter.address = (struct sockaddr*)&descriptor->data.socket.address;
+
     if ((completion->res >= 0) &&
-        ((server->function(server, NULL, XMPP_EVENT_CONNECTION_ACCEPT, &parameter) < 0) ||
+        ((CallEventFunction(server, NULL, XMPP_EVENT_CONNECTION_ACCEPT, &parameter) < 0) ||
+         (!server->active) ||
          (CreateConnection(server, completion->res, (struct sockaddr*)&descriptor->data.socket.address, descriptor->data.socket.length) < 0)))
     {
       //
       RejectConnection(server, completion->res);
+    }
+
+    if (LeaveServer(server))
+    {
+      // The server is gone, and the accept has been discarded by it
+      return 0;
     }
 
     descriptor->data.socket.length = sizeof(struct sockaddr_storage);
@@ -421,30 +487,46 @@ static int HandleConnection(struct FastRingDescriptor* descriptor, struct io_uri
   return 0;
 }
 
+static int HandleDiscardCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+{
+  if ((completion != NULL) &&
+      (completion->res >= 0) &&
+      (~completion->user_data & RING_DESC_OPTION_IGNORE))
+  {
+    // The accept completed before its cancellation
+    close(completion->res);
+  }
+
+  return 0;
+}
+
 static void HandleTimeout(struct FastRingDescriptor* descriptor)
 {
   struct XMPPConnection* connection;
-  struct XMPPConnection* next;
   struct XMPPServer* server;
   struct timespec time;
 
-  server     = (struct XMPPServer*)descriptor->closure;
-  connection = server->connections;
+  server = (struct XMPPServer*)descriptor->closure;
 
   clock_gettime(CLOCK_MONOTONIC, &time);
 
-  while (connection != NULL)
-  {
-    next = connection->next;
+  server->depth ++;
 
-    if (time.tv_sec >= (connection->time.tv_sec + CONNECTION_TIMEOUT))
+  Continue:
+
+  for (connection = server->connections; connection != NULL; connection = connection->next)
+  {
+    if ((~connection->state & XMPP_STATE_TIMEOUT) &&
+        (time.tv_sec >= (connection->time.tv_sec + CONNECTION_TIMEOUT)))
     {
+      // A handler of the destroy event may close any other connection, so the walk starts over from the head
       connection->state |= XMPP_STATE_TIMEOUT;
       DestroyConnection(server, connection);
+      goto Continue;
     }
-
-    connection = next;
   }
+
+  LeaveServer(server);
 }
 
 struct XMPPServer* CreateXMPPServer(struct FastRing* ring, HandleXMPPEvent function, void* closure, int port)
@@ -478,6 +560,7 @@ struct XMPPServer* CreateXMPPServer(struct FastRing* ring, HandleXMPPEvent funct
     }
 
     server->ring     = ring;
+    server->active   = 1;
     server->closure  = closure;
     server->function = function;
 
@@ -504,31 +587,44 @@ struct XMPPServer* CreateXMPPServer(struct FastRing* ring, HandleXMPPEvent funct
   return server;
 }
 
-void ReleaseXMPPServer(struct XMPPServer* server)
+static void FreeServer(struct XMPPServer* server)
 {
   struct FastRingDescriptor* descriptor;
   struct XMPPConnection* connection;
 
+  while (connection = server->connections)
+  {
+    connection->state |= XMPP_STATE_DESTROY;
+    DestroyConnection(server, connection);
+  }
+
+  if (descriptor = server->listner)
+  {
+    // Closing the handle does not stop the accept held by the kernel, so cancel it and close a connection it may still deliver
+    DiscardFastRingDescriptor(descriptor);
+    descriptor->function = HandleDiscardCompletion;
+  }
+
+  SetFastRingTimeout(server->ring, server->timeout, -1, 0, NULL, NULL);
+  ReleaseFastRingBufferProvider(server->provider, ReleaseRingFastBuffer);
+  ReleaseFastBufferPool(server->outbound);
+  ReleaseFastBufferPool(server->inbound);
+  close(server->handle);
+  free(server);
+}
+
+void ReleaseXMPPServer(struct XMPPServer* server)
+{
   if (server != NULL)
   {
-    while (connection = server->connections)
+    if (server->depth > 0)
     {
-      connection->state |= XMPP_STATE_DESTROY;
-      DestroyConnection(server, connection);
+      // Called from a handler: the server is freed once the dispatch that called it returns
+      server->active = 0;
+      return;
     }
 
-    if (descriptor = server->listner)
-    {
-      descriptor->function = NULL;
-      descriptor->closure  = NULL;
-    }
-
-    SetFastRingTimeout(server->ring, server->timeout, -1, 0, NULL, NULL);
-    ReleaseFastRingBufferProvider(server->provider, ReleaseRingFastBuffer);
-    ReleaseFastBufferPool(server->outbound);
-    ReleaseFastBufferPool(server->inbound);
-    close(server->handle);
-    free(server);
+    FreeServer(server);
   }
 }
 

@@ -99,6 +99,7 @@ static void HandleRequest(struct FastGLoop* loop)
     {
       io_uring_prep_poll_remove(&descriptor->submission, other->identifier);
       SubmitFastRingDescriptor(descriptor, 0);
+      other->closure   = NULL;  // The replaced poll may complete anyway, and then it must not touch the loop
       data->descriptor = NULL;
     }
 
@@ -138,9 +139,9 @@ static int HandleResponse(struct FastRingDescriptor* descriptor, struct io_uring
   int handle;
 
   if ((completion      != NULL) &&
-      (completion->res != -ECANCELED))
+      (completion->res != -ECANCELED) &&
+      (loop             = (struct FastGLoop*)descriptor->closure))
   {
-    loop      = (struct FastGLoop*)descriptor->closure;
     condition = FALSE;
 
     switch (descriptor->submission.opcode)
@@ -238,8 +239,14 @@ static void RunLoop()
 {
   g_main_loop_run(state->loop);
 
-  state->entries = NULL;
-  state->count   = 0;
+  // The fiber ends here and nothing may switch into it again: drop a pending flusher and keep
+  // the completions of the polls and the timeout still in the kernel from arming another one
+  RemoveFastRingFlushHandler(state->ring, state->flusher);
+
+  state->flusher   = NULL;
+  state->condition = TRUE;
+  state->entries   = NULL;
+  state->count     = 0;
 
   setcontext(state->fibers + FIBER_MAIN);
 }

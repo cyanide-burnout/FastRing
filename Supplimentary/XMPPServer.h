@@ -82,6 +82,9 @@ struct XMPPServer
   int handle;
   void* closure;
   HandleXMPPEvent function;
+
+  int depth;
+  int active;
   struct XMPPConnection* connections;
 
   struct FastRing* ring;

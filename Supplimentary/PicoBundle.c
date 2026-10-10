@@ -54,8 +54,22 @@ struct PicoBundle* CreatePicoBundleFromSSLContext(SSL_CTX* context)
       return NULL;
     }
 
+    if (ptls_openssl_init_sign_certificate(&bundle->signer, bundle->key) != 0)
+    {
+      // The key type has no signature scheme in picotls, a handshake would use an empty signer
+      while (bundle->context.certificates.count != 0)
+      {
+        // No built-in method found to free certificates
+        free(bundle->context.certificates.list[-- bundle->context.certificates.count].base);
+      }
+
+      free(bundle->context.certificates.list);
+      EVP_PKEY_free(bundle->key);
+      free(bundle);
+      return NULL;
+    }
+
     ptls_init_compressed_certificate(&bundle->emitter, bundle->context.certificates.list, bundle->context.certificates.count, ptls_iovec_init(NULL, 0));
-    ptls_openssl_init_sign_certificate(&bundle->signer, bundle->key);
 
     bundle->context.emit_certificate  = &bundle->emitter.super;
     bundle->context.sign_certificate  = &bundle->signer.super;

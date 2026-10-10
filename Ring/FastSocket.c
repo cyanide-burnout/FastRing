@@ -12,9 +12,10 @@
 
 static int HandleReleaseCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
-  if (completion == NULL)
+  if ((completion        == NULL) &&
+      (descriptor->state != RING_DESC_STATE_SUBMITTED))
   {
-    // Close manually only if the queued close never ran
+    // Close manually only if the queued close never reached the kernel, a submitted one has closed the handle already
     close(descriptor->submission.fd);
   }
 
@@ -38,6 +39,8 @@ static void FreeSocketInstance(struct FastSocket* socket, int reason)
     socket->outbound.stack = batch->next;
     free(batch);
   }
+
+  ReleaseFastRingBufferProvider(socket->inbound.provider, ReleaseRingFastBuffer);
 
   if (descriptor = AllocateFastRingDescriptor(socket->ring, HandleReleaseCompletion, NULL))
   {
@@ -327,6 +330,12 @@ static int HandleOutboundCompletion(struct FastRingDescriptor* descriptor, struc
     goto Continue;
   }
 
+  if (unlikely(completion == NULL))
+  {
+    // The ring is being released: nothing may be submitted or scheduled any more, only what the descriptor holds is released
+    goto Release;
+  }
+
   if (unlikely((descriptor->submission.opcode == IORING_OP_POLL_ADD) &&
                (completion      != NULL) &&
                (completion->res >= POLLERR)))
@@ -466,6 +475,9 @@ struct FastSocket* CreateFastSocket(struct FastRing* ring, struct FastRingBuffer
       free(socket);
       return NULL;
     }
+
+    // Released by FreeSocketInstance(), which runs only after the last receive completion
+    HoldFastRingBufferProvider(provider);
 
     if ((limit > 0) &&
         (limit < socket->outbound.limit))
@@ -797,9 +809,8 @@ void ReleaseFastSocket(struct FastSocket* socket)
     if ((descriptor = socket->inbound.descriptor) &&
         (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING))
     {
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_nop(&descriptor->submission);
-      PrepareFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      // Not submitted yet: rewritten as a NOP with the handler detached, the socket may be gone before it completes
+      DiscardFastRingDescriptor(descriptor);
       socket->inbound.descriptor = NULL;
       socket->count --;
     }

@@ -54,8 +54,8 @@ callbacks stay installed, so the `SambarOpaque` must stay valid until
 `smb2_destroy_context()` has returned.
 
 `opaque` must be zeroed before the first attach and detached before it is attached to
-another context: attaching an opaque that still holds a timeout only updates that timeout,
-whose closure remains the previous context.
+another context. Attaching it again replaces a timeout left from the previous attach, but the
+polls of the previous context stay registered until that context is detached.
 
 ### Embedding the opaque
 
@@ -98,7 +98,8 @@ void CloseSambarListener(struct SambarListener* listener);
 `OpenSambarListener()` creates an `AF_INET6` listening socket bound to `::` (it accepts IPv4
 as well unless `net.ipv6.bindv6only` is set) with
 `SO_REUSEADDR`, `SO_REUSEPORT`, `TCP_NODELAY` and `TCP_DEFER_ACCEPT`, and arms a
-re-submitted `IORING_OP_ACCEPT` on the ring. For every accepted connection it builds a
+re-submitted `IORING_OP_ACCEPT` on the ring; when the process runs out of descriptors or
+memory, the next accept waits 100 ms. For every accepted connection it builds a
 fresh `smb2_context`, installs the accepted descriptor into it, and calls `function`.
 This is the asynchronous equivalent of libsmb2's `smb2_serve_port_async()`. It returns `NULL`
 when the socket cannot be set up or the listener allocated. An accept that fails (for
@@ -109,10 +110,10 @@ The callback owns the context: it is expected to call `AttachSambarOpaque()` and
 eventually, `DetachSambarOpaque()` plus `smb2_destroy_context()`. If
 `smb2_init_context()` fails, the accepted descriptor is closed and no callback is made.
 
-`CloseSambarListener()` detaches the accept handler, closes the listening socket and
-frees the listener. The outstanding accept is not cancelled: it holds the socket in the
-kernel, so the port keeps listening until one more connection completes the request, and
-the descriptor of that connection is not closed.
+`CloseSambarListener()` cancels the outstanding accept with
+`DiscardFastRingDescriptor()`, closes the listening socket and frees the listener. A
+connection the accept still delivers before the cancellation takes effect is closed without
+a callback.
 
 ## Constraints
 

@@ -150,15 +150,21 @@ static int HandleThreadWakeupCompletion(struct FastRingDescriptor* descriptor, s
 static void PostThreadCallResult(struct ThreadCall* call, struct ThreadCallState* state, int result, int wake)
 {
   uint32_t tag;
+  int feature;
+  struct FastRing* ring;
   struct FastRingDescriptor* descriptor;
 
-  tag = atomic_load_explicit(&state->tag, memory_order_relaxed);
+  // Read before the result is published: a caller woken by anything else sees it, returns and may release the call
+  tag     = atomic_load_explicit(&state->tag, memory_order_relaxed);
+  ring    = call->ring;
+  feature = call->feature;
+
   atomic_store_explicit(&state->result, result, memory_order_release);
 
 #ifdef TC_FEATURE_RING_FUTEX
-  if ((wake          == TC_WAKE_LAZY)          &&
-      (call->feature == TC_FEATURE_RING_FUTEX) &&
-      (descriptor     = AllocateFastRingDescriptor(call->ring, HandleThreadWakeupCompletion, state)))
+  if ((wake       == TC_WAKE_LAZY)          &&
+      (feature    == TC_FEATURE_RING_FUTEX) &&
+      (descriptor  = AllocateFastRingDescriptor(ring, HandleThreadWakeupCompletion, state)))
   {
     if (tag == atomic_load_explicit(&state->tag, memory_order_relaxed))
     {
@@ -190,7 +196,8 @@ static int HandleThreadCallCompletion(struct FastRingDescriptor* descriptor, str
       PostThreadCallResult(call, state, TC_RESULT_CALLED, TC_WAKE_LAZY);
     }
 
-    if (completion != NULL)
+    if ((completion          != NULL) &&
+        (descriptor->closure != NULL))
     {
       SubmitFastRingDescriptor(descriptor, 0);
       return 1;

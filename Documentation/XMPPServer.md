@@ -94,7 +94,8 @@ allocation failure, and the errors of `TransmitFastSocketData()` (`-EPIPE`, `-EA
 ## Lifecycle
 
 `CreateXMPPServer()` creates a listening TCP socket on `[::]:port` and, on the ring, one
-accept descriptor re-armed after every completion (also after an error), a repeating 5 s
+accept descriptor re-armed after every completion (also after an error, and 100 ms later when
+the process runs out of descriptors or memory), a repeating 5 s
 timeout, a buffer provider fed from the inbound pool, and the inbound and outbound pools. Only
 a failure to set up the socket returns `NULL`. Each accepted connection gets a `FastSocket` and
 a libxml2 push parser; the server keeps its connections in a list.
@@ -106,11 +107,12 @@ parser and the connection and releases the `FastSocket`. A connection pointer is
 its destroy event, after `CloseXMPPConnection()` returns outside a handler, and after the batch
 in which it was closed from a handler.
 
-`ReleaseXMPPServer()` destroys every connection, detaches the accept handler, removes the
-timeout, releases the provider and its references to the pools, closes the listening socket
-and frees the server. It must not be called from an event handler. The pending accept is not
-cancelled: it holds the socket in the kernel, so the port keeps listening until one more
-connection completes the request, and the descriptor of that connection is not closed.
+`ReleaseXMPPServer()` destroys every connection, cancels the pending accept with
+`DiscardFastRingDescriptor()`, removes the timeout, releases the provider and its references to
+the pools, closes the listening socket and frees the server. Called from an event handler, it
+only marks the server: no further event is delivered, a pending connection is rejected, and the
+server is released as described once the dispatch that called the handler returns. A connection
+the accept still delivers before the cancellation takes effect is closed without an event.
 
 Release the server on the ring thread and before the ring. If `ReleaseFastRing()` runs first,
 the accept and the timer are dropped without callbacks, every live connection is destroyed

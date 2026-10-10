@@ -370,11 +370,13 @@ struct FastRingBufferProvider
   struct FastRing* ring;
   struct io_uring_buf_reg registration;
   struct io_uring_buf_ring* data;
+  uint32_t references;
   uint32_t length;
   uintptr_t map[0];
 };
 
 struct FastRingBufferProvider* CreateFastRingBufferProvider(struct FastRing* ring, uint16_t group, uint16_t count, uint32_t length, CreateRingBufferFunction function, void* closure);
+struct FastRingBufferProvider* HoldFastRingBufferProvider(struct FastRingBufferProvider* provider);
 void ReleaseFastRingBufferProvider(struct FastRingBufferProvider* provider, ReleaseRingBufferFunction function);
 
 void PrepareFastRingBuffer(struct FastRingBufferProvider* provider, struct io_uring_sqe* submission);

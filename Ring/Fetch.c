@@ -56,12 +56,18 @@ static int HandleSocketCompletion(struct FastRingDescriptor* descriptor, struct 
   if ((reason == RING_REASON_COMPLETE) &&
       (fetch   = (struct Fetch*)descriptor->closure))
   {
-    if (completion->res > 0)
+    if (completion->res != 0)
     {
-      mask =
-        (((completion->res & (POLLIN                       )) != 0) * (CURL_CSELECT_IN                    )) |
-        (((completion->res & (POLLOUT                      )) != 0) * (CURL_CSELECT_OUT                   )) |
-        (((completion->res & (POLLERR | POLLHUP | POLLRDHUP)) != 0) * (CURL_CSELECT_IN  | CURL_CSELECT_ERR));
+      // A failed poll, on a closed descriptor for example, is reported as an error: polling again at once would repeat it forever
+      mask = CURL_CSELECT_IN | CURL_CSELECT_ERR;
+
+      if (completion->res > 0)
+      {
+        mask =
+          (((completion->res & (POLLIN                       )) != 0) * (CURL_CSELECT_IN                    )) |
+          (((completion->res & (POLLOUT                      )) != 0) * (CURL_CSELECT_OUT                   )) |
+          (((completion->res & (POLLERR | POLLHUP | POLLRDHUP)) != 0) * (CURL_CSELECT_IN  | CURL_CSELECT_ERR));
+      }
 
       descriptor->data.number = CURL_CSELECT_IN;
 
@@ -112,12 +118,19 @@ static int HandleSocketOperation(CURL* easy, curl_socket_t handle, int operation
       return 0;
     }
 
+    // The poll is in the kernel and the call does not come from its own completion, so it cannot
+    // be patched: it is removed, and unless the socket goes too, a new poll below replaces it
+    descriptor->function = NULL;
+    descriptor->closure  = NULL;
+
+    atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
+    io_uring_initialize_sqe(&descriptor->submission);
+    io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
+    SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+
     if (operation == CURL_POLL_REMOVE)
     {
-      atomic_fetch_add_explicit(&descriptor->references, 1, memory_order_relaxed);
-      io_uring_initialize_sqe(&descriptor->submission);
-      io_uring_prep_poll_remove(&descriptor->submission, descriptor->identifier);
-      SubmitFastRingDescriptor(descriptor, RING_DESC_OPTION_IGNORE);
+      // Socket is gone
       return 0;
     }
   }
@@ -400,6 +413,9 @@ struct FetchTransmission* MakeExtendedFetchTransmission(struct Fetch* fetch, str
 
     curl_multi_add_handle(fetch->multi, transmission->easy);
     curl_multi_socket_action(fetch->multi, CURL_SOCKET_TIMEOUT, 0, &count);
+
+    // The transfer may have ended already, a failed connect for example, and nothing else would report it
+    TouchTransmissionQueue(fetch);
 
     return transmission;
   }

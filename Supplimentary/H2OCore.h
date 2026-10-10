@@ -3,7 +3,7 @@
 
 #include <uv.h>
 
-#ifndef DUSE_LOCAL_H2O
+#ifndef USE_LOCAL_H2O
 #include <h2o.h>
 #include <h2o/http3_server.h>
 #else

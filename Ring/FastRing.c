@@ -190,9 +190,12 @@ static inline __attribute__((always_inline)) void SubmitRingDescriptorRange(stru
 {
   struct FastRingDescriptor* descriptor;
 
-  atomic_store_explicit(&last->next, NULL, memory_order_relaxed);
-  descriptor = atomic_exchange_explicit(&set->pending, last, memory_order_relaxed);
-  atomic_store_explicit(&descriptor->next, first, memory_order_release);
+  if (likely(atomic_load_explicit(&set->pending, memory_order_relaxed) != NULL))
+  {
+    atomic_store_explicit(&last->next, NULL, memory_order_relaxed);
+    descriptor = atomic_exchange_explicit(&set->pending, last, memory_order_relaxed);
+    atomic_store_explicit(&descriptor->next, first, memory_order_release);
+  }
 }
 
 static inline __attribute__((always_inline)) void PrepareRingDescriptor(struct FastRingDescriptor* descriptor, int option)
@@ -597,6 +600,7 @@ struct FastRingFlusher* __attribute__((hot)) SetFastRingFlushHandler(struct Fast
   flusher = NULL;
 
   if (likely((ring != NULL) &&
+             (atomic_load_explicit(&ring->descriptors.pending, memory_order_relaxed) != NULL) &&  // Not while ReleaseFastRing() frees the flushers
              ((flusher = PopRingFlusher(&ring->flushers.available)) ||
               (flusher = (struct FastRingFlusher*)memalign(RING_FLUSH_ALIGNMENT, sizeof(struct FastRingFlusher))))))
   {
@@ -682,6 +686,12 @@ struct FastRing* CreateFastRing(uint32_t length)
     ring->thread                 = gettid();
     ring->descriptors.submitting = AllocateRingDescriptor(&ring->descriptors);
 
+    if (ring->descriptors.submitting == NULL)
+    {
+      ReleaseFastRing(ring);
+      return NULL;
+    }
+
     atomic_store_explicit(&ring->descriptors.pending, ring->descriptors.submitting, memory_order_release);
   }
 
@@ -692,6 +702,7 @@ void ReleaseFastRing(struct FastRing* ring)
 {
   if (ring != NULL)
   {
+    atomic_store_explicit(&ring->descriptors.pending, NULL, memory_order_relaxed);
     ReleaseRingFlusherStack(&ring->flushers.pending);
     ReleaseRingFlusherStack(&ring->flushers.available);
     ReleaseRingDescriptorHeap(&ring->descriptors);
@@ -1709,9 +1720,10 @@ struct FastRingBufferProvider* CreateFastRingBufferProvider(struct FastRing* rin
     return NULL;
   }
 
-  provider->ring   = ring;
-  provider->data   = data;
-  provider->length = length;
+  provider->ring       = ring;
+  provider->data       = data;
+  provider->length     = length;
+  provider->references = 1;
 
   provider->registration.ring_addr    = (uintptr_t)data;
   provider->registration.ring_entries = count;
@@ -1741,10 +1753,27 @@ struct FastRingBufferProvider* CreateFastRingBufferProvider(struct FastRing* rin
   return provider;
 }
 
+struct FastRingBufferProvider* HoldFastRingBufferProvider(struct FastRingBufferProvider* provider)
+{
+  if (provider != NULL)
+  {
+    // Ring thread only, as is everything else about the provider
+    provider->references ++;
+  }
+
+  return provider;
+}
+
 void ReleaseFastRingBufferProvider(struct FastRingBufferProvider* provider, ReleaseRingBufferFunction function)
 {
   if (provider != NULL)
   {
+    if (-- provider->references != 0)
+    {
+      // A receiver still selects buffers from it
+      return;
+    }
+
     io_uring_unregister_buf_ring(&provider->ring->ring, provider->registration.bgid);
 
     while ((function != NULL) && (provider->registration.ring_entries > 0))
@@ -1783,10 +1812,11 @@ void AdvanceFastRingBuffer(struct FastRingBufferProvider* provider, struct io_ur
   {
     index = completion->flags >> IORING_CQE_BUFFER_SHIFT;
 
-    if (likely(function != NULL))
+    if (likely(function != NULL) &&
+        unlikely((provider->map[index] = (uintptr_t)function(provider->length, closure)) == 0))
     {
-      // Replace existing buffer with new supplied
-      provider->map[index] = (uintptr_t)function(provider->length, closure);
+      // Allocation failed: the slot is not given back to the kernel, which would write to address 0
+      return;
     }
 
     tail  = atomic_load_explicit((_Atomic __u16*)&provider->data->tail, memory_order_relaxed);
@@ -1967,6 +1997,7 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
 {
   __u64 tag;
   int result;
+  struct iovec update;
   struct iovec* vector;
 
   result = -EINVAL;
@@ -1979,22 +2010,26 @@ int UpdateFastRingRegisteredBuffer(struct FastRing* ring, int index, void* addre
     if (likely((ring->buffers.vectors != NULL) &&
                (index < ring->buffers.length)))
     {
-      vector           = ring->buffers.vectors + index;
-      vector->iov_base = address;
-      vector->iov_len  = length;
+      vector          = ring->buffers.vectors + index;
+      update.iov_base = address;
+      update.iov_len  = length;
 
       tag    = 0;
-      result = io_uring_register_buffers_update_tag(&ring->ring, index, vector, &tag, 1);
+      result = io_uring_register_buffers_update_tag(&ring->ring, index, &update, &tag, 1);
 
-      if (likely(result >= 0))
+      if (address == NULL)
       {
-        result = index;
-
-        if (address == NULL)
-        {
-          ring->buffers.count --;
-          result = INT32_MIN;
-        }
+        // The slot is free even when the kernel refused, as it does off the ring thread since 6.1:
+        // the stale registration is never used and is replaced when the slot is taken again
+        ring->buffers.count -= (vector->iov_base != NULL);
+        *vector = update;
+        result  = INT32_MIN;
+      }
+      else if (likely(result >= 0))
+      {
+        // Only what the kernel has accepted is recorded
+        *vector = update;
+        result  = index;
       }
     }
 

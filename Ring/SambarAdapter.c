@@ -1,6 +1,7 @@
 #include "SambarAdapter.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <malloc.h>
 #include <string.h>
 #include <unistd.h>
@@ -9,6 +10,9 @@
 #include <netinet/tcp.h>
 
 #define SAMBAR_TIMEOUT_INTERVAL  1000
+#define SAMBAR_ACCEPT_PAUSE      100   // milliseconds
+
+static const struct __kernel_timespec delay = { 0, SAMBAR_ACCEPT_PAUSE * 1000000L };
 
 static void HandlePollEvent(int handle, uint32_t events, void* closure, uint64_t options)
 {
@@ -60,8 +64,10 @@ void AttachSambarOpaque(struct SambarOpaque* opaque, struct FastRing* ring, stru
   int handle;
   uint64_t mask;
 
+  // An update would keep the context of a previous attach in the timeout, so a timeout left from one is removed
+  opaque->timeout = SetFastRingTimeout(opaque->ring, opaque->timeout, -1, 0, NULL, NULL);
   opaque->ring    = ring;
-  opaque->timeout = SetFastRingTimeout(ring, opaque->timeout, SAMBAR_TIMEOUT_INTERVAL, TIMEOUT_FLAG_REPEAT, HandleTimeoutEvent, context);
+  opaque->timeout = SetFastRingTimeout(ring, NULL, SAMBAR_TIMEOUT_INTERVAL, TIMEOUT_FLAG_REPEAT, HandleTimeoutEvent, context);
 
   smb2_set_opaque(context, opaque);
   smb2_fd_event_callbacks(context, HandleDescriptorChange, HandleEventChange);
@@ -109,6 +115,28 @@ static int HandleAcceptCompletion(struct FastRingDescriptor* descriptor, struct 
   if ((completion != NULL) &&
       (listener = (struct SambarListener*)descriptor->closure))
   {
+    if (descriptor->submission.opcode == IORING_OP_TIMEOUT)
+    {
+      // The pause is over
+      descriptor->data.socket.length = sizeof(struct sockaddr_storage);
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_accept(&descriptor->submission, listener->handle, (struct sockaddr*)&descriptor->data.socket.address, &descriptor->data.socket.length, SOCK_CLOEXEC | SOCK_NONBLOCK);
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
+
+    if ((completion->res == -EMFILE)  ||
+        (completion->res == -ENFILE)  ||
+        (completion->res == -ENOBUFS) ||
+        (completion->res == -ENOMEM))
+    {
+      // Out of descriptors or memory: accepting again at once would spin until some are freed
+      io_uring_initialize_sqe(&descriptor->submission);
+      io_uring_prep_timeout(&descriptor->submission, (struct __kernel_timespec*)&delay, 0, 0);
+      SubmitFastRingDescriptor(descriptor, 0);
+      return 1;
+    }
+
     if (completion->res >= 0)
     {
       if (context = smb2_init_context())
@@ -128,6 +156,19 @@ static int HandleAcceptCompletion(struct FastRingDescriptor* descriptor, struct 
     descriptor->data.socket.length = sizeof(struct sockaddr_storage);
     SubmitFastRingDescriptor(descriptor, 0);
     return 1;
+  }
+
+  return 0;
+}
+
+static int HandleDiscardCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
+{
+  if ((completion != NULL) &&
+      (completion->res >= 0) &&
+      (~completion->user_data & RING_DESC_OPTION_IGNORE))
+  {
+    // The accept completed before its cancellation
+    close(completion->res);
   }
 
   return 0;
@@ -184,8 +225,9 @@ void CloseSambarListener(struct SambarListener* listener)
   {
     if (descriptor = listener->accept)
     {
-      descriptor->function = NULL;
-      descriptor->closure  = NULL;
+      // Closing the handle does not stop the accept held by the kernel, so cancel it and close a connection it may still deliver
+      DiscardFastRingDescriptor(descriptor);
+      descriptor->function = HandleDiscardCompletion;
     }
 
     close(listener->handle);
