@@ -1720,10 +1720,11 @@ struct FastRingBufferProvider* CreateFastRingBufferProvider(struct FastRing* rin
     return NULL;
   }
 
-  provider->ring       = ring;
-  provider->data       = data;
-  provider->length     = length;
-  provider->references = 1;
+  provider->ring   = ring;
+  provider->data   = data;
+  provider->length = length;
+
+  atomic_store_explicit(&provider->references, 1, memory_order_relaxed);
 
   provider->registration.ring_addr    = (uintptr_t)data;
   provider->registration.ring_entries = count;
@@ -1757,8 +1758,8 @@ struct FastRingBufferProvider* HoldFastRingBufferProvider(struct FastRingBufferP
 {
   if (provider != NULL)
   {
-    // Ring thread only, as is everything else about the provider
-    provider->references ++;
+    // Dropped by the receiver once its last completion that may select a buffer has been handled
+    atomic_fetch_add_explicit(&provider->references, 1, memory_order_relaxed);
   }
 
   return provider;
@@ -1766,14 +1767,9 @@ struct FastRingBufferProvider* HoldFastRingBufferProvider(struct FastRingBufferP
 
 void ReleaseFastRingBufferProvider(struct FastRingBufferProvider* provider, ReleaseRingBufferFunction function)
 {
-  if (provider != NULL)
+  if ((provider != NULL) &&
+      (atomic_fetch_sub_explicit(&provider->references, 1, memory_order_acq_rel) == 1))
   {
-    if (-- provider->references != 0)
-    {
-      // A receiver still selects buffers from it
-      return;
-    }
-
     io_uring_unregister_buf_ring(&provider->ring->ring, provider->registration.bgid);
 
     while ((function != NULL) && (provider->registration.ring_entries > 0))

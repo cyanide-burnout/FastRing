@@ -370,7 +370,7 @@ struct FastRingBufferProvider
   struct FastRing* ring;
   struct io_uring_buf_reg registration;
   struct io_uring_buf_ring* data;
-  uint32_t references;
+  ATOMIC(uint32_t) references;
   uint32_t length;
   uintptr_t map[0];
 };

@@ -34,7 +34,7 @@ static inline int __attribute__((always_inline)) CallEventFunction(struct XMPPSe
 
 static inline int __attribute__((always_inline)) LeaveServer(struct XMPPServer* server)
 {
-  if ((-- server->depth == 0) &&
+  if (((-- server->depth) == 0) &&
       (!server->active))
   {
     // ReleaseXMPPServer() was called from a handler, nothing on the stack uses the server any more

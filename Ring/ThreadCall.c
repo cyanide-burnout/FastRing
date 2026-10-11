@@ -149,8 +149,8 @@ static int HandleThreadWakeupCompletion(struct FastRingDescriptor* descriptor, s
 
 static void PostThreadCallResult(struct ThreadCall* call, struct ThreadCallState* state, int result, int wake)
 {
-  uint32_t tag;
   int feature;
+  uint32_t tag;
   struct FastRing* ring;
   struct FastRingDescriptor* descriptor;
 
