@@ -983,7 +983,7 @@ static int HandleBIODestroy(BIO* handle)
         (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING))
     {
       // io_uring_prep_recvmsg_multishot() is not yet submitted to io_uring, detach the handler as the engine may be gone before the NOP completes
-      DiscardFastRingDescriptor(descriptor);
+      DiscardFastRingDescriptor(descriptor, NULL);
       engine->inbound.descriptor = NULL;
       engine->count --;
     }

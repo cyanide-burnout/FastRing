@@ -226,8 +226,7 @@ void CloseSambarListener(struct SambarListener* listener)
     if (descriptor = listener->accept)
     {
       // Closing the handle does not stop the accept held by the kernel, so cancel it and close a connection it may still deliver
-      DiscardFastRingDescriptor(descriptor);
-      descriptor->function = HandleDiscardCompletion;
+      DiscardFastRingDescriptor(descriptor, HandleDiscardCompletion);
     }
 
     close(listener->handle);

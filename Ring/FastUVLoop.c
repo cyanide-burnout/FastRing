@@ -90,7 +90,7 @@ void ReleaseFastUVLoop(struct FastUVLoop* loop)
 {
   if (loop != NULL)
   {
-    DiscardFastRingDescriptor(loop->poll);
+    DiscardFastRingDescriptor(loop->poll, NULL);
     loop->poll = NULL;
 
     SetFastRingTimeout(loop->ring, loop->timeout, -1, 0, HandleTimeoutEvent, loop);

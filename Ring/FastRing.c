@@ -719,13 +719,13 @@ void ReleaseFastRing(struct FastRing* ring)
 
 // Discard
 
-void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor)
+void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor, HandleFastRingCompletionFunction function)
 {
   if (likely(descriptor != NULL))
   {
     if (unlikely(LockPendingRingDescriptor(descriptor)))
     {
-      descriptor->function = NULL;
+      descriptor->function = function;
       descriptor->closure  = NULL;
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_nop(&descriptor->submission);
@@ -735,7 +735,7 @@ void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor)
 
     if (likely(LockSubmittedRingDescriptor(descriptor)))
     {
-      descriptor->function = NULL;
+      descriptor->function = function;
       descriptor->closure  = NULL;
       io_uring_initialize_sqe(&descriptor->submission);
       io_uring_prep_cancel64(&descriptor->submission, descriptor->identifier, 0);

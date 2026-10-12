@@ -111,7 +111,7 @@ static void HandleFetchEvent(struct FetchTransmission* super, CURL* easy, int co
   }
 
 #if (LIBCURL_VERSION_NUM < 0x081000)
-  DiscardFastRingDescriptor(transmission->descriptor);
+  DiscardFastRingDescriptor(transmission->descriptor, NULL);
   transmission->descriptor = NULL;
 #endif
 

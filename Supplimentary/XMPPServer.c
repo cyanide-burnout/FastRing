@@ -601,8 +601,7 @@ static void FreeServer(struct XMPPServer* server)
   if (descriptor = server->listner)
   {
     // Closing the handle does not stop the accept held by the kernel, so cancel it and close a connection it may still deliver
-    DiscardFastRingDescriptor(descriptor);
-    descriptor->function = HandleDiscardCompletion;
+    DiscardFastRingDescriptor(descriptor, HandleDiscardCompletion);
   }
 
   SetFastRingTimeout(server->ring, server->timeout, -1, 0, NULL, NULL);

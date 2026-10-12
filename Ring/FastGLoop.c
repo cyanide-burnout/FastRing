@@ -317,7 +317,7 @@ void ReleaseFastGLoop(struct FastGLoop* loop)
       JumpToLoop(loop);
     }
 
-    DiscardFastRingDescriptor(loop->descriptor);
+    DiscardFastRingDescriptor(loop->descriptor, NULL);
     loop->descriptor = NULL;
 
     data  = loop->files;
@@ -325,7 +325,7 @@ void ReleaseFastGLoop(struct FastGLoop* loop)
 
     while (data < limit)
     {
-      DiscardFastRingDescriptor(data->descriptor);
+      DiscardFastRingDescriptor(data->descriptor, NULL);
       data->descriptor = NULL;
       data ++;
     }

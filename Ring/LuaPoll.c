@@ -97,9 +97,9 @@ static int HandleRoutineEvent(struct FastRingDescriptor* descriptor, struct io_u
   if (descriptor == context->event)    {  context->event   = NULL;  status = STATUS_AWAKE;     }
   if (descriptor == context->poll)     {  context->poll    = NULL;  status = completion->res;  }
 
-  if (descriptor = context->event)    {  descriptor->function = NULL;            context->event   = NULL;  }
-  if (descriptor = context->poll)     {  DiscardFastRingDescriptor(descriptor);  context->poll    = NULL;  }
-  if (descriptor = context->timeout)  {  DiscardFastRingDescriptor(descriptor);  context->timeout = NULL;  }
+  if (descriptor = context->event)    {  descriptor->function = NULL;                  context->event   = NULL;  }
+  if (descriptor = context->poll)     {  DiscardFastRingDescriptor(descriptor, NULL);  context->poll    = NULL;  }
+  if (descriptor = context->timeout)  {  DiscardFastRingDescriptor(descriptor, NULL);  context->timeout = NULL;  }
 
   lua_getfield(context->state, LUA_REGISTRYINDEX, "LuaPoll");
   lua_pushlightuserdata(context->state, context);
@@ -310,9 +310,9 @@ static int ReleaseLuaWorker(lua_State* state)
 
   context = (struct Context*)lua_touserdata(state, 1);
 
-  if (descriptor = context->event)    {  descriptor->function = NULL;            context->event   = NULL;  }
-  if (descriptor = context->poll)     {  DiscardFastRingDescriptor(descriptor);  context->poll    = NULL;  }
-  if (descriptor = context->timeout)  {  DiscardFastRingDescriptor(descriptor);  context->timeout = NULL;  }
+  if (descriptor = context->event)    {  descriptor->function = NULL;                  context->event   = NULL;  }
+  if (descriptor = context->poll)     {  DiscardFastRingDescriptor(descriptor, NULL);  context->poll    = NULL;  }
+  if (descriptor = context->timeout)  {  DiscardFastRingDescriptor(descriptor, NULL);  context->timeout = NULL;  }
 
   lua_getfield(state, LUA_REGISTRYINDEX, "LuaPoll");
   lua_pushlightuserdata(state, context);
@@ -340,7 +340,7 @@ static int ReleaseLuaHandler(lua_State* state)
 
   if (descriptor = context->poll)
   {
-    DiscardFastRingDescriptor(descriptor);
+    DiscardFastRingDescriptor(descriptor, NULL);
     context->poll = NULL;
   }
 

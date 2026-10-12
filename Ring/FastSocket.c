@@ -810,7 +810,7 @@ void ReleaseFastSocket(struct FastSocket* socket)
         (atomic_load_explicit(&descriptor->state, memory_order_relaxed) == RING_DESC_STATE_PENDING))
     {
       // Not submitted yet: rewritten as a NOP with the handler detached, the socket may be gone before it completes
-      DiscardFastRingDescriptor(descriptor);
+      DiscardFastRingDescriptor(descriptor, NULL);
       socket->inbound.descriptor = NULL;
       socket->count --;
     }

@@ -273,21 +273,14 @@ void ReleaseFastRing(struct FastRing* ring);
 
 // Discard
 
-// Detaches a descriptor from its owner during teardown: the handler is dropped and the operation
-// is either cancelled or, when its submission has not reached the ring yet, rewritten in place.
-// The state is claimed first -- a CAS for a submission still queued, a wait for one the submission
-// loop has already copied into the ring -- and the handler is detached under that claim, so neither
-// the submission loop nor a running completion handler observes a half-updated descriptor. A
-// descriptor that was allocated but never submitted carries nothing to cancel and is released
-// outright, as no completion will ever arrive to do it. Expects a descriptor carrying a single
-// operation, and the remaining reference is dropped by the completion.
-// Callable from any thread, but only while the descriptor is kept alive by a reference the caller
-// owns and took while the descriptor was still known to be alive -- taking the first one through a
-// pointer that may have gone stale is no better than using it. Nothing here stops a completion from
-// recycling a descriptor nobody holds. That reference is not one of those accounted here and has to
-// be dropped by the caller once the call returns. Owners that do not hold such a reference have to
-// call this from the ring thread
-void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor);
+// Detaches a descriptor from its owner during teardown. Under a claim of its state the handler is
+// replaced with function (NULL drops it) and the closure is cleared, then the operation is cancelled,
+// or rewritten as a NOP while still queued; an allocated but never submitted descriptor is released.
+// A replacement handler only destroys what a late completion still delivers, using nothing but the
+// descriptor and the completion. Expects a single operation. Off the ring thread the caller has
+// to hold a reference of its own, taken while the descriptor was known to be alive
+
+void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor, HandleFastRingCompletionFunction function);
 
 // Poll
 

@@ -394,8 +394,9 @@ stop an operation on an event; see [Reentrancy](#reentrancy).
 ### Raw descriptors: DiscardFastRingDescriptor()
 
 A module that keeps its own descriptors abandons them on teardown with
-`DiscardFastRingDescriptor()`. It claims the state the same way the submission loop does, detaches
-the handler and the closure under that claim, and then:
+`DiscardFastRingDescriptor()`. It claims the state the same way the submission loop does, replaces
+the handler with the one passed (`NULL` detaches it) and clears the closure under that claim, and
+then:
 
 - rewrites a submission that has not reached the kernel yet as `IORING_OP_NOP`, which consumes
   the reference the queued entry holds;
@@ -407,7 +408,10 @@ the handler and the closure under that claim, and then:
   will ever arrive to do it.
 
 In any other state it does nothing. After the call no completion reaches the owner, so the owner
-frees its own resources right after it, closure included. Memory the cancelled operation may still
+frees its own resources right after it, closure included. A replacement handler, set under the
+same claim, only destroys what a late completion still delivers, closing a descriptor an accept
+returns for example. The owner is gone by then, so it gets no closure and relies on nothing but
+the descriptor and the completion. Memory the cancelled operation may still
 read or write, a receive buffer for example, has to wait for the cancellation, which the owner
 does not see; such memory is owned by something that outlives the operation (a reference-counted
 `FastBuffer`, `descriptor->data`) or is freed only after `ReleaseFastRing()`.

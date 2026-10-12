@@ -134,7 +134,7 @@ void CancelFastSemaphore(struct FastRingDescriptor* descriptor)
     data->function  = NULL;
     atomic_fetch_sub_explicit(&primitive->data, (1ULL << SEM_NWAITERS_SHIFT), memory_order_relaxed);
 
-    DiscardFastRingDescriptor(descriptor);
+    DiscardFastRingDescriptor(descriptor, NULL);
   }
 }
 

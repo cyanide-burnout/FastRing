@@ -272,11 +272,12 @@ flusher meanwhile.
 ## Discard
 
 ```c
-void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor);
+void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor, HandleFastRingCompletionFunction function);
 ```
 
 Detaches a raw descriptor from its owner during teardown. It claims the descriptor the way the
-submission loop does, clears `function` and `closure` under that claim, and then rewrites a
+submission loop does, replaces the handler with `function` (`NULL` drops it) and clears `closure`
+under that claim, and then rewrites a
 submission that has not reached the kernel as `IORING_OP_NOP`, submits `IORING_OP_ASYNC_CANCEL`
 for an operation in the kernel, or releases a descriptor that was allocated and never submitted.
 In any other state it does nothing. The references of the operation are accounted inside; do not
@@ -284,6 +285,11 @@ release them.
 
 - Expects a descriptor carrying a single operation; not for event receivers, and not for a
   descriptor whose queued submission is an update of an earlier operation.
+- A replacement handler only destroys what the discard itself cannot: whatever a late completion
+  still delivers, a connection an accept returns after the release for example. It sees the NOP
+  or the cancellation, both with `RING_DESC_OPTION_IGNORE`, and the operation's own completion if
+  it arrives, and it uses nothing but the descriptor and the completion: the owner is gone, so
+  there is no closure.
 - Callable from the ring thread, or from another thread that holds a reference of its own,
   taken while the descriptor was known to be alive and dropped after the call.
 

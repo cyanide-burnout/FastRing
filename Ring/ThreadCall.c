@@ -296,7 +296,7 @@ void ReleaseThreadCall(struct ThreadCall* call, int role)
                (futex((uint32_t*)&state->result, FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, FUTEX_BITSET_MATCH_ANY) < 0));
       }
 
-      DiscardFastRingDescriptor(call->descriptor);
+      DiscardFastRingDescriptor(call->descriptor, NULL);
       RemoveFastRingRegisteredFile(call->ring, call->handle);
 
       call->descriptor = NULL;
