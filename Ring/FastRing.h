@@ -277,7 +277,8 @@ void ReleaseFastRing(struct FastRing* ring);
 // replaced with function (NULL drops it) and the closure is cleared, then the operation is cancelled,
 // or rewritten as a NOP while still queued; an allocated but never submitted descriptor is released.
 // A replacement handler only destroys what a late completion still delivers, using nothing but the
-// descriptor and the completion. Expects a single operation. Off the ring thread the caller has
+// descriptor and the completion, and returns non-zero while IORING_CQE_F_MORE says more follow,
+// as any handler does. Expects a single operation. Off the ring thread the caller has
 // to hold a reference of its own, taken while the descriptor was known to be alive
 
 void DiscardFastRingDescriptor(struct FastRingDescriptor* descriptor, HandleFastRingCompletionFunction function);

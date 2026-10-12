@@ -497,7 +497,7 @@ static int HandleDiscardCompletion(struct FastRingDescriptor* descriptor, struct
     close(completion->res);
   }
 
-  return 0;
+  return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
 static void HandleTimeout(struct FastRingDescriptor* descriptor)

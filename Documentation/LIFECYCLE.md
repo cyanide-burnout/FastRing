@@ -411,7 +411,8 @@ In any other state it does nothing. After the call no completion reaches the own
 frees its own resources right after it, closure included. A replacement handler, set under the
 same claim, only destroys what a late completion still delivers, closing a descriptor an accept
 returns for example. The owner is gone by then, so it gets no closure and relies on nothing but
-the descriptor and the completion. Memory the cancelled operation may still
+the descriptor and the completion. Its return value counts as for any handler: non-zero while
+`IORING_CQE_F_MORE` is set, or a multishot operation loses its reference early. Memory the cancelled operation may still
 read or write, a receive buffer for example, has to wait for the cancellation, which the owner
 does not see; such memory is owned by something that outlives the operation (a reference-counted
 `FastBuffer`, `descriptor->data`) or is freed only after `ReleaseFastRing()`.

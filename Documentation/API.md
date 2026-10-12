@@ -289,7 +289,8 @@ release them.
   still delivers, a connection an accept returns after the release for example. It sees the NOP
   or the cancellation, both with `RING_DESC_OPTION_IGNORE`, and the operation's own completion if
   it arrives, and it uses nothing but the descriptor and the completion: the owner is gone, so
-  there is no closure.
+  there is no closure. Like any handler it returns non-zero while `IORING_CQE_F_MORE` is set; a
+  `0` on a multishot completion would drop a reference the operation still needs.
 - Callable from the ring thread, or from another thread that holds a reference of its own,
   taken while the descriptor was known to be alive and dropped after the call.
 

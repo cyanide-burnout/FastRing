@@ -171,7 +171,7 @@ static int HandleDiscardCompletion(struct FastRingDescriptor* descriptor, struct
     close(completion->res);
   }
 
-  return 0;
+  return (completion != NULL) && (completion->flags & IORING_CQE_F_MORE);
 }
 
 struct SambarListener* OpenSambarListener(struct FastRing* ring, uint16_t port, smb2_client_connection function, void* closure)
