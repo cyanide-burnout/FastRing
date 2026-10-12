@@ -5,8 +5,8 @@ Header: `Ring/Fetch.h`
 `Fetch` drives the libcurl **multi** interface from a FastRing loop. One `struct Fetch`
 owns a `CURLM` multi handle, a `CURLSH` share handle and the ring descriptors libcurl
 asks for; each HTTP request is a `struct FetchTransmission` wrapping one `CURL` easy
-handle. There is no thread and no blocking call anywhere — sockets are polled with
-`IORING_OP_POLL_ADD` and libcurl's timer becomes a FastRing timeout.
+handle. There is no thread and no blocking call anywhere — sockets are watched with the Watch
+API and libcurl's timer becomes a FastRing timeout.
 
 That makes it useful for plain requests, but plain requests are not the point of the
 module. `Fetch` is a **multiplexer for protocols built on libcurl**: a place where an
@@ -26,8 +26,9 @@ FastRing  ->  Fetch (libcurl multi)  ->  application
                                     ->  gRPCClient  ->  application
 ```
 
-`CURLMOPT_SOCKETFUNCTION` allocates one FastRing descriptor per libcurl socket, carrying
-a one-shot `IORING_OP_POLL_ADD` that its completion handler resubmits after every event; `CURLMOPT_TIMERFUNCTION` maps onto
+`CURLMOPT_SOCKETFUNCTION` keeps one FastRing watch per libcurl socket (`AddFastRingWatch()`,
+`UpdateFastRingWatch()` for a new mask, `RemoveFastRingWatch()`), a one-shot poll re-armed after
+every event; `CURLMOPT_TIMERFUNCTION` maps onto
 `SetFastRingTimeout()`. Finished transfers are not reaped inside those callbacks —
 `curl_multi_info_read()` is drained from a flush handler armed at most once per loop
 iteration, so completion handlers run in the ring thread after CQ processing, like any
@@ -378,25 +379,23 @@ ReleaseFastRing(ring);
 `CreateFetch()` creates a multi handle and a share handle; nothing is created on the ring
 yet. Ring objects are created on demand and belong to the instance:
 
-- one poll descriptor per socket libcurl asks to watch, with the single reference set by
-  `AllocateFastRingDescriptor()`. When libcurl removes the socket (`CURL_POLL_REMOVE`), the
-  descriptor is detached from the instance: a request not yet submitted becomes a NOP, a
-  submitted one is followed by a `POLL_REMOVE`, and the completions return it to the ring. A
-  new mask is written into a request not yet submitted or into one whose completion is running;
-  a submitted one is detached the same way and replaced by a new descriptor;
+- one watch per socket libcurl asks to watch. A new mask updates it, and `CURL_POLL_REMOVE`
+  removes it; both are safe from the socket's own event, and the Watch API returns the
+  descriptor to the ring once the kernel lets go of the poll. A failed poll is reported to
+  libcurl as an error, so it closes the connection instead of the watch repeating the failure;
 - one timeout for libcurl's timer, without `TIMEOUT_FLAG_OWNED`: a timeout that fires is
   released by its own completion, a new value updates it, and `-1` removes it;
 - at most one flush handler, armed after socket and timer events and by
   `TouchFetchTransmission()`, which reads finished transfers and calls their handlers.
 
 A transmission is freed in one place, right after its handler returns: in the flush
-handler, in `CancelFetchTransmission()`, or in `ReleaseFetch()`. Socket polls go away when
-libcurl removes its sockets while handles are removed and connections closed; a detach
+handler, in `CancelFetchTransmission()`, or in `ReleaseFetch()`. Socket watches go away when
+libcurl removes its sockets while handles are removed and connections closed; a removal
 queued during `ReleaseFetch()` reaches the kernel on the next `WaitForFastRing()`, or is
 dropped by `ReleaseFastRing()`.
 
-Call `ReleaseFetch()` before `ReleaseFastRing()`. If the ring is released first, the poll and
-flush handlers receive `RING_REASON_RELEASED` and return without touching the instance, no
+Call `ReleaseFetch()` before `ReleaseFastRing()`. If the ring is released first, the watches
+call nothing, the flush handler receives `RING_REASON_RELEASED` and returns without touching the instance, no
 transmission handler is called, and the instance keeps pointers to the freed timeout and
 flush handler: `ReleaseFetch()` must not be called afterwards, and the transmissions leak.
 
