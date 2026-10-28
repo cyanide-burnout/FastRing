@@ -25,6 +25,7 @@ library has to be installed first.
 | `SMBClient` | `smbpipeecho` | `SambarAdapter` named pipe client | `libsmb2`, `krb5` |
 | `SMBServer` | `smbserver` | `SambarAdapter` SMB2 server | `libsmb2`, `krb5` |
 | `SSL` | `ssltest` | `FastBIO` + `SSLSocket` + `Resolver` | `openssl`, `c-ares` |
+| `TurboVision` | `turbotest` | `TurboRing`: Turbo Vision on the ring | `ncursesw`, Turbo Vision source tree |
 | `gRPCClient` | `grpctest` | `gRPCClient` + `ProtoBuf` over `Fetch` | `libcurl`, `protobuf-c` |
 | `gRPCServer` | `grpctest` | `gRPCServer` + `ProtoBuf` over `H2OCore` | `libuv`, `openssl`, `protobuf-c`, patched H2O |
 
@@ -86,3 +87,17 @@ grpcurl -vv -plaintext -proto gRPCTest.proto -import-path . -d '{"text":"one"}' 
 
 `gRPCClient` additionally ships `gRPCTest.py` as a reference implementation of the
 same calls against the Python gRPC stack.
+
+### TurboVision
+
+`TurboTest.cpp` counts the ticks of a repeating ring timeout in a window; F2 opens a message box
+and the ticks go on under it. The `Makefile` expects a Turbo Vision source tree at
+`../../../tvision` (`LOCAL_TVISION_PATH`) and builds it with CMake when `build/libtvision.a` is
+missing:
+
+```bash
+git clone https://github.com/magiblot/tvision.git
+make -C Examples/TurboVision LOCAL_TVISION_PATH=$PWD/tvision
+```
+
+See [Documentation/TurboRing.md](../Documentation/TurboRing.md).

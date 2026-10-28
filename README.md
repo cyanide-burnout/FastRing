@@ -451,6 +451,7 @@ Each module has a document with its API and its lifecycle.
 | [`LuaPoll`](Documentation/LuaPoll.md) | Lua and LuaJIT bindings |
 | [`FastGLoop`](Documentation/FastGLoop.md) | GLib main loop on the ring |
 | [`FastUVLoop`](Documentation/FastUVLoop.md) | libuv loop on the ring |
+| [`TurboRing`](Documentation/TurboRing.md) | Turbo Vision application on the ring |
 | [`SambarAdapter`](Documentation/SambarAdapter.md) | libsmb2 (SMB2) adapter; experimental |
 
 ### Supplementary (`Supplimentary/`)
@@ -488,6 +489,7 @@ make -C Examples/Fetch
 | `Examples/gRPCClient`, `Examples/gRPCServer` | `gRPCClient` and `gRPCServer` |
 | `Examples/H2H3Server` | `H2OCore`, `FastUVLoop` and `PicoBundle`: HTTP/2 and HTTP/3 |
 | `Examples/SMBClient`, `Examples/SMBServer` | `SambarAdapter` |
+| `Examples/TurboVision` | `TurboRing`: a Turbo Vision application fed by a ring timeout |
 
 [Examples/README.md](Examples/README.md) lists what each one needs and how to run it.
 
