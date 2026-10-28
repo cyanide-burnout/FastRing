@@ -11,6 +11,11 @@
 
 #include "FastRing.h"
 
+namespace tvision
+{
+  class EventSource;
+}
+
 // Turbo Vision application on FastRing: the ring loop stays the main loop, run() goes on a fiber of its own.
 // The fiber is resumed when a descriptor Turbo Vision waits for gets readable, when its wait times out or on touch()
 
@@ -44,9 +49,11 @@ class TurboRing : public TApplication
     void arm();
     void cancel();
     void wait(int interval);
+    void hide(bool hidden);
     void schedule();
     int getTimeout();
 
+    static void mark(tvision::EventSource* source);
     static void runFiber();
     static void handleFlush(void* closure, int reason);
     static void handleTimeout(struct FastRingDescriptor* descriptor);

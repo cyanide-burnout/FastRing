@@ -23,9 +23,14 @@ Turbo Vision insists on owning the wait: `TProgram::run()` loops over `getEvent(
     and the timers of `setTimer()`, or less when a frame is held back by its frame rate limit.
 - A completion of any of them, or `touch()`, arms a flush handler that switches into the fiber.
   `getEvent()` looks for events again and returns the first one, or waits once more.
+- Which sources are readable is told by the polls, not by `select()` of Turbo Vision: a completed
+  poll marks its source ready in the `EventWaiter` the way `select()` would, and a readable source
+  with nothing to read leaves it, as there. While Turbo Vision looks for events on the fiber, the
+  handles its `select()` would look at are replaced by `FD_SETSIZE`, which it skips, so no `select()`
+  is made at all and sources on descriptors past `FD_SETSIZE` work as the others.
 
 Both sides run on the ring thread and no locking is needed between them. Turbo Vision keeps its
-event sources, its display buffer and its wait interval private; `TurboRing` reads them through
+event sources, their poll states, its display buffer and its wait interval private; `TurboRing` reads them through
 explicit template instantiations, which the rules of access do not apply to. It needs the internal
 headers of Turbo Vision, so `TurboRing.cpp` is compiled with `-I<tvision>/include/tvision` in
 addition to `-I<tvision>/include`, and must be built against the very Turbo Vision it links with.
@@ -107,7 +112,8 @@ ReleaseFastRing(ring);
   value of `0` set there is not.
 - Ring callbacks run outside the fiber. They may change views and call `drawView()`, and then
   `touch()`; they must not open modal views. A `getEvent()` outside the fiber falls back to the
-  wait of Turbo Vision itself and stalls the ring until it returns.
+  wait of Turbo Vision itself and stalls the ring until it returns; there `select()` sees the real
+  handles again, and those past `FD_SETSIZE` are not seen.
 - Other threads reach the application with `TEventQueue::wakeUp()` as before, since its pipe is
   one of the polled descriptors, or with [`ThreadCall`](ThreadCall.md) and `touch()`.
 - Turbo Vision code on the fiber may submit descriptors and arm timeouts, but must not call

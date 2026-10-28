@@ -5,12 +5,16 @@
 #include <poll.h>
 #include <errno.h>
 #include <malloc.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/resource.h>
 
 #include <algorithm>
 
 #define FIBER_APPLICATION  0
 #define FIBER_RING         1
+
+#define HIDDEN_HANDLE      FD_SETSIZE  // select() of Turbo Vision skips handles from FD_SETSIZE on
 
 namespace
 {
@@ -27,11 +31,13 @@ namespace
   struct WaiterMember    { typedef tvision::EventWaiter tvision::Platform::*Type;                  friend Type Fetch(WaiterMember);    };
   struct DisplayMember   { typedef tvision::DisplayBuffer tvision::Platform::*Type;                friend Type Fetch(DisplayMember);   };
   struct SourcesMember   { typedef std::vector<tvision::EventSource*> tvision::EventWaiter::*Type; friend Type Fetch(SourcesMember);   };
+  struct PollMember      { typedef tvision::PollData tvision::EventWaiter::*Type;                  friend Type Fetch(PollMember);      };
   struct TimeoutFunction { typedef int (*Type)();                                                  friend Type Fetch(TimeoutFunction); };
 
   template struct Expose<WaiterMember,    &tvision::Platform::waiter>;
   template struct Expose<DisplayMember,   &tvision::Platform::displayBuf>;
   template struct Expose<SourcesMember,   &tvision::EventWaiter::sources>;
+  template struct Expose<PollMember,      &tvision::EventWaiter::pd>;
   template struct Expose<TimeoutFunction, &TProgram::eventWaitTimeout>;
 }
 
@@ -66,11 +72,14 @@ void TurboRing::getEvent(TEvent& event)
 
   for ( ; ; )
   {
-    // Turbo Vision only looks for events, waiting is the business of the ring; idle() may set another timeout meanwhile
+    // Turbo Vision only looks for events, waiting is the business of the ring; idle() may set another timeout meanwhile.
+    // Sources the polls of the ring have found readable are marked ready already, select() gets no handle to look at
     int interval = eventTimeoutMs;
 
     eventTimeoutMs = 0;
+    hide(true);
     TApplication::getEvent(event);
+    hide(false);
     eventTimeoutMs = (eventTimeoutMs != 0) ? eventTimeoutMs : interval;
 
     if ((event.what != evNothing) ||
@@ -182,6 +191,7 @@ void TurboRing::arm()
     if (descriptor = AllocateFastRingDescriptor(ring, handleCompletion, this))
     {
       // Turbo Vision selects for reading only
+      descriptor->data.pointer = source;
       io_uring_prep_poll_add(&descriptor->submission, source->handle, POLLIN);
       SubmitFastRingDescriptor(descriptor, 0);
       polls.push_back(descriptor);
@@ -216,6 +226,20 @@ void TurboRing::cancel()
   }
 
   polls.clear();
+}
+
+void TurboRing::hide(bool hidden)
+{
+  tvision::Platform& platform = tvision::Platform::getInstance();
+  tvision::EventWaiter& waiter = platform.*Fetch(WaiterMember());
+  tvision::PollData& data = waiter.*Fetch(PollMember());
+  std::vector<tvision::EventSource*>& sources = waiter.*Fetch(SourcesMember());
+
+  for (size_t index = 0; index < sources.size(); ++ index)
+  {
+    // The handles select() looks at, a source keeps its own; a source added meanwhile gets its handle back with the rest
+    data.handles[index] = hidden ? HIDDEN_HANDLE : sources[index]->handle;
+  }
 }
 
 void TurboRing::schedule()
@@ -283,16 +307,40 @@ void TurboRing::handleTimeout(struct FastRingDescriptor* descriptor)
   self->schedule();
 }
 
+void TurboRing::mark(tvision::EventSource* source)
+{
+  tvision::Platform& platform = tvision::Platform::getInstance();
+  tvision::EventWaiter& waiter = platform.*Fetch(WaiterMember());
+  tvision::PollData& data = waiter.*Fetch(PollMember());
+  std::vector<tvision::EventSource*>& sources = waiter.*Fetch(SourcesMember());
+  size_t index = std::find(sources.begin(), sources.end(), source) - sources.begin();
+  int length;
+
+  if (index < sources.size())
+  {
+    // What select() of Turbo Vision would have found: a readable source with nothing to read is gone and leaves the waiter
+    if ((ioctl(source->handle, FIONREAD, &length) == -1) || (length == 0)) waiter.removeSource(*source);
+    else                                                                   data.states[index] = tvision::psReady;
+  }
+}
+
 int TurboRing::handleCompletion(struct FastRingDescriptor* descriptor, struct io_uring_cqe* completion, int reason)
 {
   TurboRing* self;
 
-  if ((completion      != nullptr) &&
+  if ((completion      != nullptr)    &&
       (completion->res != -ECANCELED) &&
       (self             = static_cast<TurboRing*>(descriptor->closure)))
   {
-    // Readable, the poll is done and its descriptor goes with the return
+    // The poll is done and its descriptor goes with the return
     self->polls.erase(std::remove(self->polls.begin(), self->polls.end(), descriptor), self->polls.end());
+
+    if (completion->res >= 0)
+    {
+      // Readable or hung up
+      mark(static_cast<tvision::EventSource*>(descriptor->data.pointer));
+    }
+
     self->schedule();
   }
 
