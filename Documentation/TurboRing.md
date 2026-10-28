@@ -26,8 +26,8 @@ Turbo Vision insists on owning the wait: `TProgram::run()` loops over `getEvent(
 - Which sources are readable is told by the polls, not by `select()` of Turbo Vision: a completed
   poll marks its source ready in the `EventWaiter` the way `select()` would, and a readable source
   with nothing to read leaves it, as there. While Turbo Vision looks for events on the fiber, the
-  handles its `select()` would look at are replaced by `FD_SETSIZE`, which it skips, so no `select()`
-  is made at all and sources on descriptors past `FD_SETSIZE` work as the others.
+  handles its `select()` would look at get a high bit set, which puts them past `FD_SETSIZE` where it
+  skips them, so no `select()` is made at all and sources on descriptors past `FD_SETSIZE` work as the others.
 
 Both sides run on the ring thread and no locking is needed between them. Turbo Vision keeps its
 event sources, their poll states, its display buffer and its wait interval private; `TurboRing` reads them through

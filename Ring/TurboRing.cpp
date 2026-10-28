@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <malloc.h>
 #include <sys/ioctl.h>
-#include <sys/select.h>
 #include <sys/resource.h>
 
 #include <algorithm>
@@ -14,7 +13,7 @@
 #define FIBER_APPLICATION  0
 #define FIBER_RING         1
 
-#define HIDDEN_HANDLE      FD_SETSIZE  // select() of Turbo Vision skips handles from FD_SETSIZE on
+#define HIDDEN_HANDLE      (1 << 30)   // A bit no descriptor number has, select() of Turbo Vision skips handles from FD_SETSIZE on
 
 namespace
 {
@@ -233,12 +232,11 @@ void TurboRing::hide(bool hidden)
   tvision::Platform& platform = tvision::Platform::getInstance();
   tvision::EventWaiter& waiter = platform.*Fetch(WaiterMember());
   tvision::PollData& data = waiter.*Fetch(PollMember());
-  std::vector<tvision::EventSource*>& sources = waiter.*Fetch(SourcesMember());
 
-  for (size_t index = 0; index < sources.size(); ++ index)
+  for (tvision::SysHandle& handle : data.handles)
   {
-    // The handles select() looks at, a source keeps its own; a source added meanwhile gets its handle back with the rest
-    data.handles[index] = hidden ? HIDDEN_HANDLE : sources[index]->handle;
+    // The handles select() looks at get the number back without the bit, a source added meanwhile has none to clear
+    handle = (hidden * HIDDEN_HANDLE) | (handle & ~HIDDEN_HANDLE);
   }
 }
 
